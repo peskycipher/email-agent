@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import type { MailboxMessage } from "../src/adapter.ts";
 import { JevSystem1Classifier } from "../src/classify/system1.ts";
 
-function createMessage(subject: string): MailboxMessage {
+function createMessage(subject: string, body?: string): MailboxMessage {
   return {
     id: "msg-1",
     from: "alice@example.com",
@@ -12,7 +12,8 @@ function createMessage(subject: string): MailboxMessage {
     date: "2026-01-01T00:00:00.000Z",
     unread: true,
     flagged: false,
-    categories: []
+    categories: [],
+    ...(body === undefined ? {} : { body })
   };
 }
 
@@ -49,7 +50,7 @@ test("JevSystem1Classifier sends locked System1 request shape", async () => {
     }
   });
 
-  const result = await classifier.classify(createMessage("Invoice approval required"));
+  const result = await classifier.classify(createMessage("Invoice approval required", "Please approve the attached invoice by Friday."));
 
   assert.equal(capturedUrl, "https://api.typesafe.ai/v1/systemone");
   assert.equal(capturedInit?.method, "POST");
@@ -69,7 +70,8 @@ test("JevSystem1Classifier sends locked System1 request shape", async () => {
     received_at: "2026-01-01T00:00:00.000Z",
     unread: true,
     flagged: false,
-    existing_categories: []
+    existing_categories: [],
+    body: "Please approve the attached invoice by Friday."
   });
   assert.equal(body.questions.email_category.type, "choice");
   assert.equal(
@@ -124,6 +126,30 @@ test("JevSystem1Classifier parses category/confidence and honors TYPESAFE_API_UR
     process.env.TYPESAFE_API_URL = previousUrl;
     process.env.TYPESAFE_API_KEY = previousKey;
   }
+});
+
+test("JevSystem1Classifier omits the body field as null when the message has no body", async () => {
+  let capturedInit: RequestInit | undefined;
+
+  const classifier = new JevSystem1Classifier({
+    apiKey: "test-key",
+    fetchFn: async (_input, init) => {
+      capturedInit = init;
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            answers: { email_category: { choice: "FYI/Reference", confidence: 0.8, probabilities: { "FYI/Reference": 0.8 } } }
+          })
+      } as Response;
+    }
+  });
+
+  await classifier.classify(createMessage("Status update"));
+
+  const body = JSON.parse(String(capturedInit?.body));
+  assert.equal(body.state.body, null);
 });
 
 test("JevSystem1Classifier retries once on 429 and succeeds", async () => {

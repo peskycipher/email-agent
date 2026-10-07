@@ -156,7 +156,7 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
       category: "Bulk/Archive",
       rationale: {
         policy: [],
-        rule: ["keyword rule: newsletter/unsubscribe/digest"],
+        rule: ["keyword rule: newsletter/unsubscribe/digest (subject)"],
         model: []
       }
     },
@@ -167,7 +167,7 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
       category: "Action Needed",
       rationale: {
         policy: [],
-        rule: ["keyword rule: invoice/approval/urgent"],
+        rule: ["keyword rule: invoice/approval/urgent (subject)"],
         model: []
       }
     }

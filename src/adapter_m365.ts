@@ -6,6 +6,14 @@ export type M365MailboxAdapterConfig = {
   clientId: string;
   clientSecret: string;
   account: string;
+  /**
+   * `preview` (default) asks Graph for bodyPreview — plain text, light payload.
+   * `full` asks Graph for body, which can be HTML and counts toward the message-size
+   * budget for large mailboxes.
+   */
+  bodyMode?: "preview" | "full";
+  /** Truncation cap (characters) applied to the body before classification. */
+  bodyMaxChars?: number;
 };
 
 type M365Message = {
@@ -14,6 +22,8 @@ type M365Message = {
   receivedDateTime?: string;
   isRead?: boolean;
   categories?: unknown;
+  bodyPreview?: string;
+  body?: { content?: string };
   flag?: {
     flagStatus?: string;
   };
@@ -69,7 +79,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
     const requestUrl = new URL(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(this.config.account)}/mailFolders/inbox/messages`);
     requestUrl.searchParams.set("$top", String(limit));
     requestUrl.searchParams.set("$orderby", "receivedDateTime DESC");
-    requestUrl.searchParams.set("$select", "id,from,subject,receivedDateTime,isRead,flag,categories");
+    requestUrl.searchParams.set("$select", `id,from,subject,receivedDateTime,isRead,flag,categories,${this.bodyField()}`);
 
     const headers = {
       authorization: `Bearer ${token}`,
@@ -108,7 +118,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
     const token = await this.getAccessToken();
     const encodedAccount = encodeURIComponent(this.config.account);
     const encodedMessageId = encodeURIComponent(messageId);
-    const url = `https://graph.microsoft.com/v1.0/users/${encodedAccount}/messages/${encodedMessageId}?$select=subject,from,flag,isRead`;
+    const url = `https://graph.microsoft.com/v1.0/users/${encodedAccount}/messages/${encodedMessageId}?$select=subject,from,flag,isRead,${this.bodyField()}`;
 
     const response = await this.fetchFn(url, {
       headers: {
@@ -133,7 +143,8 @@ export class M365MailboxAdapter implements MailboxAdapter {
       from: mapped.from,
       subject: mapped.subject,
       flagged: mapped.flagged,
-      unread: mapped.unread
+      unread: mapped.unread,
+      body: mapped.body
     };
   }
 
@@ -218,7 +229,43 @@ export class M365MailboxAdapter implements MailboxAdapter {
       date: item.receivedDateTime ?? "",
       unread: item.isRead === false,
       flagged: item.flag?.flagStatus === "flagged",
-      categories: Array.isArray(item.categories) ? item.categories.filter((value): value is string => typeof value === "string") : []
+      categories: Array.isArray(item.categories) ? item.categories.filter((value): value is string => typeof value === "string") : [],
+      body: this.truncateBody(extractBody(item, this.bodyMode()))
     };
   }
+
+  private bodyField(): string {
+    return this.bodyMode() === "full" ? "body" : "bodyPreview";
+  }
+
+  private bodyMode(): "preview" | "full" {
+    return this.config.bodyMode ?? "preview";
+  }
+
+  private truncateBody(value: string): string {
+    const max = this.config.bodyMaxChars ?? 4000;
+    return value.length <= max ? value : value.slice(0, max);
+  }
+}
+
+function extractBody(item: M365Message, mode: "preview" | "full"): string {
+  if (mode === "full" && item.body && typeof item.body.content === "string") {
+    return stripHtml(item.body.content);
+  }
+  return item.bodyPreview ?? "";
+}
+
+// ponytail: regex tag-stripping handles ordinary HTML mail; nested/malformed markup and
+// exotic entities may leak through — swap in a real parser if bodies get adversarial.
+function stripHtml(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }

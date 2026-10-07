@@ -2,7 +2,7 @@ import type { MailboxMessage } from "../adapter.ts";
 import { DEFAULT_CONFIDENCE_THRESHOLD } from "../config.ts";
 import { EMAIL_CATEGORIES, type EmailCategory } from "./categories.ts";
 import type { SecondPassClassifier } from "./ollama.ts";
-import { KEYWORD_RULES, findKeywordRuleMatch } from "./rules.ts";
+import { KEYWORD_RULES, findKeywordRuleMatchInMessage } from "./rules.ts";
 import { KeywordSystem1Fallback, type ClassifierSystem1, type System1Classification } from "./system1.ts";
 
 export type RationaleTrace = {
@@ -35,8 +35,8 @@ function classifyByRules(message: MailboxMessage): { category: EmailCategory; ra
     }
   }
 
-  const match = findKeywordRuleMatch(
-    message.subject,
+  const match = findKeywordRuleMatchInMessage(
+    { subject: message.subject, ...(message.body === undefined ? {} : { body: message.body }) },
     KEYWORD_RULES.filter((rule) => rule.appliesToPipeline)
   );
   if (!match) {
@@ -45,7 +45,7 @@ function classifyByRules(message: MailboxMessage): { category: EmailCategory; ra
 
   return {
     category: match.rule.category,
-    rationale: match.rule.pipelineRationale
+    rationale: `${match.rule.pipelineRationale} (${match.field})`
   };
 }
 

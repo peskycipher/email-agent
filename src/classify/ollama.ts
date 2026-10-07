@@ -64,6 +64,7 @@ function toPrompt(message: MailboxMessage): string {
     "Respond as compact JSON with keys category and rationale.",
     `From: ${message.from}`,
     `Subject: ${message.subject}`,
+    ...(message.body ? [`Body: ${message.body}`] : []),
     `Date: ${message.date}`,
     `Unread: ${message.unread}`,
     `Flagged: ${message.flagged}`

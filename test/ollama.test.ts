@@ -6,6 +6,7 @@ import type { MailboxMessage } from "../src/adapter.ts";
 
 test("OllamaCloudClassifier uses locked primary model and falls back to backup model on API failure", async () => {
   const calledModels: string[] = [];
+  const prompts: string[] = [];
 
   const responses = [
     {
@@ -37,6 +38,7 @@ test("OllamaCloudClassifier uses locked primary model and falls back to backup m
     fetchFn: async (_input, init) => {
       const body = JSON.parse(String(init?.body ?? "{}"));
       calledModels.push(body.model);
+      prompts.push(String(body.messages?.[0]?.content ?? ""));
       const response = responses.shift();
       if (!response) {
         throw new Error("unexpected request");
@@ -52,7 +54,8 @@ test("OllamaCloudClassifier uses locked primary model and falls back to backup m
     date: "2026-01-01T00:00:00.000Z",
     unread: true,
     flagged: false,
-    categories: []
+    categories: [],
+    body: "Could you send the delivery address for order A-104?"
   };
 
   const result = await classifier.classify(message);
@@ -60,4 +63,6 @@ test("OllamaCloudClassifier uses locked primary model and falls back to backup m
   assert.deepEqual(calledModels, ["deepseek-4.1-flash", "glm-5.3-flash"]);
   assert.equal(result.category, "FYI/Reference");
   assert.equal(result.model, "glm-5.3-flash");
+  // The body reaches the model when the adapter provides it.
+  assert.match(prompts[0], /Could you send the delivery address for order A-104\?/);
 });

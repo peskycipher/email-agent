@@ -28,10 +28,17 @@ in [`docs/adr/`](docs/adr/).
   fifth value, never none.
 - **Classification pipeline** — the ordered decision sequence:
   1. **No-touch protection** (hard rules, always first — see below)
-  2. **Deterministic rules** (existing mailbox categories, subject keywords)
+  2. **Deterministic rules** (existing mailbox categories, subject keywords, then
+     body keywords when the subject has no match)
   3. **System1 pass** — the first model pass (JEV System1)
   4. **Second pass** — Ollama Cloud, only for items the first pass returned with
      confidence below the configured threshold
+- **Body inclusion** — the adapter may supply a plain-text message body
+  (`body`), which the classifier evaluates: the JEV state carries it, the
+  second-pass prompt carries it, and keyword rules fall back to it when the
+  subject has no match. The body is truncated by the adapter (`bodyMaxChars`,
+  default 4000) and is **not** consulted by no-touch protection, so a body alone
+  never protects or unprotects a message.
 - **Rationale trace** — the structured why (`policy` / `rule` / `model` entries)
   recorded for every classification; flattened into the audit log's `rationale`.
 

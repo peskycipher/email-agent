@@ -30,7 +30,7 @@ Each step only handles what the earlier ones left unresolved. Model output never
    - messages from the last 7 days (configurable, boundary inclusive)
    - messages whose subject contains a finance or legal keyword (case-insensitive substring)
    - messages with an unparseable date (fails closed)
-2. **Deterministic rules** (existing mailbox categories, subject keywords).
+2. **Deterministic rules** (existing mailbox categories, subject keywords, then body keywords when the subject has no match).
 3. **JEV System1** first pass: a cheap, high-throughput model call that returns a category and a confidence.
 4. **Ollama Cloud** second pass, only for low-confidence items: `deepseek-4.1-flash`, falling back to `glm-5.3-flash` if the call fails. If System1 itself is unavailable, a local keyword classifier takes its place and still escalates uncertain items. If both Ollama models fail, the item keeps its System1 category and the failure is recorded in its rationale trace.
 
@@ -149,6 +149,8 @@ A ready-to-copy version ships as `config.example.json` in the repo root.
 | `data_dir` | `DATA_DIR` | `./data` | Where plans, runs, and sign-offs are stored. |
 | `audit_log_path` | `AUDIT_LOG_PATH` | `./data/audit.jsonl` | Append-only audit log. |
 | `m365_tenant_id`, `m365_client_id`, `m365_client_secret` | `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` | none | Graph credentials. |
+
+> **Body inclusion** is configured on the M365 adapter itself (`bodyMode`: `"preview"` (default) or `"full"` for the HTML body with tags stripped; `bodyMaxChars`: default `4000`). See [ADR-0004](docs/adr/0004-email-body-in-classification.md).
 | `vip_senders` | `VIP_SENDERS` | empty | Comma-separated in the environment. Always protected. |
 | `finance_legal_keywords` | `FINANCE_LEGAL_KEYWORDS` | empty | Comma-separated in the environment. Subject matches are protected. |
 | `recent_days` | `RECENT_DAYS` | `7` | Messages this recent are protected. |
@@ -224,7 +226,7 @@ test/                behavior tests
 
 ## Known limits
 
-- **Subject and sender only.** The mailbox contract carries no message body, so classification and finance/legal keyword matching read the subject and sender. Adding a body field is a change at the adapter seam.
+- **Body inclusion is opt-in per adapter.** The M365 adapter supplies a plain-text body: `bodyPreview` by default, or the full HTML body (tags stripped) with `bodyMode: "full"`. Bodies are truncated to `bodyMaxChars` (default 4000) before classification. Finance/legal keyword *protection* still matches the subject only (per spec), so a protected-topic body alone does not protect a message.
 - **Stubbed integrations.** The Graph, JEV System1, and Ollama Cloud clients are covered by stubbed tests. A real run needs live credentials.
 - **Microsoft 365 only.** The adapter contract is provider-neutral so Gmail can follow, but only M365 is implemented.
 

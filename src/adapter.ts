@@ -6,6 +6,8 @@ export type MailboxMessage = {
   unread: boolean;
   flagged: boolean;
   categories: string[];
+  /** Plain-text body, included for classification when available; truncated by the adapter. */
+  body?: string;
 };
 
 export type MailboxMessageState = {
@@ -14,6 +16,7 @@ export type MailboxMessageState = {
   subject: string;
   flagged: boolean;
   unread: boolean;
+  body?: string;
 };
 
 export type MailboxAction = "classify" | "archive";

@@ -76,3 +76,26 @@ export function findKeywordRuleMatch(
 
   return undefined;
 }
+
+/**
+ * Match keyword rules against the subject first, then the body when the subject has
+ * no match. Returns which field matched so rationale traces stay honest.
+ */
+export function findKeywordRuleMatchInMessage(
+  message: { subject: string; body?: string },
+  rules: KeywordRule[] = KEYWORD_RULES
+): { rule: KeywordRule; keyword: string; field: "subject" | "body" } | undefined {
+  const subjectMatch = findKeywordRuleMatch(message.subject, rules);
+  if (subjectMatch) {
+    return { ...subjectMatch, field: "subject" };
+  }
+
+  if (message.body) {
+    const bodyMatch = findKeywordRuleMatch(message.body, rules);
+    if (bodyMatch) {
+      return { ...bodyMatch, field: "body" };
+    }
+  }
+
+  return undefined;
+}

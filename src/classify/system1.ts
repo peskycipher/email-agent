@@ -36,7 +36,8 @@ function toClassificationRequest(message: MailboxMessage, model: string): Record
       received_at: message.date,
       unread: message.unread,
       flagged: message.flagged,
-      existing_categories: message.categories
+      existing_categories: message.categories,
+      body: message.body ?? null
     },
     questions: {
       email_category: {
@@ -147,7 +148,8 @@ export class KeywordSystem1Fallback implements ClassifierSystem1 {
   async classify(message: MailboxMessage): Promise<System1Classification> {
     const subject = message.subject.trim();
 
-    const match = findKeywordRuleMatch(subject, KEYWORD_RULES);
+    // Subject first, then body: the fallback stays deterministic and never guesses from nothing.
+    const match = findKeywordRuleMatch(subject, KEYWORD_RULES) ?? (message.body ? findKeywordRuleMatch(message.body, KEYWORD_RULES) : undefined);
     if (match) {
       return {
         category: match.rule.category,

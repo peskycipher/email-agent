@@ -28,6 +28,7 @@ test("M365MailboxAdapter authenticates and lists inbox mail with stable ids", as
               isRead: false,
               categories: ["Blue"],
               flag: { flagStatus: "flagged" },
+              bodyPreview: "Body preview text for classification",
               from: { emailAddress: { address: "vip@example.com" } }
             }
           ]
@@ -73,6 +74,8 @@ test("M365MailboxAdapter authenticates and lists inbox mail with stable ids", as
   assert.equal(messages[0].unread, true);
   assert.equal(messages[0].flagged, true);
   assert.deepEqual(messages[0].categories, ["Blue"]);
+  assert.equal(messages[0].body, "Body preview text for classification");
+  assert.match(String(calls[1].input), /bodyPreview/);
 });
 
 test("M365MailboxAdapter fetches one message by id for apply-time no-touch checks", async () => {
@@ -95,6 +98,7 @@ test("M365MailboxAdapter fetches one message by id for apply-time no-touch check
         subject: "Follow-up",
         isRead: false,
         flag: { flagStatus: "flagged" },
+        bodyPreview: "Follow-up body text",
         from: { emailAddress: { address: "owner@example.com" } }
       }),
       {
@@ -117,14 +121,101 @@ test("M365MailboxAdapter fetches one message by id for apply-time no-touch check
   const message = await adapter.getMessage("immutable-7");
 
   assert.equal(calls.length, 2);
-  assert.match(String(calls[1].input), /\/messages\/immutable-7\?\$select=subject,from,flag,isRead$/);
+  assert.match(String(calls[1].input), /\/messages\/immutable-7\?\$select=subject,from,flag,isRead,bodyPreview$/);
   const headers = new Headers(calls[1].init?.headers);
   assert.equal(headers.get("prefer"), 'IdType="ImmutableId"');
   assert.equal(message.id, "immutable-7");
   assert.equal(message.from, "owner@example.com");
   assert.equal(message.subject, "Follow-up");
-  assert.equal(message.flagged, true);
   assert.equal(message.unread, true);
+  assert.equal(message.flagged, true);
+  assert.equal(message.body, "Follow-up body text");
+});
+
+test("M365MailboxAdapter requests and truncates the body for classification", async () => {
+  const graphUrls: string[] = [];
+  const longPreview = "x".repeat(50);
+
+  const fetchFn = async (input: unknown): Promise<Response> => {
+    const url = String(input);
+    if (url.includes("login.microsoftonline.com")) {
+      return new Response(JSON.stringify({ access_token: "token-1" }), { status: 200 });
+    }
+    graphUrls.push(url);
+    return new Response(
+      JSON.stringify({
+        value: [
+          {
+            id: "immutable-9",
+            subject: "Hi",
+            receivedDateTime: "2026-01-01T00:00:00.000Z",
+            isRead: true,
+            categories: [],
+            bodyPreview: longPreview,
+            from: { emailAddress: { address: "a@example.com" } }
+          }
+        ]
+      }),
+      { status: 200 }
+    );
+  };
+
+  const adapter = new M365MailboxAdapter(
+    {
+      tenantId: "t",
+      clientId: "c",
+      clientSecret: "s",
+      account: "pilot@example.com",
+      bodyMaxChars: 10
+    },
+    fetchFn
+  );
+
+  const messages = await adapter.listRecentInbox(1);
+
+  assert.match(graphUrls[0], /bodyPreview/);
+  assert.equal(messages[0].body, "x".repeat(10)); // truncated to bodyMaxChars
+});
+
+test("M365MailboxAdapter strips HTML when body mode is full", async () => {
+  const fetchFn = async (input: unknown): Promise<Response> => {
+    const url = String(input);
+    if (url.includes("login.microsoftonline.com")) {
+      return new Response(JSON.stringify({ access_token: "token-1" }), { status: 200 });
+    }
+    return new Response(
+      JSON.stringify({
+        value: [
+          {
+            id: "immutable-10",
+            subject: "Hi",
+            receivedDateTime: "2026-01-01T00:00:00.000Z",
+            isRead: true,
+            categories: [],
+            body: { content: "<p>Hello <b>there</b></p>" },
+            from: { emailAddress: { address: "a@example.com" } }
+          }
+        ]
+      }),
+      { status: 200 }
+    );
+  };
+
+  const adapter = new M365MailboxAdapter(
+    {
+      tenantId: "t",
+      clientId: "c",
+      clientSecret: "s",
+      account: "pilot@example.com",
+      bodyMode: "full",
+      bodyMaxChars: 4000
+    },
+    fetchFn
+  );
+
+  const messages = await adapter.listRecentInbox(1);
+
+  assert.equal(messages[0].body, "Hello there");
 });
 
 test("M365MailboxAdapter follows @odata.nextLink until exhausted", async () => {

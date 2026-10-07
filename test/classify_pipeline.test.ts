@@ -6,7 +6,7 @@ import { classifyMessagesForDryRun } from "../src/classify/pipeline.ts";
 import type { SecondPassClassifier } from "../src/classify/ollama.ts";
 import type { ClassifierSystem1 } from "../src/classify/system1.ts";
 
-function createMessage(id: string, subject: string): MailboxMessage {
+function createMessage(id: string, subject: string, body?: string): MailboxMessage {
   return {
     id,
     from: "sender@example.com",
@@ -14,7 +14,8 @@ function createMessage(id: string, subject: string): MailboxMessage {
     date: "2026-01-01T00:00:00.000Z",
     unread: true,
     flagged: false,
-    categories: []
+    categories: [],
+    ...(body === undefined ? {} : { body })
   };
 }
 
@@ -167,4 +168,34 @@ test("pipeline falls back after system1 error and still escalates to second pass
   assert.ok(classified.rationale.model.some((entry) => entry.startsWith("system1-error:system1-down")));
   assert.ok(classified.rationale.model.some((entry) => entry.startsWith("system1-fallback:keyword 'contract':confidence=")));
   assert.ok(classified.rationale.model.some((entry) => entry === "ollama:deepseek-4.1-flash:resolved by ollama"));
+});
+
+test("keyword rules read the body when the subject has no match", async () => {
+  let modelCalls = 0;
+
+  const system1: ClassifierSystem1 = {
+    async classify() {
+      modelCalls += 1;
+      return { category: "FYI/Reference", confidence: 0.99, rationale: "should-not-be-asked" };
+    }
+  };
+
+  const secondPass: SecondPassClassifier = {
+    async classify() {
+      modelCalls += 1;
+      return { category: "FYI/Reference", rationale: "should-not-be-asked", model: "stub" };
+    }
+  };
+
+  const byBody = createMessage("msg-body", "Quick note", "Please unsubscribe me from this digest.");
+  const bySubject = createMessage("msg-subject", "Newsletter digest", undefined);
+
+  const results = await classifyMessagesForDryRun([byBody, bySubject], new Map(), { system1, secondPass });
+
+  // Both resolve deterministically from rules; the model is never asked.
+  assert.equal(modelCalls, 0);
+  assert.equal(results.get("msg-body")?.category, "Bulk/Archive");
+  assert.ok(results.get("msg-body")?.rationale.rule.some((entry) => entry.includes("keyword rule") && entry.includes("body")));
+  assert.equal(results.get("msg-subject")?.category, "Bulk/Archive");
+  assert.ok(results.get("msg-subject")?.rationale.rule.some((entry) => entry.includes("keyword rule") && entry.includes("subject")));
 });
