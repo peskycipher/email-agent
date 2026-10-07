@@ -163,6 +163,7 @@ test("cli dry-run writes persisted plan artifacts and performs zero mailbox muta
   assert.match(summary, /FYI\/Reference\s+1/);
   assert.match(summary, /archives planned\s+1/);
   assert.match(summary, /protected \(no-touch\)\s+0/);
+  assert.match(summary, /duration\s+0ms/);
 });
 
 test("cli live-apply applies only approved categories", async () => {

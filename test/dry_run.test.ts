@@ -200,6 +200,7 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
     },
     archivesPlanned: 1,
     protectedItems: 2,
-    noTouchReasons: { "recent-thread": 2, flagged: 1 }
+    noTouchReasons: { "recent-thread": 2, flagged: 1 },
+    durationMs: 0 // fixed injected clock in this test
   });
 });

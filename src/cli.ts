@@ -25,12 +25,26 @@ type CliDependencies = {
   now?: () => Date;
 };
 
+function formatDuration(durationMs: number): string {
+  if (durationMs < 1000) {
+    return `${durationMs}ms`;
+  }
+
+  if (durationMs < 60_000) {
+    return `${(durationMs / 1000).toFixed(1)}s`;
+  }
+
+  const minutes = Math.floor(durationMs / 60_000);
+  return `${minutes}m ${Math.round((durationMs % 60_000) / 1000)}s`;
+}
+
 function renderDryRunSummary(summary: DryRunSummary): string {
   const rows: Array<[string, string | number]> = [
     ["ingested", summary.ingested],
     ...EMAIL_CATEGORIES.map((category) => [category, summary.categories[category]] as [string, number]),
     ["archives planned", summary.archivesPlanned],
-    ["protected (no-touch)", summary.protectedItems]
+    ["protected (no-touch)", summary.protectedItems],
+    ["duration", formatDuration(summary.durationMs)]
   ];
 
   const reasonRows: Array<[string, number]> = Object.entries(summary.noTouchReasons).map(([reason, count]) => [`  ${reason}`, count]);

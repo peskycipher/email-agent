@@ -23,6 +23,7 @@ export type DryRunSummary = {
   archivesPlanned: number;
   protectedItems: number;
   noTouchReasons: Record<string, number>;
+  durationMs: number;
 };
 
 export type DryRunResult = {
@@ -38,7 +39,8 @@ export type DryRunResult = {
 function buildDryRunSummary(
   messages: MailboxMessage[],
   plannedActions: PlannedAction[],
-  exceptionQueue: ExceptionQueueItem[]
+  exceptionQueue: ExceptionQueueItem[],
+  durationMs: number
 ): DryRunSummary {
   const categories = Object.fromEntries(EMAIL_CATEGORIES.map((category) => [category, 0])) as Record<EmailCategory, number>;
   let archivesPlanned = 0;
@@ -63,7 +65,8 @@ function buildDryRunSummary(
     categories,
     archivesPlanned,
     protectedItems: exceptionQueue.length,
-    noTouchReasons
+    noTouchReasons,
+    durationMs
   };
 }
 
@@ -135,6 +138,6 @@ export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
     runPath: persisted.runPath,
     ingestPath: persisted.ingestPath,
     ingestedCount: messages.length,
-    summary: buildDryRunSummary(messages, plannedActions, plan.exceptionQueue)
+    summary: buildDryRunSummary(messages, plannedActions, plan.exceptionQueue, now().getTime() - startedAt.getTime())
   };
 }

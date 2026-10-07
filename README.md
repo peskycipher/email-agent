@@ -106,6 +106,26 @@ node src/cli.ts sign-off \
 
 **1. Dry run.** Reads the inbox, classifies every message, applies the no-touch policy, and writes a plan. **It makes zero changes to the mailbox.** `--limit` defaults to 50 and caps how many messages are ingested. It prints the path of the plan artifact and run record — review the plan, including the exception queue, before moving on.
 
+It also prints a summary of what the run just did:
+
+```
+Summary
+  ingested                 50
+  Action Needed            12
+  Waiting/Follow-up         8
+  FYI/Reference            20
+  Bulk/Archive             10
+  archives planned         30
+  protected (no-touch)      5
+  duration                 4.2s
+  no-touch reasons
+    recent-thread           3
+    flagged                 1
+    vip-sender              1
+```
+
+A run where every message is protected is self-explaining: `archives planned 0` plus the reason breakdown tells you the recent-thread window (or your VIP/keyword lists) is covering the whole batch — raise `--limit` to reach older mail, or lower `recent_days`.
+
 **2. Approve and apply.** You must give an explicit decision for **every** category that appears in the plan; a missing decision is an error, so nothing is applied by accident. Rejected categories leave their mail untouched, and each live run is linked to the dry-run plan it came from. Even with a category approved, an archive for a protected message is blocked rather than sent: it is audited as `blocked:no-touch` and counted as a no-touch miss.
 
 **3. Check the gate.** `gate` reads cumulative evidence and prints all four expansion conditions (see [Rollout gate](#rollout-gate)).
