@@ -1,0 +1,58 @@
+# Email Classification Taxonomy
+# Single source of truth for the 11-label multi-label taxonomy.
+# Each entry: name (exact match for classification output), description, M365 preset color, Gmail hex color.
+
+- name: "Action Needed"
+  description: "Requires a response, task, or decision from the user."
+  m365Color: "preset0"   # red
+  gmailColor: "#E67C73"  # red
+
+- name: "Waiting/Follow-up"
+  description: "Sent something; waiting for a reply or next step."
+  m365Color: "preset1"   # orange
+  gmailColor: "#F6BF26"  # yellow/orange
+
+- name: "Important"
+  description: "High priority, time-sensitive, or from a key contact."
+  m365Color: "preset2"   # magenta
+  gmailColor: "#E066FF"  # purple
+
+- name: "Invoices"
+  description: "Bills, receipts, payment requests, financial documents."
+  m365Color: "preset3"   # green
+  gmailColor: "#72C77A"  # green
+
+- name: "Crypto"
+  description: "Cryptocurrency, blockchain, DeFi, trading, wallet notifications."
+  m365Color: "preset4"   # teal
+  gmailColor: "#3ECCE9"  # cyan
+
+- name: "Business"
+  description: "Work-related, professional, clients, projects, contracts."
+  m365Color: "preset5"   # blue
+  gmailColor: "#5A9FF7"  # blue
+
+- name: "Family/Friends"
+  description: "Personal messages from family members or close friends."
+  m365Color: "preset6"   # pink
+  gmailColor: "#F9A8D4"  # pink
+
+- name: "Newsletters"
+  description: "Subscribed content, digests, periodic publications."
+  m365Color: "preset7"   # light blue
+  gmailColor: "#93C5FD"  # light blue
+
+- name: "Promos"
+  description: "Marketing, sales, discounts, promotional emails."
+  m365Color: "preset8"   # light orange
+  gmailColor: "#FDE68A"  # light yellow
+
+- name: "Notifications"
+  description: "System alerts, security notices, 2FA codes, automated notifications."
+  m365Color: "preset9"   # light gray
+  gmailColor: "#D1D5DB"  # gray
+
+- name: "Real-estate"
+  description: "Property listings, mortgage, rentals, HOA, home services."
+  m365Color: "preset10"  # brown
+  gmailColor: "#A3A3A3"  # dark gray
