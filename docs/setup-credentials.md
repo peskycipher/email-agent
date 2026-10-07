@@ -74,9 +74,63 @@ M365_CLIENT_SECRET=<secret value>
 
 ### 1.5 (Recommended) Restrict app access to the pilot mailbox
 
-Even with app-wide Graph permission, you should scope access to the pilot mailbox only (or a tight mailbox group) using your tenant’s Exchange controls (Application Access Policy or the current RBAC/scoping model in your tenant).
+Even with app-wide Graph permission, restrict this app to only the pilot mailbox (or a tiny mailbox scope).
 
-Ask your M365 admin to apply and validate this restriction before live apply runs.
+#### Option A: Application Access Policy (widely used)
+
+> Run these as an Exchange admin in Exchange Online PowerShell.
+
+1. Connect to Exchange Online:
+
+```powershell
+Install-Module ExchangeOnlineManagement -Scope CurrentUser
+Import-Module ExchangeOnlineManagement
+Connect-ExchangeOnline
+```
+
+2. Create (or reuse) a **mail-enabled security group** for the allowed scope:
+
+```powershell
+New-DistributionGroup -Name "EmailCleanupPilotScope" -Alias "EmailCleanupPilotScope" -Type Security
+```
+
+3. Add only the pilot mailbox (or a small allow-list) to that group:
+
+```powershell
+Add-DistributionGroupMember -Identity "EmailCleanupPilotScope" -Member "pilot@example.com"
+```
+
+4. Create the app access policy for your app registration:
+
+```powershell
+New-ApplicationAccessPolicy \
+  -AppId "<M365_CLIENT_ID>" \
+  -PolicyScopeGroupId "EmailCleanupPilotScope@yourdomain.com" \
+  -AccessRight RestrictAccess \
+  -Description "Limit email-cleanup app to pilot mailbox scope"
+```
+
+5. Validate access is allowed for pilot mailbox and denied outside scope:
+
+```powershell
+Test-ApplicationAccessPolicy -Identity "pilot@example.com" -AppId "<M365_CLIENT_ID>"
+Test-ApplicationAccessPolicy -Identity "someoneelse@example.com" -AppId "<M365_CLIENT_ID>"
+```
+
+Expected: pilot mailbox = **Allowed**, non-scoped mailbox = **Denied**.
+
+6. Wait for propagation (can take several minutes), then run a small `dry-run --limit 5` smoke test.
+
+#### Option B: Exchange RBAC for Applications (newer model)
+
+If your tenant uses the newer RBAC/scoping model instead of application access policies:
+
+1. Register/confirm the app service principal in Exchange.
+2. Create a recipient management scope for only the pilot mailbox (or small mailbox group).
+3. Assign the app role to that service principal with that custom scope.
+4. Validate access with your tenant’s RBAC test workflow, then run a small `dry-run --limit 5` smoke test.
+
+Ask your M365 admin to use the model your tenant has standardized on and to validate deny-by-default behavior outside the pilot scope before any live apply run.
 
 ---
 
