@@ -231,5 +231,7 @@ test/                behavior tests
 
 ## Project docs
 
+- [`GLOSSARY.md`](GLOSSARY.md): the repo's domain language (single-context)
+- [`docs/adr/`](docs/adr): decision records (no-delete V1, classification pipeline, immutable gate evidence)
 - [`SPEC-email-cleanup-agent-v1.md`](SPEC-email-cleanup-agent-v1.md): problem, solution, user stories, and decisions
 - [`AGENTS.md`](AGENTS.md) and [`docs/agents/`](docs/agents): issue tracker, triage labels, and domain-doc conventions
