@@ -1,0 +1,11 @@
+{
+  "name": "email-cleanup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/cli.ts",
+    "test": "node --test test/**/*.test.ts",
+    "typecheck": "npx -y -p typescript tsc --noEmit"
+  }
+}
