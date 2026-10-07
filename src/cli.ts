@@ -5,8 +5,9 @@ import url from "node:url";
 import { M365MailboxAdapter } from "./adapter_m365.ts";
 import type { MailboxAdapter } from "./adapter.ts";
 import { appendAuditRecord } from "./audit.ts";
-import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
+import { isEmailCategory, EMAIL_CATEGORIES, type EmailCategory } from "./classify/categories.ts";
 import { buildConfigSnapshot, loadConfig, type Config } from "./config.ts";
+import type { DryRunSummary } from "./dry_run.ts";
 import { evaluateExpansionGate, loadGateEvidence, loadExpansionSignOffFromRun, recordExpansionSignOff } from "./gate.ts";
 import { runDryRun, runLiveApply } from "./orchestrator.ts";
 import type { ClassifierSystem1 } from "./classify/system1.ts";
@@ -23,6 +24,26 @@ type CliDependencies = {
   secondPassClassifier?: SecondPassClassifier;
   now?: () => Date;
 };
+
+function renderDryRunSummary(summary: DryRunSummary): string {
+  const rows: Array<[string, string | number]> = [
+    ["ingested", summary.ingested],
+    ...EMAIL_CATEGORIES.map((category) => [category, summary.categories[category]] as [string, number]),
+    ["archives planned", summary.archivesPlanned],
+    ["protected (no-touch)", summary.protectedItems]
+  ];
+
+  const reasonRows: Array<[string, number]> = Object.entries(summary.noTouchReasons).map(([reason, count]) => [`  ${reason}`, count]);
+
+  const width = Math.max(...[...rows, ...reasonRows].map(([label]) => label.length));
+  const pad = (label: string): string => label.padEnd(width);
+
+  return [
+    "Summary",
+    ...rows.map(([label, value]) => `  ${pad(label)}  ${value}`),
+    ...(reasonRows.length > 0 ? ["  no-touch reasons", ...reasonRows.map(([label, value]) => `  ${pad(label)}  ${value}`)] : [])
+  ].join("\n");
+}
 
 async function readVersion(): Promise<string> {
   const thisFile = url.fileURLToPath(import.meta.url);
@@ -175,6 +196,7 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
 
     io.stdout(`email-cleanup ${version}`);
     io.stdout(`dry-run complete: ingested ${result.ingestedCount} message(s)`);
+    io.stdout(renderDryRunSummary(result.summary));
     io.stdout(`plan artifact: ${result.planPath}`);
     io.stdout(`run record: ${result.runPath}`);
     return 0;

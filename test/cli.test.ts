@@ -155,6 +155,14 @@ test("cli dry-run writes persisted plan artifacts and performs zero mailbox muta
   assert.deepEqual(plan.actions[1], { message_id: "msg-7", action: "archive" });
   assert.deepEqual(plan.exception_queue, []);
   assert.ok(stdout.some((line) => line.includes("dry-run complete")));
+
+  // A summary table tells the operator what the run just did, without opening the plan.
+  const summary = stdout.join("\n");
+  assert.match(summary, /Summary/);
+  assert.match(summary, /ingested\s+1/);
+  assert.match(summary, /FYI\/Reference\s+1/);
+  assert.match(summary, /archives planned\s+1/);
+  assert.match(summary, /protected \(no-touch\)\s+0/);
 });
 
 test("cli live-apply applies only approved categories", async () => {

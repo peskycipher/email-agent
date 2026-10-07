@@ -188,4 +188,18 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
     archives.map((action: { message_id: string }) => action.message_id),
     ["msg-3"]
   );
+
+  // Summary counts what the run just did, derived from the plan it wrote.
+  assert.deepEqual(result.summary, {
+    ingested: 4,
+    categories: {
+      "Action Needed": 3,
+      "Waiting/Follow-up": 0,
+      "FYI/Reference": 0,
+      "Bulk/Archive": 1
+    },
+    archivesPlanned: 1,
+    protectedItems: 2,
+    noTouchReasons: { "recent-thread": 2, flagged: 1 }
+  });
 });

@@ -1,10 +1,11 @@
-import type { MailboxAdapter } from "./adapter.ts";
+import type { MailboxAdapter, MailboxMessage } from "./adapter.ts";
+import { EMAIL_CATEGORIES, type EmailCategory } from "./classify/categories.ts";
 import { classifyMessagesForDryRun } from "./classify/pipeline.ts";
 import { OllamaCloudClassifier, type SecondPassClassifier } from "./classify/ollama.ts";
 import { JevSystem1Classifier, type ClassifierSystem1 } from "./classify/system1.ts";
 import type { ConfigSnapshot } from "./config.ts";
 import { buildNoTouchDryRunPlan, shouldArchiveCategory } from "./policy.ts";
-import { persistDryRunArtifacts, type PlannedAction } from "./store.ts";
+import { persistDryRunArtifacts, type ExceptionQueueItem, type PlannedAction } from "./store.ts";
 
 export type DryRunOptions = {
   adapter: MailboxAdapter;
@@ -16,6 +17,14 @@ export type DryRunOptions = {
   secondPassClassifier?: SecondPassClassifier;
 };
 
+export type DryRunSummary = {
+  ingested: number;
+  categories: Record<EmailCategory, number>;
+  archivesPlanned: number;
+  protectedItems: number;
+  noTouchReasons: Record<string, number>;
+};
+
 export type DryRunResult = {
   runId: string;
   planId: string;
@@ -23,7 +32,40 @@ export type DryRunResult = {
   runPath: string;
   ingestPath: string;
   ingestedCount: number;
+  summary: DryRunSummary;
 };
+
+function buildDryRunSummary(
+  messages: MailboxMessage[],
+  plannedActions: PlannedAction[],
+  exceptionQueue: ExceptionQueueItem[]
+): DryRunSummary {
+  const categories = Object.fromEntries(EMAIL_CATEGORIES.map((category) => [category, 0])) as Record<EmailCategory, number>;
+  let archivesPlanned = 0;
+
+  for (const action of plannedActions) {
+    if (action.action === "classify") {
+      categories[action.category] += 1;
+    } else {
+      archivesPlanned += 1;
+    }
+  }
+
+  const noTouchReasons: Record<string, number> = {};
+  for (const item of exceptionQueue) {
+    for (const reason of item.reasons) {
+      noTouchReasons[reason] = (noTouchReasons[reason] ?? 0) + 1;
+    }
+  }
+
+  return {
+    ingested: messages.length,
+    categories,
+    archivesPlanned,
+    protectedItems: exceptionQueue.length,
+    noTouchReasons
+  };
+}
 
 export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
   const now = options.now ?? (() => new Date());
@@ -92,6 +134,7 @@ export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
     planPath: persisted.planPath,
     runPath: persisted.runPath,
     ingestPath: persisted.ingestPath,
-    ingestedCount: messages.length
+    ingestedCount: messages.length,
+    summary: buildDryRunSummary(messages, plannedActions, plan.exceptionQueue)
   };
 }
