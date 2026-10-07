@@ -7,6 +7,11 @@ export type PlannedAction = {
   message_id: string;
   action: MailboxAction;
   category?: string;
+  rationale?: {
+    policy: string[];
+    rule: string[];
+    model: string[];
+  };
 };
 
 export type ExceptionQueueItem = {

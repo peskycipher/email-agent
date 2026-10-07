@@ -60,7 +60,29 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
     account: "pilot@example.com",
     dataDir,
     limit: 5,
-    now: () => new Date("2026-01-03T00:00:00.000Z")
+    now: () => new Date("2026-01-03T00:00:00.000Z"),
+    system1Classifier: {
+      async classify(message) {
+        if (message.id === "msg-3") {
+          return {
+            category: "Bulk/Archive",
+            confidence: 0.9,
+            rationale: "newsletter"
+          };
+        }
+
+        return {
+          category: "FYI/Reference",
+          confidence: 0.9,
+          rationale: "default"
+        };
+      }
+    },
+    secondPassClassifier: {
+      async classify() {
+        throw new Error("should-not-run");
+      }
+    }
   });
 
   assert.equal(listCalls, 1);
@@ -76,9 +98,36 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
   const planRecord = JSON.parse(await fs.readFile(result.planPath, "utf8"));
   assert.equal(planRecord.account, "pilot@example.com");
   assert.deepEqual(planRecord.actions, [
-    { message_id: "msg-1", action: "classify", category: "FYI/Reference" },
-    { message_id: "msg-2", action: "classify", category: "FYI/Reference" },
-    { message_id: "msg-3", action: "classify", category: "FYI/Reference" },
+    {
+      message_id: "msg-1",
+      action: "classify",
+      category: "Action Needed",
+      rationale: {
+        policy: ["no-touch:recent-thread"],
+        rule: ["protected-message-routed-to-manual-category"],
+        model: []
+      }
+    },
+    {
+      message_id: "msg-2",
+      action: "classify",
+      category: "Action Needed",
+      rationale: {
+        policy: ["no-touch:flagged", "no-touch:recent-thread"],
+        rule: ["protected-message-routed-to-manual-category"],
+        model: []
+      }
+    },
+    {
+      message_id: "msg-3",
+      action: "classify",
+      category: "Bulk/Archive",
+      rationale: {
+        policy: [],
+        rule: ["keyword rule: newsletter/unsubscribe/digest"],
+        model: []
+      }
+    },
     { message_id: "msg-3", action: "archive" }
   ]);
   assert.deepEqual(planRecord.exception_queue, [
