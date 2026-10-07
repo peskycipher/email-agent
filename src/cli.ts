@@ -39,16 +39,25 @@ function startSpinner(write: (text: string) => void, label: string, enabled: boo
   const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   const startedAt = Date.now();
   let frame = 0;
+  let lastRenderedSecond: number | undefined;
 
-  const render = (): void => {
-    const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
-    write(`\r${frames[frame % frames.length]} ${label}${elapsedSeconds > 0 ? ` ${elapsedSeconds}s` : ""}`);
+  // One line, never a repeated message: the status line is repainted in place, and only
+  // when the elapsed second changes, so a terminal that ignores \r still gets at most
+  // one line per second instead of ten.
+  const render = (elapsedSeconds: number): void => {
+    lastRenderedSecond = elapsedSeconds;
+    write(`\r\u001b[K${frames[frame % frames.length]} ${label}${elapsedSeconds > 0 ? ` ${elapsedSeconds}s` : ""}`);
     frame += 1;
   };
 
-  // First frame immediately: instant feedback, and a short run still shows one.
-  render();
-  const timer = setInterval(render, 100);
+  render(0);
+
+  const timer = setInterval(() => {
+    const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+    if (elapsedSeconds !== lastRenderedSecond) {
+      render(elapsedSeconds);
+    }
+  }, 200);
   timer.unref?.();
 
   return () => {

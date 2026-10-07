@@ -206,6 +206,9 @@ test("cli dry-run shows a spinner while the classifier runs when a TTY is availa
   assert.match(spinnerOutput, /dry-run: ingesting and classifying/);
   assert.match(spinnerOutput, /\r/);
   assert.ok(spinnerOutput.endsWith("\r\u001b[K"), "spinner line must be cleared when it stops");
+  // One line only: a sub-second run repaints the status line at most once (plus the clear).
+  const writes = stderr.filter((text) => text.includes("ingesting and classifying"));
+  assert.equal(writes.length, 1, "the status message must not repeat within the same second");
   // stdout stays clean: no spinner frames leak into the machine-readable output.
   assert.ok(!stdout.join("\n").includes("⠋"));
   assert.ok(stdout.some((line) => line.includes("Summary")));
