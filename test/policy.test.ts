@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { MailboxMessage } from "../src/adapter.ts";
-import { buildNoTouchDryRunPlan } from "../src/policy.ts";
+import { buildNoTouchDryRunPlan, shouldArchiveLabels } from "../src/policy.ts";
 
 test("buildNoTouchDryRunPlan excludes protected messages from archive and routes them to exception queue", () => {
   const messages: MailboxMessage[] = [
@@ -22,15 +22,6 @@ test("buildNoTouchDryRunPlan excludes protected messages from archive and routes
       date: "2025-12-01T00:00:00.000Z",
       unread: true,
       flagged: true,
-      categories: []
-    },
-    {
-      id: "msg-recent",
-      from: "new@example.com",
-      subject: "Recent thread",
-      date: "2026-01-08T00:00:00.000Z",
-      unread: true,
-      flagged: false,
       categories: []
     },
     {
@@ -55,46 +46,29 @@ test("buildNoTouchDryRunPlan excludes protected messages from archive and routes
 
   const result = buildNoTouchDryRunPlan(messages, {
     vipSenders: ["vip@example.com"],
-    financeLegalKeywords: ["invoice", "legal"],
-    now: () => new Date("2026-01-10T00:00:00.000Z")
+    financeLegalKeywords: ["invoice", "legal"]
   });
 
   assert.deepEqual(result.exceptionQueue, [
     { message_id: "msg-vip", reasons: ["vip-sender"], unread: true },
     { message_id: "msg-flagged", reasons: ["flagged"], unread: true },
-    { message_id: "msg-recent", reasons: ["recent-thread"], unread: true },
     { message_id: "msg-finance", reasons: ["finance-legal-keyword"], unread: false }
   ]);
 });
 
-test("buildNoTouchDryRunPlan treats unparseable and exact-boundary dates as protected", () => {
-  const messages: MailboxMessage[] = [
-    {
-      id: "msg-unparseable",
-      from: "owner@example.com",
-      subject: "Subject",
-      date: "not-a-date",
-      unread: true,
-      flagged: false,
-      categories: []
-    },
-    {
-      id: "msg-boundary",
-      from: "owner@example.com",
-      subject: "Subject",
-      date: "2026-01-03T00:00:00.000Z",
-      unread: true,
-      flagged: false,
-      categories: []
-    }
-  ];
-
-  const result = buildNoTouchDryRunPlan(messages, {
-    now: () => new Date("2026-01-10T00:00:00.000Z")
-  });
-
-  assert.deepEqual(result.exceptionQueue, [
-    { message_id: "msg-unparseable", reasons: ["recent-thread"], unread: true },
-    { message_id: "msg-boundary", reasons: ["recent-thread"], unread: true }
-  ]);
+test("shouldArchiveLabels archives on any safe label but a veto label blocks it", () => {
+  // One archive-safe label is enough.
+  assert.equal(shouldArchiveLabels(["Newsletters"]), true);
+  assert.equal(shouldArchiveLabels(["Promos", "Business"]), true);
+  // A veto label anywhere wins.
+  assert.equal(shouldArchiveLabels(["Promos", "Action Needed"]), false);
+  assert.equal(shouldArchiveLabels(["Family", "Notifications"]), false);
+  assert.equal(shouldArchiveLabels(["Newsletters", "Important"]), false);
+  // Every veto label also blocks on its own — a veto label is never archive-safe.
+  assert.equal(shouldArchiveLabels(["Action Needed"]), false);
+  assert.equal(shouldArchiveLabels(["Important"]), false);
+  assert.equal(shouldArchiveLabels(["Family"]), false);
+  assert.equal(shouldArchiveLabels(["Friends"]), false);
+  // No labels at all is not archive-eligible.
+  assert.equal(shouldArchiveLabels([]), false);
 });

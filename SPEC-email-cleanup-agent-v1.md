@@ -111,3 +111,7 @@ The cleanup objective is “zero unread where allowed,” with protected message
 
 - This spec intentionally optimizes for safety, reversibility, and explainability over maximal automation.
 - Phase 2 target (already prioritized): daily email copilot (triage/summarize/draft, still approval-gated for send actions).
+
+## Amendments
+
+- **Superseded by [ADR-0005](docs/adr/0005-multi-label-vocabulary.md) and #11 (T8), 2026-10-07:** story 3 (grouped by category) and story 13 (exactly one of four categories) are replaced by a 16-label flat vocabulary in which a message carries 0..n labels; story 8 (7-day recent-thread protection) is withdrawn — the recent-thread window is removed; and the "exactly one of four categories" implementation decision, the per-category approval batch, and category-level totals become per-label equivalents. Archive safety is defined by archive-safe and veto label sets rather than two named categories.

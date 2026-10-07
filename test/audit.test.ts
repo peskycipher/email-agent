@@ -15,7 +15,7 @@ test("appendAuditRecord appends one JSON line with required fields", async () =>
     account: "pilot@example.com",
     message_id: "message-1",
     action: "classify",
-    category: "FYI/Reference",
+    labels: "Notifications",
     outcome: "success",
     rationale: "rule:demo",
     run_id: "run-1"
@@ -41,7 +41,7 @@ test("appendAuditRecord rejects missing required fields", async () => {
       account: "pilot@example.com",
       message_id: "",
       action: "archive",
-      category: "Bulk/Archive",
+      labels: "Newsletters",
       outcome: "success",
       rationale: "rule:demo",
       run_id: "run-1"
@@ -50,7 +50,7 @@ test("appendAuditRecord rejects missing required fields", async () => {
   );
 });
 
-test("appendAuditRecord rejects a record without a category", async () => {
+test("appendAuditRecord rejects a record without labels", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "audit-test-"));
   const logPath = path.join(dir, "audit.jsonl");
 
@@ -64,6 +64,6 @@ test("appendAuditRecord rejects a record without a category", async () => {
       rationale: "rule:demo",
       run_id: "run-1"
     } as unknown as Parameters<typeof appendAuditRecord>[1]),
-    /Missing required audit field: category/
+    /Missing required audit field: labels/
   );
 });

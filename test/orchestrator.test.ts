@@ -55,7 +55,7 @@ test("orchestrator end-to-end archives only non-important categories and blocks 
     ])
   );
 
-  const applyCalls: Array<{ messageId: string; action: string; category?: string }> = [];
+  const applyCalls: Array<{ messageId: string; action: string; labels?: string[] }> = [];
 
   const adapter: MailboxAdapter = {
     async listRecentInbox() {
@@ -68,8 +68,8 @@ test("orchestrator end-to-end archives only non-important categories and blocks 
       }
       return message;
     },
-    async apply(messageId, action, category) {
-      applyCalls.push({ messageId, action, category });
+    async apply(messageId, action, labels) {
+      applyCalls.push({ messageId, action, labels });
       return { ok: true };
     }
   };
@@ -88,14 +88,14 @@ test("orchestrator end-to-end archives only non-important categories and blocks 
     system1Classifier: {
       async classify(message) {
         if (message.id === "msg-important") {
-          return { category: "Action Needed", confidence: 0.95, rationale: "manual-action" };
+          return { labels: ["Action Needed"], confidence: 0.95, rationale: "manual-action" };
         }
 
         if (message.id === "msg-fyi") {
-          return { category: "FYI/Reference", confidence: 0.95, rationale: "reference" };
+          return { labels: ["Newsletters"], confidence: 0.95, rationale: "reference" };
         }
 
-        return { category: "Bulk/Archive", confidence: 0.95, rationale: "bulk" };
+        return { labels: ["Newsletters"], confidence: 0.95, rationale: "bulk" };
       }
     },
     secondPassClassifier: {
@@ -125,8 +125,9 @@ test("orchestrator end-to-end archives only non-important categories and blocks 
     auditLogPath,
     approvals: {
       "Action Needed": true,
-      "FYI/Reference": true,
-      "Bulk/Archive": true
+      "Invoices": true,
+      "Newsletters": true,
+      "Promos": true
     },
     config,
     now: () => new Date("2026-01-11T00:00:00.000Z")
@@ -139,6 +140,6 @@ test("orchestrator end-to-end archives only non-important categories and blocks 
   assert.deepEqual(appliedArchives, ["msg-fyi"]);
 
   const runRecord = JSON.parse(await fs.readFile(liveRun.runPath, "utf8"));
-  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.blocked, 1);
+  assert.equal(runRecord.metrics.label_totals["Newsletters"].archive.blocked, 1);
   assert.equal(runRecord.metrics.no_touch_miss_count, 1);
 });

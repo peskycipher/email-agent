@@ -4,6 +4,7 @@
   "audit_log_path": "data/audit.jsonl",
   "vip_senders": ["tonyzn@affinityskin.com.au", "william@lamlegalgroup.com.au"],
   "finance_legal_keywords": ["invoice", "contract", "tax", "legal", "payment", "receipt"],
-  "recent_days": 7,
+  "family_senders": [],
+  "friend_senders": [],
   "confidence_threshold": 0.7
 }

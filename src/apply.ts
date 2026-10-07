@@ -3,8 +3,8 @@ import path from "node:path";
 
 import type { MailboxAdapter, MailboxAction, MailboxMessage } from "./adapter.ts";
 import { appendAuditRecord } from "./audit.ts";
-import { collectPlannedCategories, requireApprovalDecisions, type CategoryApprovals } from "./approval.ts";
-import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
+import { collectPlannedLabels, requireApprovalDecisions, type LabelApprovals } from "./approval.ts";
+import { isEmailLabel, type EmailLabel } from "./classify/labels.ts";
 import { buildConfigSnapshot, type ConfigSnapshot } from "./config.ts";
 import { isMissingFileError } from "./http.ts";
 import { buildRunMetrics, precisionFromTallies, type EvaluatedAction } from "./metrics.ts";
@@ -22,7 +22,7 @@ type StoredDryRunPlan = {
 type AppliedAction = {
   message_id: string;
   action: MailboxAction;
-  category: EmailCategory;
+  labels: EmailLabel[];
   outcome: string;
 };
 
@@ -32,7 +32,7 @@ export type LiveApplyOptions = {
   dataDir: string;
   planPath: string;
   auditLogPath: string;
-  approvals: CategoryApprovals;
+  approvals: LabelApprovals;
   config?: ConfigSnapshot;
   now?: () => Date;
 };
@@ -105,14 +105,15 @@ function parsePlannedAction(value: unknown): PlannedAction {
   }
 
   if (value.action === "classify") {
-    if (typeof value.category !== "string" || !isEmailCategory(value.category)) {
-      throw new Error(`Invalid category in dry-run plan for message ${value.message_id}`);
+    // An empty label list is a valid outcome: the model found nothing that applies.
+    if (!Array.isArray(value.labels) || value.labels.some((label) => typeof label !== "string" || !isEmailLabel(label))) {
+      throw new Error(`Invalid labels in dry-run plan for message ${value.message_id}`);
     }
 
     return {
       message_id: value.message_id,
       action: "classify",
-      category: value.category,
+      labels: [...value.labels],
       rationale: parseRationale(value.rationale)
     };
   }
@@ -171,31 +172,31 @@ async function readDryRunPlan(planPath: string): Promise<StoredDryRunPlan> {
   };
 }
 
-function buildCategoryByMessage(actions: PlannedAction[]): Map<string, EmailCategory> {
-  const categoryByMessageId = new Map<string, EmailCategory>();
+function buildLabelsByMessage(actions: PlannedAction[]): Map<string, EmailLabel[]> {
+  const labelsByMessageId = new Map<string, EmailLabel[]>();
 
   for (const action of actions) {
     if (action.action !== "classify") {
       continue;
     }
 
-    categoryByMessageId.set(action.message_id, action.category);
+    labelsByMessageId.set(action.message_id, action.labels);
   }
 
-  return categoryByMessageId;
+  return labelsByMessageId;
 }
 
-function resolveActionCategory(action: PlannedAction, categoryByMessageId: Map<string, EmailCategory>): EmailCategory {
+function resolveActionLabels(action: PlannedAction, labelsByMessageId: Map<string, EmailLabel[]>): EmailLabel[] {
   if (action.action === "classify") {
-    return action.category;
+    return action.labels;
   }
 
-  const category = categoryByMessageId.get(action.message_id);
-  if (!category) {
+  const labels = labelsByMessageId.get(action.message_id);
+  if (!labels) {
     throw new Error(`Missing classify action for archived message ${action.message_id}`);
   }
 
-  return category;
+  return labels;
 }
 
 function toMailboxMessages(value: unknown): MailboxMessage[] | undefined {
@@ -275,14 +276,13 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
   const runId = `live-${startedAt.getTime()}`;
 
   const plan = await readDryRunPlan(options.planPath);
-  const categoryByMessageId = buildCategoryByMessage(plan.actions);
-  const plannedCategories = collectPlannedCategories(plan.actions);
-  const decisions = requireApprovalDecisions(plannedCategories, options.approvals);
+  const labelsByMessageId = buildLabelsByMessage(plan.actions);
+  const plannedLabels = collectPlannedLabels(plan.actions);
+  const decisions = requireApprovalDecisions(plannedLabels, options.approvals);
 
   const exceptionQueue = plan.exception_queue;
   const protectedMessageIds = new Set(exceptionQueue.map((item) => item.message_id));
   const sourceMessages = await readSourceIngestMessages(options.dataDir, plan.run_id);
-  const sourceMessageById = new Map((sourceMessages ?? []).map((message) => [message.id, message]));
   const existingCategoriesByMessageId = new Map((sourceMessages ?? []).map((message) => [message.id, message.categories]));
   const config = options.config ?? buildConfigSnapshot({ account: options.account, auditLogPath: options.auditLogPath });
 
@@ -291,14 +291,17 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
   let skippedActions = 0;
 
   for (const action of plan.actions) {
-    const category = resolveActionCategory(action, categoryByMessageId);
+    const labels = resolveActionLabels(action, labelsByMessageId);
 
-    if (!decisions[category]) {
+    // Skip unless every label on the message is approved: one unapproved label
+    // means leave the message alone rather than partially applying it.
+    // An empty label list is vacuously approved (nothing to reject).
+    if (!labels.every((label) => decisions[label])) {
       skippedActions += 1;
       evaluatedActions.push({
         message_id: action.message_id,
         action: action.action,
-        category,
+        labels,
         status: "skipped"
       });
       continue;
@@ -308,7 +311,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
       evaluatedActions.push({
         message_id: action.message_id,
         action: action.action,
-        category,
+        labels,
         status: "blocked"
       });
 
@@ -317,7 +320,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
         account: options.account,
         message_id: action.message_id,
         action: action.action,
-        category,
+        labels: labels.join(", "),
         outcome: "blocked:no-touch",
         rationale: toRationaleText(action),
         run_id: runId
@@ -333,7 +336,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
         evaluatedActions.push({
           message_id: action.message_id,
           action: action.action,
-          category,
+          labels,
           status: "failed",
           operationalFailure: true
         });
@@ -343,7 +346,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
           account: options.account,
           message_id: action.message_id,
           action: action.action,
-          category,
+          labels: labels.join(", "),
           outcome: "failed:mailbox-fetch",
           rationale: toRationaleText(action),
           run_id: runId
@@ -351,19 +354,15 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
         continue;
       }
 
-      const sourceMessage = sourceMessageById.get(action.message_id);
       const noTouchReasons = evaluateNoTouchReasons(
         {
           from: currentMessage.from,
           subject: currentMessage.subject,
-          date: sourceMessage?.date ?? "",
           flagged: currentMessage.flagged
         },
         {
           vipSenders: config.vipSenders,
-          financeLegalKeywords: config.financeLegalKeywords,
-          recentDays: config.recentDays,
-          now
+          financeLegalKeywords: config.financeLegalKeywords
         }
       );
 
@@ -371,7 +370,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
         evaluatedActions.push({
           message_id: action.message_id,
           action: action.action,
-          category,
+          labels,
           status: "blocked"
         });
 
@@ -380,7 +379,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
           account: options.account,
           message_id: action.message_id,
           action: action.action,
-          category,
+          labels: labels.join(", "),
           outcome: "blocked:no-touch",
           rationale: toRationaleText(action),
           run_id: runId
@@ -393,7 +392,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
     const result = await options.adapter.apply(
       action.message_id,
       action.action,
-      action.action === "classify" ? category : undefined,
+      action.action === "classify" ? labels : undefined,
       existingCategories
     );
     const status: EvaluatedAction["status"] = result.ok ? "success" : "failed";
@@ -404,7 +403,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
       account: options.account,
       message_id: action.message_id,
       action: action.action,
-      category,
+      labels: labels.join(", "),
       outcome,
       rationale: toRationaleText(action),
       run_id: runId
@@ -413,14 +412,14 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
     appliedActions.push({
       message_id: action.message_id,
       action: action.action,
-      category,
+      labels,
       outcome
     });
 
     evaluatedActions.push({
       message_id: action.message_id,
       action: action.action,
-      category,
+      labels,
       status
     });
   }
@@ -445,7 +444,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
   const report = buildRunReport({
     plannedActions: plan.actions,
     evaluatedActions,
-    categoryTotals: metrics.category_totals,
+    labelTotals: metrics.label_totals,
     exceptionQueue,
     sourceMessages
   });

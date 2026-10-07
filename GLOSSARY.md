@@ -23,14 +23,28 @@ in [`docs/adr/`](docs/adr/).
 
 ## Classification
 
-- **Category** — exactly one of four values every message resolves to:
-  `Action Needed`, `Waiting/Follow-up`, `FYI/Reference`, `Bulk/Archive`. Never a
-  fifth value, never none.
+- **Label** — one of a flat, open vocabulary (`src/classify/labels.ts`) attached
+  to a message. A message carries any number of labels, including none; labels
+  are orthogonal (a message can be `Realestate` and `Invoices` and `Action
+  Needed` at once). Canonical values are Title Case.
+- **Archive-safe label** — a label that makes a message eligible for archiving
+  (`Newsletters`, `Promos`, `Notifications`, `Subscriptions`, `IT News`). A
+  message archives only when it carries an archive-safe label and no veto label.
+- **Veto label** — a label that blocks archiving even when an archive-safe label
+  is present (`Action Needed`, `Important`, `Family`, `Friends`). The remaining
+  labels are neutral: they neither qualify nor block.
+- **Sender-derived label** — a label resolved from the sender rather than the
+  content (`Family` / `Friends` from config lists, `IT News` from the sender
+  domain), added on top of whatever the other paths produced.
+- **Primary label** — a message's first label (`labels[0]`). Every evaluated
+  action is counted exactly once in `metrics.label_totals`, under its primary
+  label, so totals still sum to action counts rather than label counts.
 - **Classification pipeline** — the ordered decision sequence:
   1. **No-touch protection** (hard rules, always first — see below)
-  2. **Deterministic rules** (existing mailbox categories, subject keywords, then
+  2. **Deterministic rules** (existing mailbox labels, subject keywords, then
      body keywords when the subject has no match)
-  3. **System1 pass** — the first model pass (JEV System1)
+  3. **System1 pass** — the first model pass (JEV System1), one `noul` question
+     per model-inferable label
   4. **Second pass** — Ollama Cloud, only for items the first pass returned with
      confidence below the configured threshold
 - **Body inclusion** — the adapter may supply a plain-text message body
@@ -45,8 +59,7 @@ in [`docs/adr/`](docs/adr/).
 ## Protection
 
 - **No-touch protection** — the hard rules that exclude a message from archiving:
-  VIP sender, flagged/starred, within the recent-window, or finance/legal keyword
-  match. An unparseable date fails closed (protected).
+  VIP sender, flagged/starred, or finance/legal keyword match.
 - **Exception queue** — the snapshot of all protected messages for a run; protected
   items are archived never; they are surfaced for manual handling.
 - **VIP sender** — a sender address whose messages are always protected
@@ -54,12 +67,13 @@ in [`docs/adr/`](docs/adr/).
 
 ## Actions
 
-- **Planned action** — a unit in a plan: `classify` (with a category) or
+- **Planned action** — a unit in a plan: `classify` (with its labels) or
   `archive`. There is no third action: **delete is impossible in V1** — not in the
   adapter contract, not in the audit action union (ADR-0001).
-- **Approval decision** — the operator's explicit per-category yes/no between dry
-  run and live apply. A missing decision for any planned category is an error;
-  nothing applies by accident.
+- **Approval decision** — the operator's explicit per-label yes/no between dry
+  run and live apply. A missing decision for any planned label is an error;
+  nothing applies by accident. A message is skipped unless **every** label it
+  carries is approved.
 
 ## Gate and evidence
 

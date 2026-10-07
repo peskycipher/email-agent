@@ -1,6 +1,6 @@
 import type { MailboxMessage } from "../adapter.ts";
 import { DEFAULT_CONFIDENCE_THRESHOLD } from "../config.ts";
-import { EMAIL_CATEGORIES, type EmailCategory } from "./categories.ts";
+import { isEmailLabel, type EmailLabel } from "./labels.ts";
 import type { SecondPassClassifier } from "./ollama.ts";
 import { KEYWORD_RULES, findKeywordRuleMatchInMessage } from "./rules.ts";
 import { KeywordSystem1Fallback, type ClassifierSystem1, type System1Classification } from "./system1.ts";
@@ -13,7 +13,7 @@ export type RationaleTrace = {
 
 export type MessageClassification = {
   messageId: string;
-  category: EmailCategory;
+  labels: EmailLabel[];
   rationale: RationaleTrace;
 };
 
@@ -23,16 +23,21 @@ export type ClassificationPipelineOptions = {
   /** Used when the System1 call itself fails; defaults to KeywordSystem1Fallback. */
   system1Fallback?: ClassifierSystem1;
   confidenceThreshold?: number;
+  /** Family/Friends (and any other config-driven labels) resolved from the sender. */
+  senderLabels?: (message: MailboxMessage) => EmailLabel[];
 };
 
-function classifyByRules(message: MailboxMessage): { category: EmailCategory; rationale: string } | undefined {
-  for (const category of message.categories) {
-    if (EMAIL_CATEGORIES.includes(category as EmailCategory)) {
-      return {
-        category: category as EmailCategory,
-        rationale: "existing mailbox category"
-      };
-    }
+function uniqueLabels(labels: EmailLabel[]): EmailLabel[] {
+  return [...new Set(labels)];
+}
+
+function classifyByRules(message: MailboxMessage): { labels: EmailLabel[]; rationale: string } | undefined {
+  const existing = message.categories.filter(isEmailLabel);
+  if (existing.length > 0) {
+    return {
+      labels: existing,
+      rationale: "existing mailbox label"
+    };
   }
 
   const match = findKeywordRuleMatchInMessage(
@@ -44,7 +49,7 @@ function classifyByRules(message: MailboxMessage): { category: EmailCategory; ra
   }
 
   return {
-    category: match.rule.category,
+    labels: match.rule.labels,
     rationale: `${match.rule.pipelineRationale} (${match.field})`
   };
 }
@@ -60,11 +65,15 @@ export async function classifyMessageForDryRun(
     model: []
   };
 
+  // Sender-derived labels (Family/Friends/IT News) come from the sender, not the
+  // content, so they apply regardless of which other path classifies the message.
+  const resolvedSenderLabels = options.senderLabels ? options.senderLabels(message) : [];
+
   if (policyReasons.length > 0) {
-    rationale.rule.push("protected-message-routed-to-manual-category");
+    rationale.rule.push("protected-message-routed-to-manual-label");
     return {
       messageId: message.id,
-      category: "Action Needed",
+      labels: uniqueLabels(["Action Needed", ...resolvedSenderLabels]),
       rationale
     };
   }
@@ -74,7 +83,7 @@ export async function classifyMessageForDryRun(
     rationale.rule.push(byRule.rationale);
     return {
       messageId: message.id,
-      category: byRule.category,
+      labels: uniqueLabels([...byRule.labels, ...resolvedSenderLabels]),
       rationale
     };
   }
@@ -102,7 +111,7 @@ export async function classifyMessageForDryRun(
   if (system1Result.confidence >= confidenceThreshold) {
     return {
       messageId: message.id,
-      category: system1Result.category,
+      labels: uniqueLabels([...system1Result.labels, ...resolvedSenderLabels]),
       rationale
     };
   }
@@ -112,7 +121,7 @@ export async function classifyMessageForDryRun(
     rationale.model.push(`ollama:${secondPassResult.model}:${secondPassResult.rationale}`);
     return {
       messageId: message.id,
-      category: secondPassResult.category,
+      labels: uniqueLabels([...secondPassResult.labels, ...resolvedSenderLabels]),
       rationale
     };
   } catch (error) {
@@ -120,7 +129,7 @@ export async function classifyMessageForDryRun(
     rationale.model.push(`ollama-fallback:${text}`);
     return {
       messageId: message.id,
-      category: system1Result.category,
+      labels: uniqueLabels([...system1Result.labels, ...resolvedSenderLabels]),
       rationale
     };
   }

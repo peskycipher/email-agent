@@ -27,7 +27,7 @@ test("no-touch policy classifications are not overridden by model calls", async 
     async classify() {
       system1Calls += 1;
       return {
-        category: "FYI/Reference",
+        labels: ["Business"],
         confidence: 0.2,
         rationale: "should-not-run"
       };
@@ -38,7 +38,7 @@ test("no-touch policy classifications are not overridden by model calls", async 
     async classify() {
       secondPassCalls += 1;
       return {
-        category: "Bulk/Archive",
+        labels: ["Newsletters"],
         rationale: "should-not-run",
         model: "deepseek-4.1-flash"
       };
@@ -61,11 +61,34 @@ test("no-touch policy classifications are not overridden by model calls", async 
     throw new Error("missing classification");
   }
 
-  assert.equal(classified.category, "Action Needed");
+  assert.deepEqual(classified.labels, ["Action Needed"]);
   assert.deepEqual(classified.rationale.policy, ["no-touch:vip-sender"]);
   assert.deepEqual(classified.rationale.model, []);
   assert.equal(system1Calls, 0);
   assert.equal(secondPassCalls, 0);
+});
+
+test("sender-derived labels are added on top of model labels", async () => {
+  const system1: ClassifierSystem1 = {
+    async classify() {
+      return { labels: ["Business"], confidence: 0.9, rationale: "clear-signal" };
+    }
+  };
+
+  const secondPass: SecondPassClassifier = {
+    async classify() {
+      throw new Error("should-not-run");
+    }
+  };
+
+  const message = createMessage("msg-family", "Dinner Sunday?");
+  const result = await classifyMessagesForDryRun([message], new Map(), {
+    system1,
+    secondPass,
+    senderLabels: () => ["Family"]
+  });
+
+  assert.deepEqual(result.get("msg-family")?.labels, ["Business", "Family"]);
 });
 
 test("system1 handles majority pass and second pass only runs for low-confidence items", async () => {
@@ -78,16 +101,16 @@ test("system1 handles majority pass and second pass only runs for low-confidence
   let system1Calls = 0;
   let secondPassCalls = 0;
 
-  const system1ById: Record<string, { category: "FYI/Reference" | "Waiting/Follow-up"; confidence: number; rationale: string }> = {
-    "msg-1": { category: "FYI/Reference", confidence: 0.9, rationale: "clear-signal" },
-    "msg-2": { category: "Waiting/Follow-up", confidence: 0.8, rationale: "clear-signal" },
-    "msg-3": { category: "FYI/Reference", confidence: 0.4, rationale: "ambiguous" }
+  const system1ById: Record<string, { labels: string[]; confidence: number; rationale: string }> = {
+    "msg-1": { labels: ["Business"], confidence: 0.9, rationale: "clear-signal" },
+    "msg-2": { labels: ["Waiting/Follow Up"], confidence: 0.8, rationale: "clear-signal" },
+    "msg-3": { labels: ["Travel"], confidence: 0.4, rationale: "ambiguous" }
   };
 
   const system1: ClassifierSystem1 = {
     async classify(message) {
       system1Calls += 1;
-      return system1ById[message.id];
+      return system1ById[message.id] as never;
     }
   };
 
@@ -96,7 +119,7 @@ test("system1 handles majority pass and second pass only runs for low-confidence
       secondPassCalls += 1;
       assert.equal(message.id, "msg-3");
       return {
-        category: "Action Needed",
+        labels: ["Action Needed", "Travel"],
         rationale: "resolved by ollama",
         model: "deepseek-4.1-flash"
       };
@@ -112,9 +135,9 @@ test("system1 handles majority pass and second pass only runs for low-confidence
   assert.equal(system1Calls, 3);
   assert.equal(secondPassCalls, 1);
 
-  assert.equal(results.get("msg-1")?.category, "FYI/Reference");
-  assert.equal(results.get("msg-2")?.category, "Waiting/Follow-up");
-  assert.equal(results.get("msg-3")?.category, "Action Needed");
+  assert.deepEqual(results.get("msg-1")?.labels, ["Business"]);
+  assert.deepEqual(results.get("msg-2")?.labels, ["Waiting/Follow Up"]);
+  assert.deepEqual(results.get("msg-3")?.labels, ["Action Needed", "Travel"]);
 
   for (const message of messages) {
     const result = results.get(message.id);
@@ -144,7 +167,7 @@ test("pipeline falls back after system1 error and still escalates to second pass
       secondPassCalls += 1;
       assert.equal(received.id, message.id);
       return {
-        category: "Waiting/Follow-up",
+        labels: ["Waiting/Follow Up"],
         rationale: "resolved by ollama",
         model: "deepseek-4.1-flash"
       };
@@ -164,7 +187,7 @@ test("pipeline falls back after system1 error and still escalates to second pass
   }
 
   assert.equal(secondPassCalls, 1);
-  assert.equal(classified.category, "Waiting/Follow-up");
+  assert.deepEqual(classified.labels, ["Waiting/Follow Up"]);
   assert.ok(classified.rationale.model.some((entry) => entry.startsWith("system1-error:system1-down")));
   assert.ok(classified.rationale.model.some((entry) => entry.startsWith("system1-fallback:keyword 'contract':confidence=")));
   assert.ok(classified.rationale.model.some((entry) => entry === "ollama:deepseek-4.1-flash:resolved by ollama"));
@@ -176,14 +199,14 @@ test("keyword rules read the body when the subject has no match", async () => {
   const system1: ClassifierSystem1 = {
     async classify() {
       modelCalls += 1;
-      return { category: "FYI/Reference", confidence: 0.99, rationale: "should-not-be-asked" };
+      return { labels: ["Business"], confidence: 0.99, rationale: "should-not-be-asked" };
     }
   };
 
   const secondPass: SecondPassClassifier = {
     async classify() {
       modelCalls += 1;
-      return { category: "FYI/Reference", rationale: "should-not-be-asked", model: "stub" };
+      return { labels: ["Business"], rationale: "should-not-be-asked", model: "stub" };
     }
   };
 
@@ -194,8 +217,66 @@ test("keyword rules read the body when the subject has no match", async () => {
 
   // Both resolve deterministically from rules; the model is never asked.
   assert.equal(modelCalls, 0);
-  assert.equal(results.get("msg-body")?.category, "Bulk/Archive");
+  assert.deepEqual(results.get("msg-body")?.labels, ["Newsletters"]);
   assert.ok(results.get("msg-body")?.rationale.rule.some((entry) => entry.includes("keyword rule") && entry.includes("body")));
-  assert.equal(results.get("msg-subject")?.category, "Bulk/Archive");
+  assert.deepEqual(results.get("msg-subject")?.labels, ["Newsletters"]);
   assert.ok(results.get("msg-subject")?.rationale.rule.some((entry) => entry.includes("keyword rule") && entry.includes("subject")));
+});
+
+test("a message the model gives no labels is not written as a classify action", async () => {
+  const message = createMessage("msg-empty", "just a note");
+
+  const system1: ClassifierSystem1 = {
+    async classify() {
+      return { labels: [], confidence: 0.95, rationale: "nothing-applies" };
+    }
+  };
+
+  const secondPass: SecondPassClassifier = {
+    async classify() {
+      throw new Error("should-not-run");
+    }
+  };
+
+  const results = await classifyMessagesForDryRun([message], new Map(), { system1, secondPass });
+
+  // Zero labels is a valid classification outcome, and downstream writes nothing for it.
+  assert.deepEqual(results.get("msg-empty")?.labels, []);
+});
+
+test("sender-derived labels survive the keyword-rule path", async () => {
+  const system1: ClassifierSystem1 = {
+    async classify() {
+      throw new Error("should-not-run: the newsletter keyword rule resolves this");
+    }
+  };
+
+  const secondPass: SecondPassClassifier = {
+    async classify() {
+      throw new Error("should-not-run");
+    }
+  };
+
+  // Subject matches the newsletter keyword rule, so the rule path classifies it —
+  // the sender label must still be attached on top.
+  const message = createMessage("msg-friend-news", "Newsletter digest");
+  const result = await classifyMessagesForDryRun([message], new Map(), {
+    system1,
+    secondPass,
+    senderLabels: () => ["Friends"]
+  });
+
+  assert.deepEqual(result.get("msg-friend-news")?.labels, ["Newsletters", "Friends"]);
+});
+
+test("sender-derived labels survive the protected path", async () => {
+  const message = createMessage("msg-family-protected", "Invoice attached");
+
+  const result = await classifyMessagesForDryRun([message], new Map([[message.id, ["vip-sender"]]]), {
+    system1: { async classify() { throw new Error("should-not-run"); } },
+    secondPass: { async classify() { throw new Error("should-not-run"); } },
+    senderLabels: () => ["Family"]
+  });
+
+  assert.deepEqual(result.get("msg-family-protected")?.labels, ["Action Needed", "Family"]);
 });

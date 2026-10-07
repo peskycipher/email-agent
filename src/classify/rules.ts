@@ -1,7 +1,7 @@
-import type { EmailCategory } from "./categories.ts";
+import type { EmailLabel } from "./labels.ts";
 
 export type KeywordRule = {
-  category: EmailCategory;
+  labels: EmailLabel[];
   keywords: string[];
   pipelineRationale: string;
   fallbackConfidence: number;
@@ -10,52 +10,66 @@ export type KeywordRule = {
 
 export const KEYWORD_RULES: KeywordRule[] = [
   {
-    category: "Bulk/Archive",
+    labels: ["Newsletters"],
     keywords: ["newsletter", "unsubscribe", "digest"],
     pipelineRationale: "keyword rule: newsletter/unsubscribe/digest",
     fallbackConfidence: 0.88,
     appliesToPipeline: true
   },
   {
-    category: "Waiting/Follow-up",
+    labels: ["Waiting/Follow Up"],
     keywords: ["follow-up", "follow up", "waiting", "pending"],
     pipelineRationale: "keyword rule: follow-up/waiting",
     fallbackConfidence: 0.84,
     appliesToPipeline: true
   },
   {
-    category: "Action Needed",
-    keywords: ["urgent", "approval", "invoice"],
+    labels: ["Invoices", "Action Needed"],
+    keywords: ["invoice", "approval", "urgent"],
     pipelineRationale: "keyword rule: invoice/approval/urgent",
     fallbackConfidence: 0.92,
     appliesToPipeline: true
   },
   {
-    category: "Action Needed",
+    labels: ["Action Needed"],
     keywords: ["action required", "asap", "payment", "contract"],
     pipelineRationale: "keyword rule: action-required/asap/payment/contract",
     fallbackConfidence: 0.92,
     appliesToPipeline: false
   },
   {
-    category: "Waiting/Follow-up",
+    labels: ["Waiting/Follow Up"],
     keywords: ["check in", "reminder"],
     pipelineRationale: "keyword rule: check-in/reminder",
     fallbackConfidence: 0.84,
     appliesToPipeline: false
   },
   {
-    category: "Bulk/Archive",
-    keywords: ["promo", "sale"],
-    pipelineRationale: "keyword rule: promo/sale",
+    labels: ["Promos"],
+    keywords: ["promo", "sale", "% off", "discount"],
+    pipelineRationale: "keyword rule: promo/sale/discount",
     fallbackConfidence: 0.88,
     appliesToPipeline: false
   },
   {
-    category: "FYI/Reference",
-    keywords: ["fyi", "reference", "minutes", "receipt", "summary", "update"],
-    pipelineRationale: "keyword rule: fyi/reference/minutes/receipt",
-    fallbackConfidence: 0.76,
+    labels: ["Subscriptions"],
+    keywords: ["subscription", "renewal", "renews", "your plan"],
+    pipelineRationale: "keyword rule: subscription/renewal",
+    fallbackConfidence: 0.86,
+    appliesToPipeline: false
+  },
+  {
+    labels: ["Notifications"],
+    keywords: ["notification", "verify", "validation code", "sign in"],
+    pipelineRationale: "keyword rule: notification/verify/code",
+    fallbackConfidence: 0.86,
+    appliesToPipeline: false
+  },
+  {
+    labels: ["IT News"],
+    keywords: ["itnews"],
+    pipelineRationale: "keyword rule: itnews",
+    fallbackConfidence: 0.9,
     appliesToPipeline: false
   }
 ];

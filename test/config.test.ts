@@ -16,7 +16,9 @@ test("loadConfig reads file and lets env override values", async () => {
       account: "file@example.com",
       audit_log_path: path.join(dir, "from-file.jsonl"),
       vip_senders: ["file-vip@example.com"],
-      finance_legal_keywords: ["invoice"]
+      finance_legal_keywords: ["invoice"],
+      family_senders: ["mum@example.com"],
+      friend_senders: ["dave@example.com"]
     }),
     "utf8"
   );
@@ -25,7 +27,8 @@ test("loadConfig reads file and lets env override values", async () => {
     configPath,
     env: {
       MAILBOX_ACCOUNT: "env@example.com",
-      VIP_SENDERS: "env-vip@example.com, env-legal@example.com"
+      VIP_SENDERS: "env-vip@example.com, env-legal@example.com",
+      FAMILY_SENDERS: "env-family@example.com"
     }
   });
 
@@ -33,6 +36,8 @@ test("loadConfig reads file and lets env override values", async () => {
   assert.equal(config.auditLogPath, path.join(dir, "from-file.jsonl"));
   assert.deepEqual(config.vipSenders, ["env-vip@example.com", "env-legal@example.com"]);
   assert.deepEqual(config.financeLegalKeywords, ["invoice"]);
+  assert.deepEqual(config.familySenders, ["env-family@example.com"]);
+  assert.deepEqual(config.friendSenders, ["dave@example.com"]);
 });
 
 test("loadConfig throws clear validation error when required keys are missing", async () => {

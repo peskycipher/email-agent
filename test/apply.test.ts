@@ -26,7 +26,7 @@ async function writePlanFile(dir: string, options: PlanFileOptions = {}): Promis
       {
         message_id: "msg-a",
         action: "classify",
-        category: "Action Needed",
+        labels: ["Action Needed"],
         rationale: {
           policy: [],
           rule: ["needs-manual"],
@@ -36,7 +36,7 @@ async function writePlanFile(dir: string, options: PlanFileOptions = {}): Promis
       {
         message_id: "msg-b",
         action: "classify",
-        category: "Bulk/Archive",
+        labels: ["Newsletters"],
         rationale: {
           policy: [],
           rule: ["bulk-rule"],
@@ -50,7 +50,7 @@ async function writePlanFile(dir: string, options: PlanFileOptions = {}): Promis
       {
         message_id: "msg-c",
         action: "classify",
-        category: "FYI/Reference",
+        labels: ["Business"],
         rationale: {
           policy: [],
           rule: ["fyi-rule"],
@@ -132,7 +132,7 @@ function toMessageState(message: MailboxMessage) {
   };
 }
 
-test("runLiveApply requires explicit approval decisions for every planned category", async () => {
+test("runLiveApply requires explicit approval decisions for every planned label", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
   const planPath = await writePlanFile(dataDir);
 
@@ -156,11 +156,11 @@ test("runLiveApply requires explicit approval decisions for every planned catego
       planPath,
       auditLogPath: path.join(dataDir, "audit.jsonl"),
       approvals: {
-        "Bulk/Archive": true,
+        "Newsletters": true,
         "Action Needed": false
       }
     }),
-    /Missing explicit approval decision for category: FYI\/Reference/
+    /Missing explicit approval decision for label: Business/
   );
 });
 
@@ -186,7 +186,7 @@ test("runLiveApply persists per-run gate evidence and the gate unions it across 
     }
   };
 
-  // Message dates are 2025-12-20 (just outside the 7-day recent window from 2026-01-01).
+  // Message dates are 2025-12-20, well outside any recency window; nothing here is recency-protected.
   let nowMs = Date.parse("2026-01-01T00:00:00.000Z");
   const options = {
     adapter,
@@ -195,9 +195,9 @@ test("runLiveApply persists per-run gate evidence and the gate unions it across 
     planPath,
     auditLogPath: path.join(dataDir, "audit.jsonl"),
     approvals: {
-      "Bulk/Archive": true,
+      "Newsletters": true,
       "Action Needed": false,
-      "FYI/Reference": true
+      "Business": true
     },
     config: buildConfigSnapshot({ account: "pilot@example.com", auditLogPath: path.join(dataDir, "audit.jsonl") }),
     now: () => new Date((nowMs += 1))
@@ -256,7 +256,7 @@ test("runLiveApply applies approved categories and persists run report + metrics
   ];
   await writeSourceRunArtifacts(dataDir, sourceMessages);
 
-  const applyCalls: Array<{ messageId: string; action: "classify" | "archive"; category?: string }> = [];
+  const applyCalls: Array<{ messageId: string; action: "classify" | "archive"; labels?: string[] }> = [];
 
   const adapter: MailboxAdapter = {
     async listRecentInbox() {
@@ -269,8 +269,8 @@ test("runLiveApply applies approved categories and persists run report + metrics
       }
       return toMessageState(message);
     },
-    async apply(messageId, action, category) {
-      applyCalls.push({ messageId, action, category });
+    async apply(messageId, action, labels) {
+      applyCalls.push({ messageId, action, labels });
 
       if (messageId === "msg-c" && action === "archive") {
         return { ok: false, error: "archive-failed" };
@@ -290,17 +290,17 @@ test("runLiveApply applies approved categories and persists run report + metrics
     auditLogPath,
     approvals: {
       "Action Needed": false,
-      "Bulk/Archive": true,
-      "FYI/Reference": true
+      "Newsletters": true,
+      "Business": true
     },
     now: () => new Date("2026-01-04T10:00:00.000Z")
   });
 
   assert.deepEqual(applyCalls, [
-    { messageId: "msg-b", action: "classify", category: "Bulk/Archive" },
-    { messageId: "msg-b", action: "archive", category: undefined },
-    { messageId: "msg-c", action: "classify", category: "FYI/Reference" },
-    { messageId: "msg-c", action: "archive", category: undefined }
+    { messageId: "msg-b", action: "classify", labels: ["Newsletters"] },
+    { messageId: "msg-b", action: "archive", labels: undefined },
+    { messageId: "msg-c", action: "classify", labels: ["Business"] },
+    { messageId: "msg-c", action: "archive", labels: undefined }
   ]);
 
   const auditLines = (await fs.readFile(auditLogPath, "utf8")).trim().split("\n");
@@ -324,21 +324,20 @@ test("runLiveApply applies approved categories and persists run report + metrics
   assert.equal(runRecord.source_plan_id, "plan-run-1");
   assert.equal(runRecord.source_plan_path, planPath);
   assert.equal(runRecord.config.account, "pilot@example.com");
-  assert.equal(runRecord.config.recentDays, 7);
   assert.equal(runRecord.config.confidenceThreshold, 0.7);
 
   assert.equal(runRecord.report.summary.unread_delta, 1);
-  assert.equal(runRecord.report.summary.category_action_totals["Action Needed"].classify.skipped, 1);
-  assert.equal(runRecord.report.summary.category_action_totals["FYI/Reference"].archive.failed, 1);
+  assert.equal(runRecord.report.summary.label_action_totals["Action Needed"].classify.skipped, 1);
+  assert.equal(runRecord.report.summary.label_action_totals["Business"].archive.failed, 1);
   assert.deepEqual(runRecord.report.exception_queue_snapshot, [{ message_id: "msg-a", reasons: ["flagged"], unread: true }]);
   assert.equal(runRecord.report.trace_samples.length, 3);
 
   assert.equal(runRecord.metrics.processed_count, 3);
   assert.equal(runRecord.metrics.archive_precision_estimate, 0.5);
   assert.equal(runRecord.metrics.no_touch_miss_count, 0);
-  assert.equal(runRecord.metrics.category_totals["Action Needed"].classify.skipped, 1);
-  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.success, 1);
-  assert.equal(runRecord.metrics.category_totals["FYI/Reference"].archive.failed, 1);
+  assert.equal(runRecord.metrics.label_totals["Action Needed"].classify.skipped, 1);
+  assert.equal(runRecord.metrics.label_totals["Newsletters"].archive.success, 1);
+  assert.equal(runRecord.metrics.label_totals["Business"].archive.failed, 1);
 
   assert.equal(result.appliedActions, 4);
   assert.equal(result.skippedActions, 1);
@@ -351,7 +350,7 @@ test("runLiveApply blocks protected archive actions and never calls the adapter 
       {
         message_id: "msg-protected",
         action: "classify",
-        category: "Bulk/Archive",
+        labels: ["Newsletters"],
         rationale: {
           policy: [],
           rule: ["bulk-rule"],
@@ -392,7 +391,7 @@ test("runLiveApply blocks protected archive actions and never calls the adapter 
     planPath,
     auditLogPath,
     approvals: {
-      "Bulk/Archive": true
+      "Newsletters": true
     },
     now: () => new Date("2026-01-05T00:00:00.000Z")
   });
@@ -402,8 +401,8 @@ test("runLiveApply blocks protected archive actions and never calls the adapter 
 
   const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
   assert.equal(runRecord.metrics.no_touch_miss_count, 1);
-  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.blocked, 1);
-  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.success, 0);
+  assert.equal(runRecord.metrics.label_totals["Newsletters"].archive.blocked, 1);
+  assert.equal(runRecord.metrics.label_totals["Newsletters"].archive.success, 0);
 
   const auditLines = (await fs.readFile(auditLogPath, "utf8")).trim().split("\n");
   assert.equal(auditLines.length, 2);
@@ -412,7 +411,7 @@ test("runLiveApply blocks protected archive actions and never calls the adapter 
   const blockedArchive = auditRecords.find((record: { action: string }) => record.action === "archive");
   assert.ok(blockedArchive);
   assert.equal(blockedArchive.outcome, "blocked:no-touch");
-  assert.equal(blockedArchive.category, "Bulk/Archive");
+  assert.equal(blockedArchive.labels, "Newsletters");
 });
 
 test("runLiveApply re-checks no-touch at apply-time and blocks flagged-since-dry-run archives", async () => {
@@ -422,7 +421,7 @@ test("runLiveApply re-checks no-touch at apply-time and blocks flagged-since-dry
       {
         message_id: "msg-1",
         action: "classify",
-        category: "Bulk/Archive",
+        labels: ["Newsletters"],
         rationale: {
           policy: [],
           rule: ["bulk-rule"],
@@ -474,7 +473,7 @@ test("runLiveApply re-checks no-touch at apply-time and blocks flagged-since-dry
     planPath,
     auditLogPath: path.join(dataDir, "audit.jsonl"),
     approvals: {
-      "Bulk/Archive": true
+      "Newsletters": true
     },
     now: () => new Date("2026-01-05T00:00:00.000Z")
   });
@@ -482,7 +481,7 @@ test("runLiveApply re-checks no-touch at apply-time and blocks flagged-since-dry
   assert.deepEqual(applyCalls, [{ messageId: "msg-1", action: "classify" }]);
 
   const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
-  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.blocked, 1);
+  assert.equal(runRecord.metrics.label_totals["Newsletters"].archive.blocked, 1);
   assert.equal(runRecord.metrics.no_touch_miss_count, 1);
 });
 
@@ -493,7 +492,7 @@ test("runLiveApply still guards archives when the plan exception queue is edited
       {
         message_id: "msg-1",
         action: "classify",
-        category: "Bulk/Archive",
+        labels: ["Newsletters"],
         rationale: {
           policy: [],
           rule: ["bulk-rule"],
@@ -542,7 +541,7 @@ test("runLiveApply still guards archives when the plan exception queue is edited
     planPath,
     auditLogPath: path.join(dataDir, "audit.jsonl"),
     approvals: {
-      "Bulk/Archive": true
+      "Newsletters": true
     },
     config: buildConfigSnapshot({
       account: "pilot@example.com",
@@ -553,7 +552,7 @@ test("runLiveApply still guards archives when the plan exception queue is edited
   });
 
   const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
-  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.blocked, 1);
+  assert.equal(runRecord.metrics.label_totals["Newsletters"].archive.blocked, 1);
   assert.equal(runRecord.metrics.no_touch_miss_count, 1);
 });
 
@@ -564,7 +563,7 @@ test("runLiveApply blocks archive when getMessage fails", async () => {
       {
         message_id: "msg-1",
         action: "classify",
-        category: "Bulk/Archive",
+        labels: ["Newsletters"],
         rationale: {
           policy: [],
           rule: ["bulk-rule"],
@@ -612,7 +611,7 @@ test("runLiveApply blocks archive when getMessage fails", async () => {
     planPath,
     auditLogPath,
     approvals: {
-      "Bulk/Archive": true
+      "Newsletters": true
     },
     now: () => new Date("2026-01-05T00:00:00.000Z")
   });
@@ -627,14 +626,14 @@ test("runLiveApply blocks archive when getMessage fails", async () => {
 
   const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
   assert.equal(runRecord.metrics.no_touch_miss_count, 0);
-  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.failed, 1);
+  assert.equal(runRecord.metrics.label_totals["Newsletters"].archive.failed, 1);
 });
 
 test("runLiveApply checks category approval before any no-touch re-check or mailbox access", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
   const planPath = await writePlanFile(dataDir, {
     actions: [
-      { message_id: "msg-protected", action: "classify", category: "Bulk/Archive", rationale: { policy: [], rule: ["bulk-rule"], model: [] } },
+      { message_id: "msg-protected", action: "classify", labels: ["Newsletters"], rationale: { policy: [], rule: ["bulk-rule"], model: [] } },
       { message_id: "msg-protected", action: "archive" }
     ],
     exceptionQueue: [{ message_id: "msg-protected", reasons: ["vip-sender"], unread: true }]
@@ -661,7 +660,7 @@ test("runLiveApply checks category approval before any no-touch re-check or mail
     planPath,
     auditLogPath: path.join(dataDir, "audit.jsonl"),
     approvals: {
-      "Bulk/Archive": false // rejected category
+      "Newsletters": false // rejected label
     },
     now: () => new Date("2026-01-05T00:00:00.000Z")
   });
@@ -670,7 +669,7 @@ test("runLiveApply checks category approval before any no-touch re-check or mail
   assert.equal(getMessageCalls, 0);
   const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
   assert.equal(runRecord.metrics.no_touch_miss_count, 0);
-  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.skipped, 1);
+  assert.equal(runRecord.metrics.label_totals["Newsletters"].archive.skipped, 1);
   // classify and archive both belong to the rejected category
   assert.equal(runRecord.skipped_actions, 2);
 });
@@ -682,7 +681,7 @@ test("runLiveApply passes existing message categories to the adapter for classif
       {
         message_id: "msg-1",
         action: "classify",
-        category: "Bulk/Archive",
+        labels: ["Newsletters"],
         rationale: {
           policy: [],
           rule: ["bulk-rule"],
@@ -704,7 +703,7 @@ test("runLiveApply passes existing message categories to the adapter for classif
     }
   ]);
 
-  const classifyCalls: Array<{ messageId: string; category?: string; existingCategories?: string[] }> = [];
+  const classifyCalls: Array<{ messageId: string; labels?: string[]; existingCategories?: string[] }> = [];
 
   const adapter: MailboxAdapter = {
     async listRecentInbox() {
@@ -713,9 +712,9 @@ test("runLiveApply passes existing message categories to the adapter for classif
     async getMessage() {
       return { id: "msg-1", from: "news@example.com", subject: "Digest", flagged: false, unread: true };
     },
-    async apply(messageId, action, category, existingCategories) {
+    async apply(messageId, action, labels, existingCategories) {
       if (action === "classify") {
-        classifyCalls.push({ messageId, category, existingCategories });
+        classifyCalls.push({ messageId, labels, existingCategories });
       }
       return { ok: true };
     }
@@ -728,13 +727,13 @@ test("runLiveApply passes existing message categories to the adapter for classif
     planPath,
     auditLogPath: path.join(dataDir, "audit.jsonl"),
     approvals: {
-      "Bulk/Archive": true
+      "Newsletters": true
     },
     now: () => new Date("2026-01-05T00:00:00.000Z")
   });
 
   assert.deepEqual(classifyCalls, [
-    { messageId: "msg-1", category: "Bulk/Archive", existingCategories: ["Existing", "Bulk/Archive"] }
+    { messageId: "msg-1", labels: ["Newsletters"], existingCategories: ["Existing", "Bulk/Archive"] }
   ]);
 });
 
@@ -745,7 +744,7 @@ test("runLiveApply passes undefined categories when source ingest snapshot is mi
       {
         message_id: "msg-1",
         action: "classify",
-        category: "Bulk/Archive",
+        labels: ["Newsletters"],
         rationale: {
           policy: [],
           rule: ["bulk-rule"],
@@ -755,7 +754,7 @@ test("runLiveApply passes undefined categories when source ingest snapshot is mi
     ]
   });
 
-  const classifyCalls: Array<{ messageId: string; category?: string; existingCategories?: string[] }> = [];
+  const classifyCalls: Array<{ messageId: string; labels?: string[]; existingCategories?: string[] }> = [];
 
   const adapter: MailboxAdapter = {
     async listRecentInbox() {
@@ -764,9 +763,9 @@ test("runLiveApply passes undefined categories when source ingest snapshot is mi
     async getMessage() {
       return { id: "msg-1", from: "news@example.com", subject: "Digest", flagged: false, unread: true };
     },
-    async apply(messageId, action, category, existingCategories) {
+    async apply(messageId, action, labels, existingCategories) {
       if (action === "classify") {
-        classifyCalls.push({ messageId, category, existingCategories });
+        classifyCalls.push({ messageId, labels, existingCategories });
       }
       return { ok: true };
     }
@@ -779,12 +778,12 @@ test("runLiveApply passes undefined categories when source ingest snapshot is mi
     planPath,
     auditLogPath: path.join(dataDir, "audit.jsonl"),
     approvals: {
-      "Bulk/Archive": true
+      "Newsletters": true
     },
     now: () => new Date("2026-01-05T00:00:00.000Z")
   });
 
-  assert.deepEqual(classifyCalls, [{ messageId: "msg-1", category: "Bulk/Archive", existingCategories: undefined }]);
+  assert.deepEqual(classifyCalls, [{ messageId: "msg-1", labels: ["Newsletters"], existingCategories: undefined }]);
 
   const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
   assert.equal(runRecord.report.summary.unread_before, null);

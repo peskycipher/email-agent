@@ -1,9 +1,9 @@
 import type { MailboxMessage } from "../adapter.ts";
 import { defaultFetch, parseJsonBody, type FetchFn } from "../http.ts";
-import { EMAIL_CATEGORIES, isEmailCategory, type EmailCategory } from "./categories.ts";
+import { MODEL_INFERABLE_LABELS, isEmailLabel, type EmailLabel } from "./labels.ts";
 
 export type SecondPassClassification = {
-  category: EmailCategory;
+  labels: EmailLabel[];
   rationale: string;
   model: string;
 };
@@ -28,40 +28,39 @@ type ChatCompletionResponse = {
   }>;
 };
 
-function parseCategory(content: string): { category: EmailCategory; rationale: string } {
+function parseLabels(content: string): { labels: EmailLabel[]; rationale: string } {
   const trimmed = content.trim();
 
   if (trimmed.startsWith("{")) {
     try {
-      const parsed = JSON.parse(trimmed) as { category?: unknown; rationale?: unknown };
-      if (typeof parsed.category === "string" && isEmailCategory(parsed.category)) {
-        return {
-          category: parsed.category,
-          rationale: typeof parsed.rationale === "string" && parsed.rationale.trim().length > 0 ? parsed.rationale : trimmed
-        };
+      const parsed = JSON.parse(trimmed) as { labels?: unknown; rationale?: unknown };
+      if (Array.isArray(parsed.labels)) {
+        const labels = parsed.labels.filter((value): value is EmailLabel => typeof value === "string" && isEmailLabel(value));
+        if (labels.length > 0 || parsed.labels.length === 0) {
+          return {
+            labels,
+            rationale: typeof parsed.rationale === "string" && parsed.rationale.trim().length > 0 ? parsed.rationale : trimmed
+          };
+        }
       }
     } catch {
       // fall through to plain-text parsing
     }
   }
 
-  for (const category of EMAIL_CATEGORIES) {
-    if (trimmed.toLowerCase().includes(category.toLowerCase())) {
-      return {
-        category,
-        rationale: trimmed
-      };
-    }
+  const matched = MODEL_INFERABLE_LABELS.filter((label) => trimmed.toLowerCase().includes(label.toLowerCase()));
+  if (matched.length > 0) {
+    return { labels: matched, rationale: trimmed };
   }
 
-  throw new Error("Ollama response did not include a valid category");
+  throw new Error("Ollama response did not include any valid labels");
 }
 
 function toPrompt(message: MailboxMessage): string {
   return [
-    "Classify this email into exactly one category:",
-    `${EMAIL_CATEGORIES.join(", ")}.`,
-    "Respond as compact JSON with keys category and rationale.",
+    "Attach every applicable label to this email. An email can have zero, one, or many labels.",
+    `Valid labels: ${MODEL_INFERABLE_LABELS.join(", ")}.`,
+    "Respond as compact JSON with keys labels (array of strings) and rationale.",
     `From: ${message.from}`,
     `Subject: ${message.subject}`,
     ...(message.body ? [`Body: ${message.body}`] : []),
@@ -139,6 +138,6 @@ export class OllamaCloudClassifier implements SecondPassClassifier {
       throw new Error("empty completion content");
     }
 
-    return parseCategory(content);
+    return parseLabels(content);
   }
 }

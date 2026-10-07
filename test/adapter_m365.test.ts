@@ -413,7 +413,7 @@ test("M365MailboxAdapter merges new category with existing categories on classif
     fetchFn
   );
 
-  const result = await adapter.apply("immutable-1", "classify", "Bulk/Archive", ["Existing", "Bulk/Archive"]);
+  const result = await adapter.apply("immutable-1", "classify", ["Bulk/Archive"], ["Existing", "Bulk/Archive"]);
 
   assert.equal(result.ok, true);
   assert.equal(capturedMethod, "PATCH");
@@ -460,14 +460,14 @@ test("M365MailboxAdapter fetches live categories when classify snapshot categori
     fetchFn
   );
 
-  const result = await adapter.apply("immutable-1", "classify", "Bulk/Archive", undefined);
+  const result = await adapter.apply("immutable-1", "classify", ["Newsletters"], undefined);
 
   assert.equal(result.ok, true);
   assert.equal(graphCalls.length, 2);
   assert.match(graphCalls[0].url, /\/messages\/immutable-1\?\$select=categories$/);
   assert.equal(graphCalls[0].method, "GET");
   assert.equal(graphCalls[1].method, "PATCH");
-  assert.deepEqual(JSON.parse(graphCalls[1].body ?? "{}"), { categories: ["Existing", "Bulk/Archive"] });
+  assert.deepEqual(JSON.parse(graphCalls[1].body ?? "{}"), { categories: ["Existing", "Newsletters"] });
 });
 
 test("M365MailboxAdapter classify fails without PATCH when category prefetch fails", async () => {
@@ -505,7 +505,7 @@ test("M365MailboxAdapter classify fails without PATCH when category prefetch fai
     fetchFn
   );
 
-  const result = await adapter.apply("immutable-1", "classify", "Bulk/Archive", undefined);
+  const result = await adapter.apply("immutable-1", "classify", ["Newsletters"], undefined);
 
   assert.equal(result.ok, false);
   assert.equal(result.error, "read-failed");

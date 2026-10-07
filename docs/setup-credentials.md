@@ -180,22 +180,17 @@ curl -sS https://api.typesafe.ai/v1/systemone \
   -d '{
     "model":"jev-latest",
     "state":{
-      "request":"Classify: Invoice due Friday",
-      "conversation_excerpt":null,
-      "environment":{"cwd":null,"active_model":null,"context_tokens_used":null},
-      "budget":{"spent_today_usd":0,"spent_this_month_usd":0,"daily_cap_usd":null,"monthly_cap_usd":null,"fraction_of_budget_used":0}
+      "subject":"Invoice due Friday",
+      "from":"billing@example.com",
+      "received_at":"2026-01-01T00:00:00.000Z",
+      "unread":true,
+      "flagged":false,
+      "existing_categories":[],
+      "body":null
     },
     "questions":{
-      "email_category":{
-        "type":"choice",
-        "instructions":"Classify the email in request into exactly one category.",
-        "criteria":{
-          "Action Needed":"requires a response or action",
-          "Waiting/Follow-up":"waiting on someone else / follow-up",
-          "FYI/Reference":"informational",
-          "Bulk/Archive":"newsletter/promo/bulk"
-        }
-      }
+      "Action Needed":{"type":"noul","instructions":"Does this email belong to the label \"Action Needed\"?","criteria":"requires a response or action from the recipient"},
+      "Invoices":{"type":"noul","instructions":"Does this email belong to the label \"Invoices\"?","criteria":"an invoice, bill, receipt, payment request, or payment confirmation"}
     }
   }' | head
 ```

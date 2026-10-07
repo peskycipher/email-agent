@@ -23,7 +23,7 @@ test("OllamaCloudClassifier uses locked primary model and falls back to backup m
             {
               message: {
                 content: JSON.stringify({
-                  category: "FYI/Reference",
+                  labels: ["Business", "Clients"],
                   rationale: "backup model classification"
                 })
               }
@@ -61,7 +61,7 @@ test("OllamaCloudClassifier uses locked primary model and falls back to backup m
   const result = await classifier.classify(message);
 
   assert.deepEqual(calledModels, ["deepseek-4.1-flash", "glm-5.3-flash"]);
-  assert.equal(result.category, "FYI/Reference");
+  assert.deepEqual(result.labels, ["Business", "Clients"]);
   assert.equal(result.model, "glm-5.3-flash");
   // The body reaches the model when the adapter provides it.
   assert.match(prompts[0], /Could you send the delivery address for order A-104\?/);

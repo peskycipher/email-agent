@@ -27,7 +27,7 @@ export type MailboxAdapter = {
   apply(
     messageId: string,
     action: MailboxAction,
-    category?: string,
+    labels?: string[],
     existingCategories?: string[]
   ): Promise<{ ok: boolean; error?: string }>;
 };

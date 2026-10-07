@@ -7,7 +7,7 @@ import ora from "ora";
 import { M365MailboxAdapter } from "./adapter_m365.ts";
 import type { MailboxAdapter } from "./adapter.ts";
 import { appendAuditRecord } from "./audit.ts";
-import { isEmailCategory, EMAIL_CATEGORIES, type EmailCategory } from "./classify/categories.ts";
+import { isEmailLabel, EMAIL_LABELS, type EmailLabel } from "./classify/labels.ts";
 import { buildConfigSnapshot, loadConfig, type Config } from "./config.ts";
 import type { DryRunSummary } from "./dry_run.ts";
 import { evaluateExpansionGate, loadGateEvidence, loadExpansionSignOffFromRun, recordExpansionSignOff } from "./gate.ts";
@@ -86,7 +86,7 @@ function formatDuration(durationMs: number): string {
 function renderDryRunSummary(summary: DryRunSummary): string {
   const rows: Array<[string, string | number]> = [
     ["ingested", summary.ingested],
-    ...EMAIL_CATEGORIES.map((category) => [category, summary.categories[category]] as [string, number]),
+    ...EMAIL_LABELS.map((label) => [label, summary.labels[label]] as [string, number]),
     ["archives planned", summary.archivesPlanned],
     ["protected (no-touch)", summary.protectedItems],
     ["duration", formatDuration(summary.durationMs)]
@@ -146,26 +146,26 @@ function readNumberOption(args: string[], name: string, fallback: number): numbe
   return parsed;
 }
 
-function readCategoryApprovals(args: string[]): Partial<Record<EmailCategory, boolean>> {
-  const approvals: Partial<Record<EmailCategory, boolean>> = {};
+function readLabelApprovals(args: string[]): Partial<Record<EmailLabel, boolean>> {
+  const approvals: Partial<Record<EmailLabel, boolean>> = {};
 
-  for (const category of readOptions(args, "--approve-category")) {
-    if (!isEmailCategory(category)) {
-      throw new Error(`Invalid category for --approve-category: ${category}`);
+  for (const label of readOptions(args, "--approve-label")) {
+    if (!isEmailLabel(label)) {
+      throw new Error(`Invalid label for --approve-label: ${label}`);
     }
-    approvals[category] = true;
+    approvals[label] = true;
   }
 
-  for (const category of readOptions(args, "--reject-category")) {
-    if (!isEmailCategory(category)) {
-      throw new Error(`Invalid category for --reject-category: ${category}`);
+  for (const label of readOptions(args, "--reject-label")) {
+    if (!isEmailLabel(label)) {
+      throw new Error(`Invalid label for --reject-label: ${label}`);
     }
 
-    if (approvals[category] === true) {
-      throw new Error(`Conflicting approval options for category: ${category}`);
+    if (approvals[label] === true) {
+      throw new Error(`Conflicting approval options for label: ${label}`);
     }
 
-    approvals[category] = false;
+    approvals[label] = false;
   }
 
   return approvals;
@@ -179,7 +179,7 @@ function renderHelp(version: string): string {
     "  node src/cli.ts --version",
     "  node src/cli.ts demo [--config <path>] [--message-id <id>]",
     "  node src/cli.ts dry-run [--config <path>] [--limit <n>]",
-    "  node src/cli.ts live-apply --plan <path> [--config <path>] [--approve-category <name>] [--reject-category <name>]",
+    "  node src/cli.ts live-apply --plan <path> [--config <path>] [--approve-label <name>] [--reject-label <name>]",
     "  node src/cli.ts sign-off --run <path-to-run-json> --decision <go|no-go> [--actor <you>] [--note \"...\"]",
     "  node src/cli.ts gate --run <path-to-run-json>"
   ].join("\n");
@@ -224,7 +224,7 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
       account: config.account,
       message_id: messageId,
       action: "classify",
-      category: "FYI/Reference",
+      labels: "Notifications",
       outcome: "success",
       rationale: "demo-run",
       run_id: runId
@@ -280,7 +280,7 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
       throw new Error("Missing required option: --plan <path>");
     }
 
-    const approvals = readCategoryApprovals(args);
+    const approvals = readLabelApprovals(args);
 
     const config = await loadConfig({ configPath });
     const createAdapter = dependencies.createAdapter ?? createAdapterFromConfig;

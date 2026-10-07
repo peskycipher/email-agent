@@ -1,6 +1,6 @@
 # email-agent
 
-A safety-first inbox cleanup agent. V1 targets a single pilot **Microsoft 365** mailbox: it plans a cleanup as a dry run, waits for you to approve it category by category, then applies only the approved, low-risk actions (categorize and archive). Every action is audited, and nothing is ever deleted.
+A safety-first inbox cleanup agent. V1 targets a single pilot **Microsoft 365** mailbox: it plans a cleanup as a dry run, waits for you to approve it label by label, then applies only the approved, low-risk actions (categorize and archive). Every action is audited, and nothing is ever deleted.
 
 Gmail and the other mailboxes are deferred until the pilot passes a measured rollout gate. See [`SPEC-email-cleanup-agent-v1.md`](SPEC-email-cleanup-agent-v1.md) for the full spec.
 
@@ -11,15 +11,16 @@ Gmail and the other mailboxes are deferred until the pilot passes a measured rol
 ```
 dry-run                                   live-apply                         gate
   ingest inbox (M365 / Graph)               read the dry-run plan              read run metrics
-  -> no-touch policy                        require a decision per category    -> 4 conditions
+  -> no-touch policy                        require a decision per label       -> 4 conditions
   -> rules                                  skip anything protected            -> allowed / blocked
-  -> JEV System1 (first pass)               apply approved categories only
+  -> JEV System1 (first pass)               apply approved labels only
   -> Ollama Cloud (ambiguous only)          write audit + report + metrics
   -> persist plan (zero mutations)
 ```
 
-- **Categories.** Every message gets exactly one of: `Action Needed`, `Waiting/Follow-up`, `FYI/Reference`, `Bulk/Archive`.
-- **Actions.** Only `classify` (categorize) and `archive` exist. There is no delete code path, and tests enforce that at compile time and runtime.
+- **Labels.** Every message gets any number of labels from a flat vocabulary (see [Labels](#labels)). Labels are orthogonal: an email can be `Realestate` and `Invoices` and `Action Needed` at once.
+- **Actions.** Only `classify` (apply the message's labels as Outlook categories) and `archive` exist. There is no delete code path, and tests enforce that at compile time and runtime.
+- **Archive eligibility.** A message is archived only when it carries at least one archive-safe label and no veto label. See [Labels](#labels).
 - **Zero unread, where allowed.** Protected messages are never archived. They go to an exception queue for you to handle by hand.
 
 ### Decision order
@@ -29,12 +30,39 @@ Each step only handles what the earlier ones left unresolved. Model output never
 1. **No-touch policy** (hard rules, always first). Protected from archive:
    - senders on your VIP list (exact address match, case-insensitive)
    - flagged or starred messages
-   - messages from the last 7 days (configurable, boundary inclusive)
    - messages whose subject contains a finance or legal keyword (case-insensitive substring)
-   - messages with an unparseable date (fails closed)
-2. **Deterministic rules** (existing mailbox categories, subject keywords, then body keywords when the subject has no match).
-3. **JEV System1** first pass: a cheap, high-throughput model call that returns a category and a confidence.
-4. **Ollama Cloud** second pass, only for low-confidence items: `deepseek-4.1-flash`, falling back to `glm-5.3-flash` if the call fails. If System1 itself is unavailable, a local keyword classifier takes its place and still escalates uncertain items. If both Ollama models fail, the item keeps its System1 category and the failure is recorded in its rationale trace.
+2. **Deterministic rules** (existing mailbox labels, subject keywords, then body keywords when the subject has no match).
+3. **JEV System1** first pass: one `noul` question per model-inferable label; every label above 0.7 is attached, and a confidence derived from how decisive the answers were decides whether to escalate.
+4. **Ollama Cloud** second pass, only for low-confidence items: `deepseek-4.1-flash`, falling back to `glm-5.3-flash` if the call fails. If System1 itself is unavailable, a local keyword classifier takes its place and still escalates uncertain items. If both Ollama models fail, the item keeps its System1 labels and the failure is recorded in its rationale trace.
+
+Sender-derived labels (`Family`, `Friends`, `IT News`) are resolved from the message's sender and added on top of whatever the other paths produced, since they cannot be inferred from content.
+
+### Labels
+
+Labels are a flat, open vocabulary. An email carries any number of them.
+
+| Label | Inferred by |
+| --- | --- |
+| `Action Needed` | model, rules; also applied to every protected message |
+| `Waiting/Follow Up` | model, rules |
+| `Important` | model |
+| `Realestate` | model |
+| `Invoices` | model, rules |
+| `Crypto` | model |
+| `Business` | model |
+| `Travel` | model |
+| `Clients` | model |
+| `Family` | sender list (`family_senders`) |
+| `Friends` | sender list (`friend_senders`) |
+| `IT News` | sender domain (`email.itnews.com.au`) |
+| `Newsletters` | model, rules |
+| `Promos` | model, rules |
+| `Notifications` | model, rules |
+| `Subscriptions` | model, rules |
+
+**Archive-safe:** `Newsletters`, `Promos`, `Notifications`, `Subscriptions`, `IT News`.
+**Veto (blocks an archive even alongside an archive-safe label):** `Action Needed`, `Important`, `Family`, `Friends`.
+The remaining labels are neutral: they neither qualify a message for archiving nor block it.
 
 ## Requirements
 
@@ -77,7 +105,7 @@ Run the CLI with `node src/cli.ts <command>` or `npm start -- <command>`.
 
 ### The workflow
 
-The cleanup is a step-by-step loop you drive yourself. Nothing touches the mailbox until you approve a category, and the agent never expands beyond the pilot on its own.
+The cleanup is a step-by-step loop you drive yourself. Nothing touches the mailbox until you approve a label, and the agent never expands beyond the pilot on its own.
 
 ```bash
 # 1. Plan — read the inbox, classify, apply no-touch rules. Zero mailbox changes.
@@ -85,13 +113,13 @@ node src/cli.ts dry-run --config ./config.json --limit 500
 
 # 2. Review the plan it printed (actions, rationale traces, exception queue).
 
-# 3. Apply — decide every category that appears in the plan.
+# 3. Apply — decide every label that appears in the plan.
 node src/cli.ts live-apply \
   --plan data/plans/<plan-id>.json \
   --config ./config.json \
-  --approve-category "Bulk/Archive" \
-  --approve-category "FYI/Reference" \
-  --reject-category "Action Needed"
+  --approve-label "Newsletters" \
+  --approve-label "Promos" \
+  --reject-label "Action Needed"
 
 # 4. Check the rollout gate against cumulative pilot evidence.
 node src/cli.ts gate --run data/runs/<live-run-id>.json
@@ -111,25 +139,26 @@ It also prints a summary of what the run just did:
 Summary
   ingested                 50
   Action Needed            12
-  Waiting/Follow-up         8
-  FYI/Reference            20
-  Bulk/Archive             10
+  Waiting/Follow Up         8
+  Realestate                6
+  Invoices                  5
+  Newsletters               9
+  Promos                    7
   archives planned         30
   protected (no-touch)      5
   duration                 4.2s
   no-touch reasons
-    recent-thread           3
     flagged                 1
     vip-sender              1
 ```
 
-A run where every message is protected is self-explaining: `archives planned 0` plus the reason breakdown tells you the recent-thread window (or your VIP/keyword lists) is covering the whole batch — raise `--limit` to reach older mail, or lower `recent_days`.
+A run where every message is protected is self-explaining: `archives planned 0` plus the reason breakdown tells you your VIP/keyword lists are covering the whole batch — raise `--limit` to reach a different slice of mail.
 
 While it works, [`ora`](https://github.com/sindresorhus/ora) spins a status line on **stderr** (`⠋ dry-run: ingesting and classifying`), clearing it before the summary prints. stdout stays clean, so piped output is unaffected; when stderr is not a TTY the spinner writes nothing at all. The total run time is reported as the `duration` row in the summary rather than on the spinner line.
 
 > **If the status line repeats instead of spinning in place**, your terminal is rendering each repaint as its own line instead of honouring the carriage return — the spinner cannot repaint in a renderer that appends. Redirect stderr (`node src/cli.ts dry-run 2>/dev/null`) to silence it, or ask for the single-line mode, which writes the status text once and never repaints.
 
-**2. Approve and apply.** You must give an explicit decision for **every** category that appears in the plan; a missing decision is an error, so nothing is applied by accident. Rejected categories leave their mail untouched, and each live run is linked to the dry-run plan it came from. Even with a category approved, an archive for a protected message is blocked rather than sent: it is audited as `blocked:no-touch` and counted as a no-touch miss.
+**2. Approve and apply.** You must give an explicit decision for **every** label that appears in the plan; a missing decision is an error, so nothing is applied by accident. A message is skipped unless **every** label it carries is approved, so rejecting one label leaves that mail untouched. Each live run is linked to the dry-run plan it came from. Even with a label approved, an archive for a protected message is blocked rather than sent: it is audited as `blocked:no-touch` and counted as a no-touch miss.
 
 **3. Check the gate.** `gate` reads cumulative evidence and prints all four expansion conditions (see [Rollout gate](#rollout-gate)).
 
@@ -142,7 +171,7 @@ Then repeat 1–3 for the next batch. Evidence accumulates across live runs, so 
 | Command | What it does | Reads/writes the mailbox |
 | --- | --- | --- |
 | `dry-run [--config <path>] [--limit <n>]` | Ingests, classifies, applies no-touch rules, and writes a plan + run + ingest record. `--limit` default 50. | Reads only |
-| `live-apply --plan <path> [--config <path>] --approve-category <name> --reject-category <name>` | Applies approved categories from a plan: `classify` and `archive` only. Repeat the flags per category. | Writes (approved categories only) |
+| `live-apply --plan <path> [--config <path>] --approve-label <name> --reject-label <name>` | Applies approved labels from a plan: `classify` and `archive` only. Repeat the flags per label. A message is skipped unless every label it carries is approved. | Writes (approved labels only) |
 | `gate --run <path-to-run-json>` | Prints the four expansion conditions from cumulative evidence and whether expansion is allowed. | Reads local records |
 | `sign-off --run <path-to-run-json> --decision <go\|no-go> [--actor <you>] [--note "..."]` | Records your expansion decision in `signoffs/<run-id>.json`. Invalid decisions and a missing `--run` are errors. | Reads local records |
 | `demo [--config <path>] [--message-id <id>]` | Writes one sample audit record to prove the pipeline end to end. | Local only |
@@ -162,7 +191,8 @@ Settings come from a JSON file (`--config <path>`, or the `EMAIL_CLEANUP_CONFIG`
   "audit_log_path": "data/audit.jsonl",
   "vip_senders": ["ceo@example.com", "lawyer@example.com"],
   "finance_legal_keywords": ["invoice", "contract", "tax", "legal", "payment"],
-  "recent_days": 7,
+  "family_senders": ["mum@example.com"],
+  "friend_senders": ["dave@example.com"],
   "confidence_threshold": 0.7
 }
 ```
@@ -177,7 +207,8 @@ A ready-to-copy version ships as `config.example.json` in the repo root.
 | `m365_tenant_id`, `m365_client_id`, `m365_client_secret` | `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` | none | Graph credentials. |
 | `vip_senders` | `VIP_SENDERS` | empty | Comma-separated in the environment. Always protected. |
 | `finance_legal_keywords` | `FINANCE_LEGAL_KEYWORDS` | empty | Comma-separated in the environment. Subject matches are protected. |
-| `recent_days` | `RECENT_DAYS` | `7` | Messages this recent are protected. |
+| `family_senders` | `FAMILY_SENDERS` | empty | Comma-separated. Senders labelled `Family`. |
+| `friend_senders` | `FRIEND_SENDERS` | empty | Comma-separated. Senders labelled `Friends`. |
 | `confidence_threshold` | `CONFIDENCE_THRESHOLD` | `0.7` | System1 confidence below this escalates to the second pass. |
 
 > **Body inclusion** is configured on the M365 adapter itself (`bodyMode`: `"preview"` (default) or `"full"` for the HTML body with tags stripped; `bodyMaxChars`: default `4000`). See [ADR-0004](docs/adr/0004-email-body-in-classification.md).
@@ -190,13 +221,13 @@ Everything lives under `data_dir` (default `./data`, which is git-ignored).
 
 | Path | Contents |
 | --- | --- |
-| `audit.jsonl` | Append-only, one JSON object per action. Fields: `timestamp`, `account`, `message_id`, `action`, `category`, `outcome`, `rationale`, `run_id`. A record missing a required field is rejected. |
+| `audit.jsonl` | Append-only, one JSON object per action. Fields: `timestamp`, `account`, `message_id`, `action`, `labels` (comma-joined), `outcome`, `rationale`, `run_id`. A record missing a required field is rejected. |
 | `plans/<plan-id>.json` | The dry-run plan: proposed actions, rationale traces, exception queue, config snapshot. |
-| `runs/<run-id>.json` | The run record, **immutable once written**. A dry run stores its planned actions and exception queue. A **live run** also stores the report (totals by category and action, unread delta, sample reasoning traces, exception queue snapshot), the metrics, and its own gate-evidence tallies (`message_ids`, `archive_attempt_tallies`) that `gate` unions across runs. |
+| `runs/<run-id>.json` | The run record, **immutable once written**. A dry run stores its planned actions and exception queue. A **live run** also stores the report (totals by label and action, unread delta, sample reasoning traces, exception queue snapshot), the metrics, and its own gate-evidence tallies (`message_ids`, `archive_attempt_tallies`) that `gate` unions across runs. |
 | `runs/<run-id>-ingest.json` | The messages ingested by a dry run. |
 | `signoffs/<run-id>.json` | Your go/no-go decision. Kept separate so run records stay immutable. |
 
-Run metrics are `processed_count`, `archive_precision_estimate`, `no_touch_miss_count`, and category totals. Archive precision is the success rate over archives of non-protected messages (zero attempts reports 0 — no evidence, no pass). A no-touch miss is any blocked archive plus any archive attempt on a protected message. Transient mailbox fetch failures are logged as `failed:mailbox-fetch` and excluded from both precision and miss evidence.
+Run metrics are `processed_count`, `archive_precision_estimate`, `no_touch_miss_count`, and per-label totals (each action counted once, under its message's primary label). Archive precision is the success rate over archives of non-protected messages (zero attempts reports 0 — no evidence, no pass). A no-touch miss is any blocked archive plus any archive attempt on a protected message. Transient mailbox fetch failures are logged as `failed:mailbox-fetch` and excluded from both precision and miss evidence.
 
 ## Rollout gate
 

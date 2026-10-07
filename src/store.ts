@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { MailboxAction, MailboxMessage } from "./adapter.ts";
-import type { EmailCategory } from "./classify/categories.ts";
+import type { EmailLabel } from "./classify/labels.ts";
 import type { RationaleTrace } from "./classify/pipeline.ts";
 import type { ConfigSnapshot } from "./config.ts";
 
@@ -10,7 +10,7 @@ export type PlannedAction =
   | {
       message_id: string;
       action: Extract<MailboxAction, "classify">;
-      category: EmailCategory;
+      labels: EmailLabel[];
       rationale?: RationaleTrace;
     }
   | {

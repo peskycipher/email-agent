@@ -1,5 +1,5 @@
 import type { MailboxAction } from "./adapter.ts";
-import { EMAIL_CATEGORIES, type EmailCategory } from "./classify/categories.ts";
+import { EMAIL_LABELS, type EmailLabel } from "./classify/labels.ts";
 import type { ExceptionQueueItem } from "./store.ts";
 
 export type AppliedActionStatus = "success" | "failed" | "skipped" | "blocked";
@@ -7,7 +7,8 @@ export type AppliedActionStatus = "success" | "failed" | "skipped" | "blocked";
 export type EvaluatedAction = {
   message_id: string;
   action: MailboxAction;
-  category: EmailCategory;
+  /** All labels attached to the message; the first is the primary label used for totals. */
+  labels: EmailLabel[];
   status: AppliedActionStatus;
   /** True when the action failed for operational reasons (e.g. mailbox fetch); excluded from precision and miss evidence. */
   operationalFailure?: boolean;
@@ -21,13 +22,13 @@ export type ActionTotals = {
   blocked: number;
 };
 
-export type CategoryActionTotals = Record<EmailCategory, Record<MailboxAction, ActionTotals>>;
+export type LabelActionTotals = Record<EmailLabel, Record<MailboxAction, ActionTotals>>;
 
 export type RunMetrics = {
   processed_count: number;
   archive_precision_estimate: number;
   no_touch_miss_count: number;
-  category_totals: CategoryActionTotals;
+  label_totals: LabelActionTotals;
 };
 
 export type BuildRunMetricsInput = {
@@ -50,23 +51,30 @@ function createActionTotals(): ActionTotals {
   };
 }
 
-function createCategoryTotals(): CategoryActionTotals {
+function createLabelTotals(): LabelActionTotals {
   return Object.fromEntries(
-    EMAIL_CATEGORIES.map((category) => [
-      category,
+    EMAIL_LABELS.map((label) => [
+      label,
       {
         classify: createActionTotals(),
         archive: createActionTotals()
       }
     ])
-  ) as CategoryActionTotals;
+  ) as LabelActionTotals;
 }
 
 export function buildRunMetrics(input: BuildRunMetricsInput): RunMetrics {
-  const categoryTotals = createCategoryTotals();
+  const labelTotals = createLabelTotals();
 
   for (const action of input.evaluatedActions) {
-    const totals = categoryTotals[action.category][action.action];
+    // Count each action once, under the message's primary label, so the totals
+    // still sum to the number of actions rather than the number of labels.
+    const primary = action.labels[0];
+    if (!primary) {
+      continue;
+    }
+
+    const totals = labelTotals[primary][action.action];
     totals.planned += 1;
     totals[action.status] += 1;
   }
@@ -95,6 +103,6 @@ export function buildRunMetrics(input: BuildRunMetricsInput): RunMetrics {
     processed_count: new Set(input.evaluatedActions.map((action) => action.message_id)).size,
     archive_precision_estimate: archivePrecisionEstimate,
     no_touch_miss_count: noTouchMissCount,
-    category_totals: categoryTotals
+    label_totals: labelTotals
   };
 }

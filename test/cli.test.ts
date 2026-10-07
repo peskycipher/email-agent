@@ -125,12 +125,12 @@ test("cli dry-run writes persisted plan artifacts and performs zero mailbox muta
       // must never turn this test into a live network call (README promises no network).
       system1Classifier: {
         async classify() {
-          return { category: "Bulk/Archive", confidence: 0.5, rationale: "stub-low-confidence" };
+          return { labels: ["Newsletters"], confidence: 0.5, rationale: "stub-low-confidence" };
         }
       },
       secondPassClassifier: {
         async classify() {
-          return { category: "FYI/Reference", rationale: "stub-second-pass", model: "stub" };
+          return { labels: ["Newsletters"], rationale: "stub-second-pass", model: "stub" };
         }
       },
       now: () => new Date("2026-01-03T00:00:00.000Z")
@@ -148,7 +148,7 @@ test("cli dry-run writes persisted plan artifacts and performs zero mailbox muta
   assert.equal(plan.actions.length, 2);
   assert.equal(plan.actions[0].message_id, "msg-7");
   assert.equal(plan.actions[0].action, "classify");
-  assert.equal(plan.actions[0].category, "FYI/Reference");
+  assert.deepEqual(plan.actions[0].labels, ["Newsletters"]);
   assert.ok(Array.isArray(plan.actions[0].rationale.policy));
   assert.ok(Array.isArray(plan.actions[0].rationale.rule));
   assert.ok(Array.isArray(plan.actions[0].rationale.model));
@@ -160,7 +160,7 @@ test("cli dry-run writes persisted plan artifacts and performs zero mailbox muta
   const summary = stdout.join("\n");
   assert.match(summary, /Summary/);
   assert.match(summary, /ingested\s+1/);
-  assert.match(summary, /FYI\/Reference\s+1/);
+  assert.match(summary, /Newsletters\s+1/);
   assert.match(summary, /archives planned\s+1/);
   assert.match(summary, /protected \(no-touch\)\s+0/);
   assert.match(summary, /duration\s+0ms/);
@@ -208,8 +208,8 @@ test("cli dry-run shows a spinner while the classifier runs when a TTY is availa
       createAdapter: () => adapter,
       spinner: true,
       spinnerStream,
-      system1Classifier: { async classify() { return { category: "FYI/Reference", confidence: 0.9, rationale: "stub" }; } },
-      secondPassClassifier: { async classify() { return { category: "FYI/Reference", rationale: "stub", model: "stub" }; } },
+      system1Classifier: { async classify() { return { labels: ["Business"], confidence: 0.9, rationale: "stub" }; } },
+      secondPassClassifier: { async classify() { return { labels: ["Business"], rationale: "stub", model: "stub" }; } },
       now: () => new Date("2026-01-03T00:00:00.000Z")
     }
   );
@@ -261,8 +261,8 @@ test("cli dry-run prints no spinner when the stream is not a TTY", async () => {
     {
       createAdapter: () => adapter,
       spinnerStream,
-      system1Classifier: { async classify() { return { category: "FYI/Reference", confidence: 0.9, rationale: "stub" }; } },
-      secondPassClassifier: { async classify() { return { category: "FYI/Reference", rationale: "stub", model: "stub" }; } },
+      system1Classifier: { async classify() { return { labels: ["Business"], confidence: 0.9, rationale: "stub" }; } },
+      secondPassClassifier: { async classify() { return { labels: ["Business"], rationale: "stub", model: "stub" }; } },
       now: () => new Date("2026-01-03T00:00:00.000Z")
     }
   );
@@ -297,7 +297,7 @@ test("cli live-apply applies only approved categories", async () => {
           {
             message_id: "msg-1",
             action: "classify",
-            category: "Action Needed",
+            labels: ["Action Needed"],
             rationale: {
               policy: [],
               rule: ["manual"],
@@ -307,7 +307,7 @@ test("cli live-apply applies only approved categories", async () => {
           {
             message_id: "msg-2",
             action: "classify",
-            category: "Bulk/Archive",
+            labels: ["Newsletters"],
             rationale: {
               policy: [],
               rule: ["bulk"],
@@ -360,7 +360,7 @@ test("cli live-apply applies only approved categories", async () => {
     "utf8"
   );
 
-  const applyCalls: Array<{ messageId: string; action: "classify" | "archive"; category?: string }> = [];
+  const applyCalls: Array<{ messageId: string; action: "classify" | "archive"; labels?: string[] }> = [];
   const adapter: MailboxAdapter = {
     async listRecentInbox() {
       return [];
@@ -374,8 +374,8 @@ test("cli live-apply applies only approved categories", async () => {
         unread: true
       };
     },
-    async apply(messageId, action, category) {
-      applyCalls.push({ messageId, action, category });
+    async apply(messageId, action, labels) {
+      applyCalls.push({ messageId, action, labels });
       return { ok: true };
     }
   };
@@ -390,9 +390,9 @@ test("cli live-apply applies only approved categories", async () => {
       configPath,
       "--plan",
       planPath,
-      "--approve-category",
-      "Bulk/Archive",
-      "--reject-category",
+      "--approve-label",
+      "Newsletters",
+      "--reject-label",
       "Action Needed"
     ],
     {
@@ -407,8 +407,8 @@ test("cli live-apply applies only approved categories", async () => {
 
   assert.equal(code, 0, stderr.join("\n"));
   assert.deepEqual(applyCalls, [
-    { messageId: "msg-2", action: "classify", category: "Bulk/Archive" },
-    { messageId: "msg-2", action: "archive", category: undefined }
+    { messageId: "msg-2", action: "classify", labels: ["Newsletters"] },
+    { messageId: "msg-2", action: "archive", labels: undefined }
   ]);
   assert.ok(stdout.some((line) => line.includes("live-apply complete")));
 });

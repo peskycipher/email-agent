@@ -16,20 +16,20 @@ function buildRunRecord(metrics: {
     mode: "live-apply",
     metrics: {
       ...metrics,
-      category_totals: {
+      label_totals: {
         "Action Needed": {
           classify: { planned: 1, success: 1, failed: 0, skipped: 0, blocked: 0 },
           archive: { planned: 0, success: 0, failed: 0, skipped: 0, blocked: 0 }
         },
-        "Waiting/Follow-up": {
+        "Waiting/Follow Up": {
           classify: { planned: 0, success: 0, failed: 0, skipped: 0, blocked: 0 },
           archive: { planned: 0, success: 0, failed: 0, skipped: 0, blocked: 0 }
         },
-        "FYI/Reference": {
+        "Business": {
           classify: { planned: 0, success: 0, failed: 0, skipped: 0, blocked: 0 },
           archive: { planned: 0, success: 0, failed: 0, skipped: 0, blocked: 0 }
         },
-        "Bulk/Archive": {
+        "Newsletters": {
           classify: { planned: 0, success: 0, failed: 0, skipped: 0, blocked: 0 },
           archive: { planned: 0, success: 0, failed: 0, skipped: 0, blocked: 0 }
         }

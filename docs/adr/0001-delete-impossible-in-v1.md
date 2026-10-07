@@ -9,6 +9,7 @@ at runtime (`test/delete_impossible.test.ts`).
 
 Consequences: nothing is ever destroyed in V1 — archiving only moves mail out of
 the inbox into the standard Archive folder (a classification action rewrites
-labels), the agent exposes no restore path and no delete path, only unprotected
-categories (`Bulk/Archive`, `FYI/Reference`) archive, and deleting messages
+labels), the agent exposes no restore path and no delete path, only messages
+carrying an archive-safe label with no veto label archive (`Newsletters`,
+`Promos`, `Notifications`, `Subscriptions`, `IT News`), and deleting messages
 later means a new decision with its own ADR.

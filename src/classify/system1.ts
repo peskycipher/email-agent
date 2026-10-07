@@ -1,10 +1,10 @@
 import type { MailboxMessage } from "../adapter.ts";
 import { defaultFetch, parseJsonBody, type FetchFn } from "../http.ts";
-import { isEmailCategory, type EmailCategory } from "./categories.ts";
+import { MODEL_INFERABLE_LABELS, type EmailLabel } from "./labels.ts";
 import { KEYWORD_RULES, findKeywordRuleMatch } from "./rules.ts";
 
 export type System1Classification = {
-  category: EmailCategory;
+  labels: EmailLabel[];
   confidence: number;
   rationale: string;
 };
@@ -14,20 +14,55 @@ export type ClassifierSystem1 = {
 };
 
 export type JevSystem1ClassifierOptions = {
-  apiKey?: string;
   baseUrl?: string;
+  apiKey?: string;
   model?: string;
   fetchFn?: FetchFn;
-  /** Delay before the single 429/529 retry (docs recommend backoff; fixed delay, upgrade if noisy). */
   retryDelayMs?: number;
 };
 
 const DEFAULT_BASE_URL = "https://api.typesafe.ai";
 const DEFAULT_MODEL = "jev-latest";
 
+/** Noul probability above which a label is attached. */
+const LABEL_THRESHOLD = 0.7;
+
+/** Human-readable rubric per label, used as the noul criteria text. */
+const LABEL_CRITERIA: Record<EmailLabel, string> = {
+  "Action Needed": "requires a response or action from the recipient",
+  "Waiting/Follow Up": "the recipient is waiting on someone else or should follow up later",
+  Important: "materially important to the recipient's money, housing, work, or obligations",
+  Realestate: "about property: rentals, inspections, applications, agents, listings",
+  Invoices: "an invoice, bill, receipt, payment request, or payment confirmation",
+  Crypto: "about cryptocurrency, exchanges, tokens, or blockchain activity",
+  Business: "commercial or business operations, partners, vendors, or company matters",
+  Travel: "flights, hotels, itineraries, bookings, or trip logistics",
+  Clients: "from or about a client of the recipient's business",
+  Family: "from a family member",
+  Friends: "from a friend",
+  "IT News": "technology industry news or newsletters",
+  Newsletters: "a newsletter, digest, or mass mailing",
+  Promos: "a promotion, sale, discount, or marketing offer",
+  Notifications: "an automated notification, alert, verification, or security message",
+  Subscriptions: "a subscription, renewal, plan, or recurring service"
+};
+
 function toClassificationRequest(message: MailboxMessage, model: string): Record<string, unknown> {
   // State is the email material only — descriptive fields, no filler,
   // per docs/typesafe-jev.skill.md ("State").
+  // One noul question per label: choice can only pick one option, so independent
+  // yes/no questions are the documented way to attach several labels.
+  const questions = Object.fromEntries(
+    MODEL_INFERABLE_LABELS.map((label) => [
+      label,
+      {
+        type: "noul",
+        instructions: `Does this email belong to the label "${label}"?`,
+        criteria: LABEL_CRITERIA[label]
+      }
+    ])
+  );
+
   return {
     model,
     state: {
@@ -39,18 +74,7 @@ function toClassificationRequest(message: MailboxMessage, model: string): Record
       existing_categories: message.categories,
       body: message.body ?? null
     },
-    questions: {
-      email_category: {
-        type: "choice",
-        instructions: "Classify the email described by this state into exactly one of the four categories.",
-        criteria: {
-          "Action Needed": "requires a response or action from the recipient",
-          "Waiting/Follow-up": "you are waiting on someone else or should follow up later",
-          "FYI/Reference": "informational, reference material, no action needed",
-          "Bulk/Archive": "mass mail, newsletters, promotions, notifications"
-        }
-      }
-    }
+    questions
   };
 }
 
@@ -77,6 +101,37 @@ function clampConfidence(value: number): number {
   }
 
   return value;
+}
+
+type NoulAnswer = { type?: unknown; noul?: unknown };
+
+function readLabels(payload: unknown): { labels: EmailLabel[]; probabilities: Array<[EmailLabel, number]> } {
+  const answers = (payload as { answers?: Record<string, NoulAnswer> }).answers;
+  if (!answers || typeof answers !== "object") {
+    throw new Error("JEV System1 returned no answers");
+  }
+
+  const probabilities: Array<[EmailLabel, number]> = [];
+
+  for (const label of MODEL_INFERABLE_LABELS) {
+    const answer = answers[label];
+    if (!answer || typeof answer !== "object") {
+      continue;
+    }
+
+    if (typeof answer.noul !== "number" || !Number.isFinite(answer.noul)) {
+      throw new Error(`JEV System1 returned an invalid answer for ${label}`);
+    }
+
+    probabilities.push([label, clampConfidence(answer.noul)]);
+  }
+
+  if (probabilities.length === 0) {
+    throw new Error("JEV System1 returned no usable label answers");
+  }
+
+  const labels = probabilities.filter(([, p]) => p >= LABEL_THRESHOLD).map(([label]) => label);
+  return { labels, probabilities };
 }
 
 export class JevSystem1Classifier implements ClassifierSystem1 {
@@ -124,22 +179,18 @@ export class JevSystem1Classifier implements ClassifierSystem1 {
       throw new Error(readSystem1Error(payload, response.status));
     }
 
-    const answer = (payload as { answers?: { email_category?: { choice?: unknown; confidence?: unknown } } }).answers?.email_category;
+    const { labels, probabilities } = readLabels(payload);
 
-    if (!answer || typeof answer.choice !== "string" || !isEmailCategory(answer.choice)) {
-      throw new Error("JEV System1 returned an invalid category");
-    }
-
-    if (typeof answer.confidence !== "number" || !Number.isFinite(answer.confidence)) {
-      throw new Error("JEV System1 returned an invalid confidence");
-    }
-
-    const confidence = clampConfidence(answer.confidence);
+    // Confidence = how far the decisive answers sit from the 0.5 decision boundary.
+    // A confident yes/no on every label is 1; a pile of 0.5 answers is 0.
+    const confidence = clampConfidence(
+      probabilities.reduce((acc, [, p]) => acc + Math.abs(p - 0.5) * 2, 0) / probabilities.length
+    );
 
     return {
-      category: answer.choice,
+      labels,
       confidence,
-      rationale: `jev:category=${answer.choice}:confidence=${confidence}`
+      rationale: `jev:labels=[${labels.join(", ")}]:confidence=${confidence.toFixed(2)}`
     };
   }
 }
@@ -152,14 +203,14 @@ export class KeywordSystem1Fallback implements ClassifierSystem1 {
     const match = findKeywordRuleMatch(subject, KEYWORD_RULES) ?? (message.body ? findKeywordRuleMatch(message.body, KEYWORD_RULES) : undefined);
     if (match) {
       return {
-        category: match.rule.category,
+        labels: [...match.rule.labels],
         confidence: match.rule.fallbackConfidence,
         rationale: `keyword '${match.keyword}'`
       };
     }
 
     return {
-      category: "FYI/Reference",
+      labels: [],
       confidence: 0.45,
       rationale: "low-confidence default"
     };

@@ -1,15 +1,12 @@
 import type { MailboxMessage } from "./adapter.ts";
-import { type EmailCategory } from "./classify/categories.ts";
-import { DEFAULT_RECENT_DAYS } from "./config.ts";
+import { ARCHIVE_VETO_LABELS, isArchiveSafe, type EmailLabel } from "./classify/labels.ts";
 import type { ExceptionQueueItem } from "./store.ts";
 
-export type NoTouchReason = "vip-sender" | "flagged" | "recent-thread" | "finance-legal-keyword";
+export type NoTouchReason = "vip-sender" | "flagged" | "finance-legal-keyword";
 
 export type NoTouchPolicyOptions = {
   vipSenders?: string[];
   financeLegalKeywords?: string[];
-  recentDays?: number;
-  now?: () => Date;
 };
 
 export type NoTouchDryRunPlan = {
@@ -22,20 +19,6 @@ function normalizeList(values: string[] | undefined): Set<string> {
       .map((value) => value.trim().toLowerCase())
       .filter((value) => value.length > 0)
   );
-}
-
-function isRecentMessage(dateValue: string, now: Date, recentDays: number): boolean {
-  const messageTime = Date.parse(dateValue);
-  if (!Number.isFinite(messageTime)) {
-    return true;
-  }
-
-  const ageMs = now.getTime() - messageTime;
-  if (ageMs < 0) {
-    return true;
-  }
-
-  return ageMs <= recentDays * 24 * 60 * 60 * 1000;
 }
 
 function hasKeywordMatch(subject: string, keywords: Set<string>): boolean {
@@ -53,11 +36,9 @@ function hasKeywordMatch(subject: string, keywords: Set<string>): boolean {
   return false;
 }
 
-export function evaluateNoTouchReasons(message: Pick<MailboxMessage, "from" | "subject" | "date" | "flagged">, options: NoTouchPolicyOptions = {}): NoTouchReason[] {
-  const now = options.now ? options.now() : new Date();
+export function evaluateNoTouchReasons(message: Pick<MailboxMessage, "from" | "subject" | "flagged">, options: NoTouchPolicyOptions = {}): NoTouchReason[] {
   const vipSenders = normalizeList(options.vipSenders);
   const financeLegalKeywords = normalizeList(options.financeLegalKeywords);
-  const recentDays = options.recentDays ?? DEFAULT_RECENT_DAYS;
   const reasons: NoTouchReason[] = [];
 
   if (vipSenders.has(message.from.trim().toLowerCase())) {
@@ -68,10 +49,6 @@ export function evaluateNoTouchReasons(message: Pick<MailboxMessage, "from" | "s
     reasons.push("flagged");
   }
 
-  if (isRecentMessage(message.date, now, recentDays)) {
-    reasons.push("recent-thread");
-  }
-
   if (hasKeywordMatch(message.subject, financeLegalKeywords)) {
     reasons.push("finance-legal-keyword");
   }
@@ -79,8 +56,13 @@ export function evaluateNoTouchReasons(message: Pick<MailboxMessage, "from" | "s
   return reasons;
 }
 
-export function shouldArchiveCategory(category: EmailCategory): boolean {
-  return category === "Bulk/Archive" || category === "FYI/Reference";
+export function shouldArchiveLabels(labels: EmailLabel[]): boolean {
+  // A veto label anywhere wins, even alongside an archive-safe label.
+  if (labels.some((label) => ARCHIVE_VETO_LABELS.includes(label))) {
+    return false;
+  }
+
+  return labels.some(isArchiveSafe);
 }
 
 export function buildNoTouchDryRunPlan(messages: MailboxMessage[], options: NoTouchPolicyOptions = {}): NoTouchDryRunPlan {

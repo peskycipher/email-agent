@@ -10,7 +10,8 @@ export type AuditRecord = {
   account: string;
   message_id: string;
   action: AuditAction;
-  category: string;
+  /** Comma-joined labels attached to the message. */
+  labels: string;
   outcome: string;
   rationale: string;
   run_id: string;
@@ -21,7 +22,7 @@ const REQUIRED_FIELDS: Array<keyof AuditRecord> = [
   "account",
   "message_id",
   "action",
-  "category",
+  "labels",
   "outcome",
   "rationale",
   "run_id"

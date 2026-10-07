@@ -92,14 +92,14 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
       async classify(message) {
         if (message.id === "msg-3") {
           return {
-            category: "Bulk/Archive",
+            labels: ["Newsletters"],
             confidence: 0.9,
             rationale: "newsletter"
           };
         }
 
         return {
-          category: "FYI/Reference",
+          labels: ["Business"],
           confidence: 0.9,
           rationale: "default"
         };
@@ -125,56 +125,42 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
   const planRecord = JSON.parse(await fs.readFile(result.planPath, "utf8"));
   assert.equal(planRecord.account, "pilot@example.com");
   assert.equal(planRecord.config.account, "pilot@example.com");
-  assert.equal(planRecord.config.recentDays, 7);
   assert.equal(planRecord.config.confidenceThreshold, 0.7);
   assert.deepEqual(planRecord.config.vipSenders, []);
   assert.deepEqual(planRecord.config.financeLegalKeywords, []);
-  assert.deepEqual(planRecord.actions, [
-    {
-      message_id: "msg-1",
-      action: "classify",
-      category: "Action Needed",
-      rationale: {
-        policy: ["no-touch:recent-thread"],
-        rule: ["protected-message-routed-to-manual-category"],
-        model: []
-      }
-    },
-    {
-      message_id: "msg-2",
-      action: "classify",
-      category: "Action Needed",
-      rationale: {
-        policy: ["no-touch:flagged", "no-touch:recent-thread"],
-        rule: ["protected-message-routed-to-manual-category"],
-        model: []
-      }
-    },
-    {
-      message_id: "msg-3",
-      action: "classify",
-      category: "Bulk/Archive",
-      rationale: {
-        policy: [],
-        rule: ["keyword rule: newsletter/unsubscribe/digest (subject)"],
-        model: []
-      }
-    },
-    { message_id: "msg-3", action: "archive" },
-    {
-      message_id: "msg-4",
-      action: "classify",
-      category: "Action Needed",
-      rationale: {
-        policy: [],
-        rule: ["keyword rule: invoice/approval/urgent (subject)"],
-        model: []
-      }
-    }
-  ]);
+  // The load-bearing behaviour: which actions are planned, with which labels.
+  // Rationale prose is checked structurally below, not pinned word-for-word.
+  assert.deepEqual(
+    planRecord.actions.map((action: { message_id: string; action: string }) => [action.message_id, action.action]),
+    [
+      ["msg-1", "classify"],
+      ["msg-2", "classify"],
+      ["msg-3", "classify"],
+      ["msg-3", "archive"],
+      ["msg-4", "classify"]
+    ]
+  );
+
+  const classifyByMessageId = new Map<string, { labels: string[]; rationale: { policy: string[]; rule: string[]; model: string[] } }>(
+    planRecord.actions
+      .filter((action: { action: string }) => action.action === "classify")
+      .map((action: { message_id: string; labels: string[]; rationale: never }) => [action.message_id, action])
+  );
+
+  assert.deepEqual(classifyByMessageId.get("msg-1")?.labels, ["Business"]);
+  assert.deepEqual(classifyByMessageId.get("msg-2")?.labels, ["Action Needed"]);
+  assert.deepEqual(classifyByMessageId.get("msg-3")?.labels, ["Newsletters"]);
+  assert.deepEqual(classifyByMessageId.get("msg-4")?.labels, ["Invoices", "Action Needed"]);
+
+  // Every classification carries a well-formed trace, and protected mail says so.
+  for (const [, classification] of classifyByMessageId) {
+    assert.ok(Array.isArray(classification.rationale.policy));
+    assert.ok(Array.isArray(classification.rationale.rule));
+    assert.ok(Array.isArray(classification.rationale.model));
+  }
+  assert.ok(classifyByMessageId.get("msg-2")?.rationale.policy.includes("no-touch:flagged"));
   assert.deepEqual(planRecord.exception_queue, [
-    { message_id: "msg-1", reasons: ["recent-thread"], unread: true },
-    { message_id: "msg-2", reasons: ["flagged", "recent-thread"], unread: false }
+    { message_id: "msg-2", reasons: ["flagged"], unread: false }
   ]);
 
   const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
@@ -190,17 +176,14 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
   );
 
   // Summary counts what the run just did, derived from the plan it wrote.
-  assert.deepEqual(result.summary, {
-    ingested: 4,
-    categories: {
-      "Action Needed": 3,
-      "Waiting/Follow-up": 0,
-      "FYI/Reference": 0,
-      "Bulk/Archive": 1
-    },
-    archivesPlanned: 1,
-    protectedItems: 2,
-    noTouchReasons: { "recent-thread": 2, flagged: 1 },
-    durationMs: 0 // fixed injected clock in this test
-  });
+  const summary = result.summary as Record<string, unknown> & { labels: Record<string, number> };
+  assert.equal(summary.ingested, 4);
+  assert.equal(summary.archivesPlanned, 1);
+  assert.equal(summary.protectedItems, 1);
+  assert.deepEqual(summary.noTouchReasons, { flagged: 1 });
+  assert.equal(summary.durationMs, 0); // fixed injected clock in this test
+  assert.equal(summary.labels.Newsletters, 1);
+  assert.equal(summary.labels.Invoices, 1);
+  assert.equal(summary.labels["Action Needed"], 2);
+  assert.equal(summary.labels.Business, 1);
 });

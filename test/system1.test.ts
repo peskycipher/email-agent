@@ -17,7 +17,33 @@ function createMessage(subject: string, body?: string): MailboxMessage {
   };
 }
 
-test("JevSystem1Classifier sends locked System1 request shape", async () => {
+/**
+ * The labels the model is expected to be asked about, written out independently of
+ * the production MODEL_INFERABLE_LABELS constant. Spelling them here is the point:
+ * if the production filter changes, these tests must disagree with it.
+ */
+const MODEL_QUESTION_LABELS = [
+  "Action Needed",
+  "Waiting/Follow Up",
+  "Important",
+  "Realestate",
+  "Invoices",
+  "Crypto",
+  "Business",
+  "Travel",
+  "Clients",
+  "Newsletters",
+  "Promos",
+  "Notifications",
+  "Subscriptions"
+];
+
+/** Answers every question label with `yes` (0.9) and `no` (0.1). */
+function answersFor(yes: string[]): Record<string, { type: string; noul: number }> {
+  return Object.fromEntries(MODEL_QUESTION_LABELS.map((label) => [label, { type: "noul", noul: yes.includes(label) ? 0.9 : 0.1 }]));
+}
+
+test("JevSystem1Classifier sends one noul question per inferable label", async () => {
   let capturedUrl = "";
   let capturedInit: RequestInit | undefined;
   let calls = 0;
@@ -31,21 +57,7 @@ test("JevSystem1Classifier sends locked System1 request shape", async () => {
       return {
         ok: true,
         status: 200,
-        text: async () =>
-          JSON.stringify({
-            answers: {
-              email_category: {
-                choice: "Action Needed",
-                confidence: 0.81,
-                probabilities: {
-                  "Action Needed": 0.81,
-                  "Waiting/Follow-up": 0.09,
-                  "FYI/Reference": 0.07,
-                  "Bulk/Archive": 0.03
-                }
-              }
-            }
-          })
+        text: async () => JSON.stringify({ answers: answersFor(["Action Needed", "Invoices"]) })
       } as Response;
     }
   });
@@ -73,19 +85,22 @@ test("JevSystem1Classifier sends locked System1 request shape", async () => {
     existing_categories: [],
     body: "Please approve the attached invoice by Friday."
   });
-  assert.equal(body.questions.email_category.type, "choice");
-  assert.equal(
-    body.questions.email_category.instructions,
-    "Classify the email described by this state into exactly one of the four categories."
-  );
-  assert.deepEqual(Object.keys(body.questions.email_category.criteria), ["Action Needed", "Waiting/Follow-up", "FYI/Reference", "Bulk/Archive"]);
 
-  assert.equal(result.category, "Action Needed");
-  assert.equal(result.confidence, 0.81);
-  assert.equal(result.rationale, "jev:category=Action Needed:confidence=0.81");
+  // Family/Friends/IT News are sender-derived, never asked of the model.
+  assert.deepEqual(Object.keys(body.questions), MODEL_QUESTION_LABELS);
+  assert.equal(body.questions["Action Needed"].type, "noul");
+  assert.equal(body.questions.Family, undefined);
+  assert.equal(body.questions.Friends, undefined);
+  assert.equal(body.questions["IT News"], undefined);
+
+  assert.deepEqual(result.labels, ["Action Needed", "Invoices"]);
+  assert.equal(result.confidence, 0.8); // every answer sits 0.4 from the 0.5 boundary
+  assert.match(result.rationale, /Action Needed/);
+  assert.match(result.rationale, /Invoices/);
+  assert.match(result.rationale, /confidence=0\.80/);
 });
 
-test("JevSystem1Classifier parses category/confidence and honors TYPESAFE_API_URL", async () => {
+test("JevSystem1Classifier honors TYPESAFE_API_URL", async () => {
   const previousUrl = process.env.TYPESAFE_API_URL;
   const previousKey = process.env.TYPESAFE_API_KEY;
   process.env.TYPESAFE_API_URL = "https://system1.example.test";
@@ -100,18 +115,7 @@ test("JevSystem1Classifier parses category/confidence and honors TYPESAFE_API_UR
         return {
           ok: true,
           status: 200,
-          text: async () =>
-            JSON.stringify({
-              answers: {
-                email_category: {
-                  choice: "Waiting/Follow-up",
-                  confidence: 0.66,
-                  probabilities: {
-                    "Waiting/Follow-up": 0.66
-                  }
-                }
-              }
-            })
+          text: async () => JSON.stringify({ answers: answersFor(["Waiting/Follow Up"]) })
         } as Response;
       }
     });
@@ -119,13 +123,27 @@ test("JevSystem1Classifier parses category/confidence and honors TYPESAFE_API_UR
     const result = await classifier.classify(createMessage("Waiting on vendor follow-up"));
 
     assert.equal(capturedUrl, "https://system1.example.test/v1/systemone");
-    assert.equal(result.category, "Waiting/Follow-up");
-    assert.equal(result.confidence, 0.66);
-    assert.equal(result.rationale, "jev:category=Waiting/Follow-up:confidence=0.66");
+    assert.deepEqual(result.labels, ["Waiting/Follow Up"]);
   } finally {
     process.env.TYPESAFE_API_URL = previousUrl;
     process.env.TYPESAFE_API_KEY = previousKey;
   }
+});
+
+test("JevSystem1Classifier attaches no labels when every answer is no", async () => {
+  const classifier = new JevSystem1Classifier({
+    apiKey: "test-key",
+    fetchFn: async () =>
+      ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ answers: answersFor([]) })
+      }) as Response
+  });
+
+  const result = await classifier.classify(createMessage("Status update"));
+  assert.deepEqual(result.labels, []);
+  assert.match(result.rationale, /labels=\[\]/);
 });
 
 test("JevSystem1Classifier omits the body field as null when the message has no body", async () => {
@@ -138,10 +156,7 @@ test("JevSystem1Classifier omits the body field as null when the message has no 
       return {
         ok: true,
         status: 200,
-        text: async () =>
-          JSON.stringify({
-            answers: { email_category: { choice: "FYI/Reference", confidence: 0.8, probabilities: { "FYI/Reference": 0.8 } } }
-          })
+        text: async () => JSON.stringify({ answers: answersFor([]) })
       } as Response;
     }
   });
@@ -150,6 +165,20 @@ test("JevSystem1Classifier omits the body field as null when the message has no 
 
   const body = JSON.parse(String(capturedInit?.body));
   assert.equal(body.state.body, null);
+});
+
+test("JevSystem1Classifier rejects an answer with no noul probability", async () => {
+  const classifier = new JevSystem1Classifier({
+    apiKey: "test-key",
+    fetchFn: async () =>
+      ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ answers: { "Action Needed": { type: "noul" } } })
+      }) as Response
+  });
+
+  await assert.rejects(classifier.classify(createMessage("Hello")), /invalid answer for Action Needed/);
 });
 
 test("JevSystem1Classifier retries once on 429 and succeeds", async () => {
@@ -166,10 +195,7 @@ test("JevSystem1Classifier retries once on 429 and succeeds", async () => {
       return {
         ok: true,
         status: 200,
-        text: async () =>
-          JSON.stringify({
-            answers: { email_category: { choice: "Bulk/Archive", confidence: 0.9, probabilities: { "Bulk/Archive": 0.9 } } }
-          })
+        text: async () => JSON.stringify({ answers: answersFor(["Newsletters"]) })
       } as Response;
     }
   });
@@ -177,7 +203,7 @@ test("JevSystem1Classifier retries once on 429 and succeeds", async () => {
   const result = await classifier.classify(createMessage("Newsletter digest"));
 
   assert.equal(calls, 2);
-  assert.equal(result.category, "Bulk/Archive");
+  assert.deepEqual(result.labels, ["Newsletters"]);
 });
 
 test("JevSystem1Classifier does not retry non-rate-limit failures", async () => {

@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-export const DEFAULT_RECENT_DAYS = 7;
 export const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
 
 export type Config = {
@@ -13,16 +12,18 @@ export type Config = {
   m365ClientSecret?: string;
   vipSenders?: string[];
   financeLegalKeywords?: string[];
-  recentDays?: number;
+  familySenders?: string[];
+  friendSenders?: string[];
   confidenceThreshold?: number;
 };
 
 export type ConfigSnapshot = {
   account: string;
-  recentDays: number;
   confidenceThreshold: number;
   vipSenders: string[];
   financeLegalKeywords: string[];
+  familySenders: string[];
+  friendSenders: string[];
   auditLogPath: string;
 };
 
@@ -35,7 +36,8 @@ type ConfigFile = {
   m365_client_secret?: string;
   vip_senders?: unknown;
   finance_legal_keywords?: unknown;
-  recent_days?: unknown;
+  family_senders?: unknown;
+  friend_senders?: unknown;
   confidence_threshold?: unknown;
 };
 
@@ -126,17 +128,19 @@ function parseNumberOption(value: unknown, name: string): number | undefined {
 export function buildConfigSnapshot(input: {
   account: string;
   auditLogPath: string;
-  recentDays?: number;
   confidenceThreshold?: number;
   vipSenders?: string[];
   financeLegalKeywords?: string[];
+  familySenders?: string[];
+  friendSenders?: string[];
 }): ConfigSnapshot {
   return {
     account: input.account,
-    recentDays: input.recentDays ?? DEFAULT_RECENT_DAYS,
     confidenceThreshold: input.confidenceThreshold ?? DEFAULT_CONFIDENCE_THRESHOLD,
     vipSenders: [...(input.vipSenders ?? [])],
     financeLegalKeywords: [...(input.financeLegalKeywords ?? [])],
+    familySenders: [...(input.familySenders ?? [])],
+    friendSenders: [...(input.friendSenders ?? [])],
     auditLogPath: input.auditLogPath
   };
 }
@@ -154,7 +158,6 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Confi
   const auditLogPath = env.AUDIT_LOG_PATH ?? fileConfig.audit_log_path ?? path.resolve("data", "audit.jsonl");
   const dataDir = env.DATA_DIR ?? fileConfig.data_dir ?? path.resolve("data");
 
-  const recentDays = parseNumberOption(env.RECENT_DAYS, "RECENT_DAYS") ?? parseNumberOption(fileConfig.recent_days, "recent_days");
   const confidenceThreshold =
     parseNumberOption(env.CONFIDENCE_THRESHOLD, "CONFIDENCE_THRESHOLD") ??
     parseNumberOption(fileConfig.confidence_threshold, "confidence_threshold");
@@ -168,7 +171,8 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Confi
     m365ClientSecret: env.M365_CLIENT_SECRET ?? fileConfig.m365_client_secret,
     vipSenders: parseListFromEnv(env.VIP_SENDERS) ?? parseListFromConfig(fileConfig.vip_senders),
     financeLegalKeywords: parseListFromEnv(env.FINANCE_LEGAL_KEYWORDS) ?? parseListFromConfig(fileConfig.finance_legal_keywords),
-    recentDays,
+    familySenders: parseListFromEnv(env.FAMILY_SENDERS) ?? parseListFromConfig(fileConfig.family_senders),
+    friendSenders: parseListFromEnv(env.FRIEND_SENDERS) ?? parseListFromConfig(fileConfig.friend_senders),
     confidenceThreshold
   };
 }

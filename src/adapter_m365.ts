@@ -151,7 +151,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
   async apply(
     messageId: string,
     action: MailboxAction,
-    category?: string,
+    labels?: string[],
     existingCategories?: string[]
   ): Promise<{ ok: boolean; error?: string }> {
     const token = await this.getAccessToken();
@@ -192,7 +192,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
         }
       }
 
-      const mergedCategories = [...new Set([...(categoriesToMerge ?? []), category ?? "FYI/Reference"])];
+      const mergedCategories = [...new Set([...(categoriesToMerge ?? []), ...(labels ?? [])])];
       body = JSON.stringify({ categories: mergedCategories });
     } else {
       url = `https://graph.microsoft.com/v1.0/users/${encodedAccount}/messages/${encodedMessageId}/move`;
