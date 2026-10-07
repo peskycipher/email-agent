@@ -120,6 +120,18 @@ test("cli dry-run writes persisted plan artifacts and performs zero mailbox muta
     },
     {
       createAdapter: () => adapter,
+      // Deterministic model stubs — the ambient TYPESAFE_API_KEY in some environments
+      // must never turn this test into a live network call (README promises no network).
+      system1Classifier: {
+        async classify() {
+          return { category: "Bulk/Archive", confidence: 0.5, rationale: "stub-low-confidence" };
+        }
+      },
+      secondPassClassifier: {
+        async classify() {
+          return { category: "FYI/Reference", rationale: "stub-second-pass", model: "stub" };
+        }
+      },
       now: () => new Date("2026-01-03T00:00:00.000Z")
     }
   );

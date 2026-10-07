@@ -18,39 +18,30 @@ export type JevSystem1ClassifierOptions = {
   baseUrl?: string;
   model?: string;
   fetchFn?: FetchFn;
+  /** Delay before the single 429/529 retry (docs recommend backoff; fixed delay, upgrade if noisy). */
+  retryDelayMs?: number;
 };
 
 const DEFAULT_BASE_URL = "https://api.typesafe.ai";
 const DEFAULT_MODEL = "jev-latest";
 
 function toClassificationRequest(message: MailboxMessage, model: string): Record<string, unknown> {
+  // State is the email material only — descriptive fields, no filler,
+  // per docs/typesafe-jev.skill.md ("State").
   return {
     model,
     state: {
-      request: [
-        "Classify email:",
-        `Subject: ${message.subject}`,
-        `From: ${message.from}`,
-        "Body snippet: (not available)"
-      ].join(" "),
-      conversation_excerpt: null,
-      environment: {
-        cwd: null,
-        active_model: null,
-        context_tokens_used: null
-      },
-      budget: {
-        spent_today_usd: 0,
-        spent_this_month_usd: 0,
-        daily_cap_usd: null,
-        monthly_cap_usd: null,
-        fraction_of_budget_used: 0
-      }
+      subject: message.subject,
+      from: message.from,
+      received_at: message.date,
+      unread: message.unread,
+      flagged: message.flagged,
+      existing_categories: message.categories
     },
     questions: {
       email_category: {
         type: "choice",
-        instructions: "Classify the email in `request` into exactly one of the four categories.",
+        instructions: "Classify the email described by this state into exactly one of the four categories.",
         criteria: {
           "Action Needed": "requires a response or action from the recipient",
           "Waiting/Follow-up": "you are waiting on someone else or should follow up later",
@@ -92,6 +83,7 @@ export class JevSystem1Classifier implements ClassifierSystem1 {
   private readonly apiKey: string | undefined;
   private readonly model: string;
   private readonly fetchFn: FetchFn;
+  private readonly retryDelayMs: number;
 
   constructor(options: JevSystem1ClassifierOptions = {}) {
     const baseUrl = options.baseUrl ?? process.env.TYPESAFE_API_URL ?? DEFAULT_BASE_URL;
@@ -99,6 +91,7 @@ export class JevSystem1Classifier implements ClassifierSystem1 {
     this.apiKey = options.apiKey ?? process.env.TYPESAFE_API_KEY;
     this.model = options.model ?? DEFAULT_MODEL;
     this.fetchFn = options.fetchFn ?? defaultFetch;
+    this.retryDelayMs = options.retryDelayMs ?? 500;
   }
 
   async classify(message: MailboxMessage): Promise<System1Classification> {
@@ -106,14 +99,23 @@ export class JevSystem1Classifier implements ClassifierSystem1 {
       throw new Error("Missing TYPESAFE_API_KEY");
     }
 
-    const response = await this.fetchFn(this.endpoint, {
+    const requestInit: RequestInit = {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.apiKey}`,
         "content-type": "application/json"
       },
       body: JSON.stringify(toClassificationRequest(message, this.model))
-    });
+    };
+
+    let response = await this.fetchFn(this.endpoint, requestInit);
+
+    // ponytail: single fixed-delay retry on 429/529 per the docs' backoff guidance —
+    // upgrade to exponential backoff only if retries prove noisy
+    if (response.status === 429 || response.status === 529) {
+      await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs));
+      response = await this.fetchFn(this.endpoint, requestInit);
+    }
 
     const payload = await parseJsonBody(response, "JEV System1 response");
 

@@ -9,6 +9,8 @@ import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
 import { buildConfigSnapshot, loadConfig, type Config } from "./config.ts";
 import { evaluateExpansionGate, loadGateEvidence, loadExpansionSignOffFromRun } from "./gate.ts";
 import { runDryRun, runLiveApply } from "./orchestrator.ts";
+import type { ClassifierSystem1 } from "./classify/system1.ts";
+import type { SecondPassClassifier } from "./classify/ollama.ts";
 
 type CliIo = {
   stdout: (text: string) => void;
@@ -17,6 +19,8 @@ type CliIo = {
 
 type CliDependencies = {
   createAdapter?: (config: Config) => MailboxAdapter;
+  system1Classifier?: ClassifierSystem1;
+  secondPassClassifier?: SecondPassClassifier;
   now?: () => Date;
 };
 
@@ -163,7 +167,9 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
       config: buildConfigSnapshot(config),
       dataDir: config.dataDir,
       limit,
-      now
+      now,
+      system1Classifier: dependencies.system1Classifier,
+      secondPassClassifier: dependencies.secondPassClassifier
     });
 
     io.stdout(`email-cleanup ${version}`);
