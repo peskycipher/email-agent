@@ -253,6 +253,7 @@ test("runLiveApply applies approved categories and persists run report + metrics
   assert.equal(runRecord.metrics.processed_count, 3);
   assert.equal(runRecord.metrics.archive_precision_estimate, 0.5);
   assert.equal(runRecord.metrics.no_touch_miss_count, 0);
+  assert.equal(runRecord.metrics.expansion_sign_off.recorded, false);
   assert.equal(runRecord.metrics.category_totals["Action Needed"].classify.skipped, 1);
   assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.success, 1);
   assert.equal(runRecord.metrics.category_totals["FYI/Reference"].archive.failed, 1);

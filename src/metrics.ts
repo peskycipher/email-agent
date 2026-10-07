@@ -20,11 +20,22 @@ export type ActionTotals = {
 
 export type CategoryActionTotals = Record<EmailCategory, Record<MailboxAction, ActionTotals>>;
 
+export type ExpansionSignOffDecision = "go" | "no-go";
+
+export type ExpansionSignOff = {
+  recorded: boolean;
+  decision?: ExpansionSignOffDecision;
+  recorded_at?: string;
+  actor?: string;
+  note?: string;
+};
+
 export type RunMetrics = {
   processed_count: number;
   archive_precision_estimate: number;
   no_touch_miss_count: number;
   category_totals: CategoryActionTotals;
+  expansion_sign_off: ExpansionSignOff;
 };
 
 export type BuildRunMetricsInput = {
@@ -76,6 +87,9 @@ export function buildRunMetrics(input: BuildRunMetricsInput): RunMetrics {
     processed_count: new Set(input.evaluatedActions.map((action) => action.message_id)).size,
     archive_precision_estimate: archivePrecisionEstimate,
     no_touch_miss_count: noTouchMissCount,
-    category_totals: categoryTotals
+    category_totals: categoryTotals,
+    expansion_sign_off: {
+      recorded: false
+    }
   };
 }
