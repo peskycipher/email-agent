@@ -6,6 +6,7 @@ import path from "node:path";
 import childProcess from "node:child_process";
 
 import type { MailboxAdapter } from "../src/adapter.ts";
+import { loadExpansionSignOffFromRun } from "../src/gate.ts";
 import { runCli } from "../src/cli.ts";
 
 function runCliProcess(args: string[], cwd: string): { status: number | null; stdout: string; stderr: string } {
@@ -353,4 +354,78 @@ test("cli gate evaluates a run record and separate sign-off file", async () => {
   assert.ok(stdout.some((line) => line.includes("no-touch misses = 0: true (0)")));
   assert.ok(stdout.some((line) => line.includes("sign-off go: true")));
   assert.ok(stdout.some((line) => line.includes("allowed: true")));
+});
+
+test("cli sign-off records a go decision for a run record", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-sign-off-"));
+  const runsDir = path.join(dir, "runs");
+  await fs.mkdir(runsDir, { recursive: true });
+
+  const runPath = path.join(runsDir, "live-1.json");
+  await fs.writeFile(
+    runPath,
+    `${JSON.stringify(
+      {
+        run_id: "live-1",
+        account: "pilot@example.com",
+        mode: "live-apply",
+        metrics: { processed_count: 600, archive_precision_estimate: 0.99, no_touch_miss_count: 0 }
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+
+  const code = await runCli(
+    ["sign-off", "--run", runPath, "--decision", "go", "--actor", "you@example.com", "--note", "Spot-checked 50 traces"],
+    { stdout: (text) => stdout.push(text), stderr: (text) => stderr.push(text) }
+  );
+
+  assert.equal(code, 0, stderr.join("\n"));
+  assert.ok(stdout.some((line) => line.includes("sign-off recorded: go")));
+
+  // Round-trip through the gate loader: the recorded decision is what gate will read.
+  const signOff = await loadExpansionSignOffFromRun(runPath);
+  assert.ok(signOff);
+  assert.equal(signOff.decision, "go");
+  assert.equal(signOff.actor, "you@example.com");
+  assert.equal(signOff.note, "Spot-checked 50 traces");
+
+  // The run record itself stays untouched (sign-offs live in their own file).
+  const runRecord = JSON.parse(await fs.readFile(runPath, "utf8"));
+  assert.equal(runRecord.sign_off, undefined);
+});
+
+test("cli sign-off records a no-go decision and rejects invalid input", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-sign-off-"));
+  const runPath = path.join(dir, "live-2.json");
+  await fs.writeFile(
+    runPath,
+    `${JSON.stringify({ run_id: "live-2", account: "pilot@example.com", mode: "live-apply", metrics: {} }, null, 2)}\n`,
+    "utf8"
+  );
+
+  const stdout: string[] = [];
+  const code = await runCli(["sign-off", "--run", runPath, "--decision", "no-go"], {
+    stdout: (text) => stdout.push(text),
+    stderr: () => {}
+  });
+  assert.equal(code, 0);
+  const signOff = await loadExpansionSignOffFromRun(runPath);
+  assert.ok(signOff);
+  assert.equal(signOff.decision, "no-go");
+
+  await assert.rejects(
+    runCli(["sign-off", "--run", runPath, "--decision", "maybe"], { stdout: () => {}, stderr: () => {} }),
+    /--decision: must be 'go' or 'no-go'/
+  );
+
+  await assert.rejects(
+    runCli(["sign-off", "--decision", "go"], { stdout: () => {}, stderr: () => {} }),
+    /Missing required option: --run/
+  );
 });

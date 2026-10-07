@@ -7,7 +7,7 @@ import type { MailboxAdapter } from "./adapter.ts";
 import { appendAuditRecord } from "./audit.ts";
 import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
 import { buildConfigSnapshot, loadConfig, type Config } from "./config.ts";
-import { evaluateExpansionGate, loadGateEvidence, loadExpansionSignOffFromRun } from "./gate.ts";
+import { evaluateExpansionGate, loadGateEvidence, loadExpansionSignOffFromRun, recordExpansionSignOff } from "./gate.ts";
 import { runDryRun, runLiveApply } from "./orchestrator.ts";
 import type { ClassifierSystem1 } from "./classify/system1.ts";
 import type { SecondPassClassifier } from "./classify/ollama.ts";
@@ -100,6 +100,7 @@ function renderHelp(version: string): string {
     "  node src/cli.ts demo [--config <path>] [--message-id <id>]",
     "  node src/cli.ts dry-run [--config <path>] [--limit <n>]",
     "  node src/cli.ts live-apply --plan <path> [--config <path>] [--approve-category <name>] [--reject-category <name>]",
+    "  node src/cli.ts sign-off --run <path-to-run-json> --decision <go|no-go> [--actor <you>] [--note \"...\"]",
     "  node src/cli.ts gate --run <path-to-run-json>"
   ].join("\n");
 }
@@ -207,6 +208,31 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
     io.stdout(`email-cleanup ${version}`);
     io.stdout(`live-apply complete: applied ${result.appliedActions} action(s), skipped ${result.skippedActions}`);
     io.stdout(`live run record: ${result.runPath}`);
+    return 0;
+  }
+
+  if (command === "sign-off") {
+    const runPath = readOption(args, "--run");
+    if (!runPath) {
+      throw new Error("Missing required option: --run <path-to-run-json>");
+    }
+
+    const decision = readOption(args, "--decision");
+    if (decision !== "go" && decision !== "no-go") {
+      throw new Error("Missing or invalid --decision: must be 'go' or 'no-go'");
+    }
+
+    const actor = readOption(args, "--actor");
+    const note = readOption(args, "--note");
+
+    await recordExpansionSignOff(runPath, {
+      decision,
+      ...(actor ? { actor } : {}),
+      ...(note ? { note } : {})
+    });
+
+    io.stdout(`email-cleanup ${version}`);
+    io.stdout(`sign-off recorded: ${decision} for run ${runPath}`);
     return 0;
   }
 

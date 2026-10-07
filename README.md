@@ -182,17 +182,17 @@ Expanding beyond the pilot mailbox is blocked until **all four** hold:
 `gate` reports all four from cumulative persisted evidence: the 500-processed count is the **union of distinct message ids across live runs**, and precision/miss tallies accumulate the same way, so a pilot can cross the thresholds over several runs.
 V1 has no command that expands to other mailboxes, so the gate is the evidence you check before doing that yourself.
 
-Recording a sign-off is currently a library call rather than a CLI command:
+Record the sign-off with the CLI:
 
-```ts
-import { recordExpansionSignOff } from "./src/gate.ts";
-
-await recordExpansionSignOff("data/runs/<live-run-id>.json", {
-  decision: "go", // or "no-go"
-  actor: "you@example.com",
-  note: "Spot-checked 50 traces, all fine."
-});
+```bash
+node src/cli.ts sign-off \
+  --run data/runs/<live-run-id>.json \
+  --decision go \
+  --actor you@example.com \
+  --note "Spot-checked 50 traces, all fine."
 ```
+
+The decision (or `no-go`) is written to `signoffs/<run-id>.json`; the run record stays untouched. `gate` picks it up on the next evaluation.
 
 ## Development
 
@@ -227,7 +227,6 @@ test/                behavior tests
 - **Subject and sender only.** The mailbox contract carries no message body, so classification and finance/legal keyword matching read the subject and sender. Adding a body field is a change at the adapter seam.
 - **Stubbed integrations.** The Graph, JEV System1, and Ollama Cloud clients are covered by stubbed tests. A real run needs live credentials.
 - **Microsoft 365 only.** The adapter contract is provider-neutral so Gmail can follow, but only M365 is implemented.
-- **No standalone sign-off command** yet. See the snippet above.
 
 ## Project docs
 
