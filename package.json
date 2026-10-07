@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "start": "node src/cli.ts",
-    "test": "node --test test/**/*.test.ts",
-    "typecheck": "npx -y -p typescript tsc --noEmit"
+    "test": "node --test test/",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
   }
 }
