@@ -4,12 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import {
-  evaluateExpansionGate,
-  loadExpansionGateMetricsFromRun,
-  loadExpansionSignOffFromRun,
-  recordExpansionSignOff
-} from "../src/gate.ts";
+import { evaluateExpansionGate, loadGateEvidence, loadExpansionGateMetricsFromRun, loadExpansionSignOffFromRun, recordExpansionSignOff } from "../src/gate.ts";
 
 function buildRunRecord(metrics: {
   processed_count: number;
@@ -55,6 +50,67 @@ test("evaluateExpansionGate blocks when processed count, precision, or sign-off 
   assert.equal(result.conditions.archive_precision_met, false);
   assert.equal(result.conditions.no_touch_misses_met, true);
   assert.equal(result.conditions.sign_off_met, false);
+});
+
+test("gate evidence unions and sums across live run records for the account", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gate-test-"));
+  const runsDir = path.join(dir, "runs");
+  await fs.mkdir(runsDir, { recursive: true });
+
+  const writeRun = async (runId: string, ids: string[], attempts: number, successes: number, misses: number) => {
+    await fs.writeFile(
+      path.join(runsDir, `${runId}.json`),
+      `${JSON.stringify(
+        {
+          run_id: runId,
+          mode: "live-apply",
+          account: "pilot@example.com",
+          message_ids: ids,
+          archive_attempt_tallies: { clean_attempts: attempts, clean_successes: successes },
+          metrics: { no_touch_miss_count: misses }
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+  };
+
+  await writeRun("live-1", ["msg-1", "msg-2"], 2, 1, 1);
+  await writeRun("live-2", ["msg-2", "msg-3"], 2, 2, 0);
+  // Noise that must be ignored: an ingest file and another account's record.
+  await fs.writeFile(path.join(runsDir, "live-1-ingest.json"), "{\n", "utf8");
+  await writeRun("live-3", ["other-account"], 5, 5, 0);
+  const other = JSON.parse(await fs.readFile(path.join(runsDir, "live-3.json"), "utf8"));
+  other.account = "elsewhere@example.com";
+  await fs.writeFile(path.join(runsDir, "live-3.json"), `${JSON.stringify(other, null, 2)}\n`, "utf8");
+
+  const runPath = path.join(runsDir, "live-2.json");
+  const evidence = await loadGateEvidence(runPath);
+
+  assert.equal(evidence.source, "cumulative across 2 run(s)");
+  assert.equal(evidence.metrics.processed_count, 3); // union across runs
+  assert.equal(evidence.metrics.archive_precision_estimate, 0.75); // 3/4
+  assert.equal(evidence.metrics.no_touch_miss_count, 1);
+  assert.equal(evaluateExpansionGate(evidence.metrics).allowed, false); // no sign-off
+});
+
+test("gate evidence falls back to the run record without a ledger", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gate-test-"));
+  const runsDir = path.join(dir, "runs");
+  await fs.mkdir(runsDir, { recursive: true });
+
+  const runPath = path.join(runsDir, "live-2.json");
+  await fs.writeFile(
+    runPath,
+    `${JSON.stringify({ run_id: "live-2", mode: "live-apply", account: "pilot@example.com", metrics: { processed_count: 10, archive_precision_estimate: 0.5, no_touch_miss_count: 1 } }, null, 2)}\n`,
+    "utf8"
+  );
+
+  const evidence = await loadGateEvidence(runPath);
+  assert.equal(evidence.source, "run record");
+  assert.equal(evidence.metrics.processed_count, 10);
+  assert.equal(evidence.metrics.no_touch_miss_count, 1);
 });
 
 test("evaluateExpansionGate blocks outright on any no-touch miss", () => {

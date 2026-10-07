@@ -107,12 +107,15 @@ node src/cli.ts gate --run data/runs/<live-run-id>.json
 Prints each condition and whether expansion is allowed:
 
 ```
+evidence: cumulative across 3 run(s)
 processed >= 500: true (612)
 precision >= 98%: true (0.99)
 no-touch misses = 0: true (0)
 sign-off go: false
 allowed: false
 ```
+
+Evidence is **cumulative across live runs for the account**: `gate` scans the account's live run records and unions processed message ids and sums archive attempts, successes, and misses. It reports the evidence source — `cumulative across N run(s)` or `run record` (the fallback when a run carries no cumulative evidence).
 
 ### Other commands
 
@@ -161,11 +164,11 @@ Everything lives under `data_dir` (default `./data`, which is git-ignored).
 | --- | --- |
 | `audit.jsonl` | Append-only, one JSON object per action. Fields: `timestamp`, `account`, `message_id`, `action`, `category`, `outcome`, `rationale`, `run_id`. A record missing a required field is rejected. |
 | `plans/<plan-id>.json` | The dry-run plan: proposed actions, rationale traces, exception queue, config snapshot. |
-| `runs/<run-id>.json` | The run record. A dry run stores its planned actions and exception queue. A **live run** also stores the report (totals by category and action, unread delta, sample reasoning traces, exception queue snapshot) and the metrics. `gate` reads a live run. |
+| `runs/<run-id>.json` | The run record, **immutable once written**. A dry run stores its planned actions and exception queue. A **live run** also stores the report (totals by category and action, unread delta, sample reasoning traces, exception queue snapshot), the metrics, and its own gate-evidence tallies (`message_ids`, `archive_attempt_tallies`) that `gate` unions across runs. |
 | `runs/<run-id>-ingest.json` | The messages ingested by a dry run. |
 | `signoffs/<run-id>.json` | Your go/no-go decision. Kept separate so run records stay immutable. |
 
-Run metrics are `processed_count`, `archive_precision_estimate`, `no_touch_miss_count`, and category totals. Archive precision is the success rate over archives of non-protected messages. A no-touch miss is any blocked archive plus any archive attempt on a protected message.
+Run metrics are `processed_count`, `archive_precision_estimate`, `no_touch_miss_count`, and category totals. Archive precision is the success rate over archives of non-protected messages (zero attempts reports 0 — no evidence, no pass). A no-touch miss is any blocked archive plus any archive attempt on a protected message. Transient mailbox fetch failures are logged as `failed:mailbox-fetch` and excluded from both precision and miss evidence.
 
 ## Rollout gate
 
@@ -176,7 +179,8 @@ Expanding beyond the pilot mailbox is blocked until **all four** hold:
 3. **zero** VIP or no-touch misses
 4. an explicit human **go** sign-off
 
-`gate` reports all four from persisted metrics. V1 has no command that expands to other mailboxes, so the gate is the evidence you check before doing that yourself.
+`gate` reports all four from cumulative persisted evidence: the 500-processed count is the **union of distinct message ids across live runs**, and precision/miss tallies accumulate the same way, so a pilot can cross the thresholds over several runs.
+V1 has no command that expands to other mailboxes, so the gate is the evidence you check before doing that yourself.
 
 Recording a sign-off is currently a library call rather than a CLI command:
 
@@ -212,7 +216,7 @@ src/
   apply.ts           approval gating and live apply
   metrics.ts         run metrics
   report.ts          run report
-  gate.ts            expansion gate and sign-off
+  gate.ts            expansion gate, sign-off, and cumulative evidence scan
   audit.ts           append-only audit writer
   config.ts          config loading and validation
 test/                behavior tests

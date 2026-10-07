@@ -7,7 +7,7 @@ import type { MailboxAdapter } from "./adapter.ts";
 import { appendAuditRecord } from "./audit.ts";
 import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
 import { buildConfigSnapshot, loadConfig, type Config } from "./config.ts";
-import { evaluateExpansionGate, loadExpansionGateMetricsFromRun, loadExpansionSignOffFromRun } from "./gate.ts";
+import { evaluateExpansionGate, loadGateEvidence, loadExpansionSignOffFromRun } from "./gate.ts";
 import { runDryRun, runLiveApply } from "./orchestrator.ts";
 
 type CliIo = {
@@ -210,11 +210,13 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
       throw new Error("Missing required option: --run <path-to-run-json>");
     }
 
-    const metrics = await loadExpansionGateMetricsFromRun(runPath);
+    const evidence = await loadGateEvidence(runPath);
+    const { metrics } = evidence;
     const signOff = await loadExpansionSignOffFromRun(runPath);
     const evaluation = evaluateExpansionGate(metrics, signOff);
 
     io.stdout(`email-cleanup ${version}`);
+    io.stdout(`evidence: ${evidence.source}`);
     io.stdout(`processed >= 500: ${evaluation.conditions.processed_count_met} (${metrics.processed_count})`);
     io.stdout(`precision >= 98%: ${evaluation.conditions.archive_precision_met} (${metrics.archive_precision_estimate})`);
     io.stdout(`no-touch misses = 0: ${evaluation.conditions.no_touch_misses_met} (${metrics.no_touch_miss_count})`);

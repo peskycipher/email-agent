@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { isMissingFileError } from "./http.ts";
 import type { RunMetrics } from "./metrics.ts";
+import { precisionFromTallies } from "./metrics.ts";
 import { signOffPathForRun } from "./store.ts";
 
 export const EXPANSION_GATE_MIN_PROCESSED_COUNT = 500;
@@ -109,7 +110,7 @@ function parseExpansionSignOff(value: unknown): ExpansionSignOff {
   return signOff;
 }
 
-async function readRunRecord(runPath: string): Promise<{ run_id: string; metrics: unknown }> {
+async function readRunRecord(runPath: string): Promise<{ run_id: string; account?: unknown; metrics: unknown }> {
   const raw = await fs.readFile(runPath, "utf8");
   const parsed = JSON.parse(raw);
   assertObject(parsed, `Invalid run record: ${runPath}`);
@@ -120,8 +121,109 @@ async function readRunRecord(runPath: string): Promise<{ run_id: string; metrics
 
   return {
     run_id: parsed.run_id,
+    account: parsed.account,
     metrics: parsed.metrics
   };
+}
+
+export type GateEvidence = {
+  metrics: GateMetrics;
+  source: string;
+};
+
+/**
+ * Union/sum gate evidence across a pilot account's immutable live run records.
+ * Returns undefined when no live run carries the evidence fields (never invents evidence).
+ */
+async function readCumulativeRunEvidence(dataDir: string, account: string): Promise<{ metrics: GateMetrics; runIds: string[] } | undefined> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(path.join(dataDir, "runs"));
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+
+  const processed = new Set<string>();
+  const runIds: string[] = [];
+  let attempts = 0;
+  let successes = 0;
+  let misses = 0;
+
+  for (const entry of entries.filter((name) => name.endsWith(".json") && !name.endsWith("-ingest.json"))) {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(await fs.readFile(path.join(dataDir, "runs", entry), "utf8"));
+    } catch (error) {
+      if (isMissingFileError(error)) {
+        continue;
+      }
+      throw error;
+    }
+
+    // Only live-apply records for the account that carry the evidence fields qualify;
+    // a malformed record is skipped rather than failing the whole scan.
+    if (
+      parsed.mode !== "live-apply" ||
+      parsed.account !== account ||
+      !Array.isArray(parsed.message_ids) ||
+      typeof parsed.archive_attempt_tallies !== "object" ||
+      parsed.archive_attempt_tallies === null
+    ) {
+      continue;
+    }
+
+    const tallies = parsed.archive_attempt_tallies as { clean_attempts?: unknown; clean_successes?: unknown };
+    const metricsRecord = (parsed.metrics ?? {}) as { no_touch_miss_count?: unknown };
+    if (typeof tallies.clean_attempts !== "number" || typeof tallies.clean_successes !== "number") {
+      continue;
+    }
+
+    for (const id of parsed.message_ids as unknown[]) {
+      if (typeof id === "string") {
+        processed.add(id);
+      }
+    }
+    if (typeof parsed.run_id === "string") {
+      runIds.push(parsed.run_id);
+    }
+    attempts += tallies.clean_attempts;
+    successes += tallies.clean_successes;
+    misses += typeof metricsRecord.no_touch_miss_count === "number" ? metricsRecord.no_touch_miss_count : 0;
+  }
+
+  if (runIds.length === 0) {
+    return undefined;
+  }
+
+  return {
+    metrics: {
+      processed_count: processed.size,
+      archive_precision_estimate: precisionFromTallies(successes, attempts),
+      no_touch_miss_count: misses
+    },
+    runIds
+  };
+}
+
+export async function loadGateEvidence(runPath: string): Promise<GateEvidence> {
+  const runRecord = await readRunRecord(runPath);
+
+  // Cumulative pilot evidence: scan the account's immutable live run records.
+  const account = typeof runRecord.account === "string" && runRecord.account.trim().length > 0 ? runRecord.account : undefined;
+  if (account) {
+    const cumulative = await readCumulativeRunEvidence(path.dirname(path.dirname(runPath)), account);
+    if (cumulative) {
+      return {
+        metrics: cumulative.metrics,
+        source: `cumulative across ${cumulative.runIds.length} run(s)`
+      };
+    }
+  }
+
+  return { metrics: parseGateMetrics(runRecord.metrics), source: "run record" };
 }
 
 export async function loadExpansionGateMetricsFromRun(runPath: string): Promise<GateMetrics> {

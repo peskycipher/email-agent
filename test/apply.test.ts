@@ -6,6 +6,7 @@ import path from "node:path";
 
 import type { MailboxAdapter, MailboxMessage } from "../src/adapter.ts";
 import { buildConfigSnapshot } from "../src/config.ts";
+import { loadGateEvidence } from "../src/gate.ts";
 import type { PlannedAction } from "../src/store.ts";
 import { runLiveApply } from "../src/apply.ts";
 
@@ -161,6 +162,63 @@ test("runLiveApply requires explicit approval decisions for every planned catego
     }),
     /Missing explicit approval decision for category: FYI\/Reference/
   );
+});
+
+test("runLiveApply persists per-run gate evidence and the gate unions it across runs", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
+  const planPath = await writePlanFile(dataDir);
+
+  await writeSourceRunArtifacts(dataDir, [
+    { id: "msg-a", from: "boss@example.com", subject: "Meeting", date: "2025-12-20T00:00:00.000Z", unread: false, flagged: false, categories: [] },
+    { id: "msg-b", from: "news@example.com", subject: "Digest", date: "2025-12-20T00:00:00.000Z", unread: true, flagged: false, categories: [] },
+    { id: "msg-c", from: "news2@example.com", subject: "Receipt", date: "2025-12-20T00:00:00.000Z", unread: true, flagged: false, categories: [] }
+  ]);
+
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [];
+    },
+    async getMessage() {
+      return { id: "x", from: "news@example.com", subject: "Digest", flagged: false, unread: true };
+    },
+    async apply() {
+      return { ok: true };
+    }
+  };
+
+  // Message dates are 2025-12-20 (just outside the 7-day recent window from 2026-01-01).
+  let nowMs = Date.parse("2026-01-01T00:00:00.000Z");
+  const options = {
+    adapter,
+    account: "pilot@example.com",
+    dataDir,
+    planPath,
+    auditLogPath: path.join(dataDir, "audit.jsonl"),
+    approvals: {
+      "Bulk/Archive": true,
+      "Action Needed": false,
+      "FYI/Reference": true
+    },
+    config: buildConfigSnapshot({ account: "pilot@example.com", auditLogPath: path.join(dataDir, "audit.jsonl") }),
+    now: () => new Date((nowMs += 1))
+  };
+
+  const result = await runLiveApply(options);
+
+  const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
+  assert.equal(runRecord.account, "pilot@example.com");
+  // every message with an evaluated action, exactly once
+  assert.deepEqual([...runRecord.message_ids].sort(), ["msg-a", "msg-b", "msg-c"]);
+  assert.deepEqual(runRecord.archive_attempt_tallies, { clean_attempts: 2, clean_successes: 2 }); // msg-b + msg-c
+
+  // Gate unions across immutable run records — no mutable ledger, no lost-update race.
+  await runLiveApply(options);
+
+  const evidence = await loadGateEvidence(result.runPath);
+  assert.equal(evidence.source, "cumulative across 2 run(s)");
+  assert.equal(evidence.metrics.processed_count, 3);
+  assert.equal(evidence.metrics.archive_precision_estimate, 1);
+  assert.equal(evidence.metrics.no_touch_miss_count, 0);
 });
 
 test("runLiveApply applies approved categories and persists run report + metrics", async () => {

@@ -335,6 +335,7 @@ test("cli gate evaluates a run record and separate sign-off file", async () => {
   });
 
   assert.equal(code, 0, stderr.join("\n"));
+  assert.ok(stdout.some((line) => line.includes("evidence: run record")));
   assert.ok(stdout.some((line) => line.includes("processed >= 500: true (600)")));
   assert.ok(stdout.some((line) => line.includes("precision >= 98%: true (0.99)")));
   assert.ok(stdout.some((line) => line.includes("no-touch misses = 0: true (0)")));

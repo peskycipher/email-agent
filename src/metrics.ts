@@ -35,6 +35,11 @@ export type BuildRunMetricsInput = {
   exceptionQueue: ExceptionQueueItem[];
 };
 
+/** Shared precision formula: 0 attempts fails closed at 0, never 1. */
+export function precisionFromTallies(successes: number, attempts: number): number {
+  return attempts === 0 ? 0 : Number((successes / attempts).toFixed(4));
+}
+
 function createActionTotals(): ActionTotals {
   return {
     planned: 0,
@@ -84,8 +89,7 @@ export function buildRunMetrics(input: BuildRunMetricsInput): RunMetrics {
   const protectedArchiveAttempts = archiveAttempts.filter((action) => exceptionMessageIds.has(action.message_id)).length;
   const noTouchMissCount = blockedArchiveActions + protectedArchiveAttempts;
 
-  const archivePrecisionEstimate =
-    cleanArchiveAttempts.length === 0 ? 0 : Number((cleanArchiveSuccesses / cleanArchiveAttempts.length).toFixed(4));
+  const archivePrecisionEstimate = precisionFromTallies(cleanArchiveSuccesses, cleanArchiveAttempts.length);
 
   return {
     processed_count: new Set(input.evaluatedActions.map((action) => action.message_id)).size,

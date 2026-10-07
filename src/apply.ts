@@ -7,7 +7,7 @@ import { collectPlannedCategories, requireApprovalDecisions, type CategoryApprov
 import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
 import { buildConfigSnapshot, type ConfigSnapshot } from "./config.ts";
 import { isMissingFileError } from "./http.ts";
-import { buildRunMetrics, type EvaluatedAction } from "./metrics.ts";
+import { buildRunMetrics, precisionFromTallies, type EvaluatedAction } from "./metrics.ts";
 import { evaluateNoTouchReasons } from "./policy.ts";
 import { buildRunReport } from "./report.ts";
 import { ingestRecordPath, runRecordPath, type ExceptionQueueItem, type PlannedAction } from "./store.ts";
@@ -429,6 +429,19 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
     evaluatedActions,
     exceptionQueue
   });
+
+  // Per-run evidence for the gate's cumulative scan (see gate.readCumulativeRunEvidence).
+  // Immutable by design: each run record carries its own tallies; the gate unions/sums across records.
+  const archiveAttempts = evaluatedActions.filter(
+    (action) =>
+      action.action === "archive" &&
+      (action.status === "success" || action.status === "failed") &&
+      !action.operationalFailure &&
+      !protectedMessageIds.has(action.message_id)
+  );
+  const cleanArchiveAttempts = archiveAttempts.length;
+  const cleanArchiveSuccesses = archiveAttempts.filter((action) => action.status === "success").length;
+
   const report = buildRunReport({
     plannedActions: plan.actions,
     evaluatedActions,
@@ -455,6 +468,11 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
         approvals: decisions,
         applied_actions: appliedActions,
         skipped_actions: skippedActions,
+        message_ids: [...new Set(evaluatedActions.map((action) => action.message_id))],
+        archive_attempt_tallies: {
+          clean_attempts: cleanArchiveAttempts,
+          clean_successes: cleanArchiveSuccesses
+        },
         report,
         metrics
       },
