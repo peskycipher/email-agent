@@ -39,7 +39,7 @@ Each step only handles what the earlier ones left unresolved. Model output never
 ## Requirements
 
 - Node.js **22.18 or newer** (or 23.6+). The CLI runs TypeScript directly through Node's built-in type stripping, so there is no build step. Older 22.x releases need `--experimental-strip-types`. The project is developed on Node 26.
-- No runtime dependencies. `typescript` is a dev dependency used for type checking only.
+- One runtime dependency: [`cli-spinners`](https://github.com/sindresorhus/cli-spinners) — spinner frames and intervals only (pure data, no transitive dependencies). `typescript` is a dev dependency used for type checking only.
 - Credentials for the services below.
 
 ## Setup
@@ -125,7 +125,7 @@ Summary
 
 A run where every message is protected is self-explaining: `archives planned 0` plus the reason breakdown tells you the recent-thread window (or your VIP/keyword lists) is covering the whole batch — raise `--limit` to reach older mail, or lower `recent_days`.
 
-While it works, a spinner (`⠋ dry-run: ingesting and classifying 3s`) repaints a single line on **stderr**, erasing it before each repaint and updating only when the elapsed second changes — a sub-second run writes the status line once, and a terminal that ignores carriage returns sees at most one line per second. It is cleared before the summary, and stdout stays clean so piped output is unaffected. Piped stderr gets no spinner at all.
+While it works, a spinner animates on **stderr** with the elapsed seconds (`⠋ dry-run: ingesting and classifying 3s`), using the frames and interval from [`cli-spinners`](https://github.com/sindresorhus/cli-spinners). Each repaint erases the line first and identical content is never re-emitted, so the message does not repeat itself; the line is cleared before the summary, and stdout stays clean so piped output is unaffected. Piped stderr gets no spinner at all.
 
 **2. Approve and apply.** You must give an explicit decision for **every** category that appears in the plan; a missing decision is an error, so nothing is applied by accident. Rejected categories leave their mail untouched, and each live run is linked to the dry-run plan it came from. Even with a category approved, an archive for a protected message is blocked rather than sent: it is audited as `blocked:no-touch` and counted as a no-touch miss.
 

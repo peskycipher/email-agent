@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import url from "node:url";
 
+import cliSpinners from "cli-spinners";
+
 import { M365MailboxAdapter } from "./adapter_m365.ts";
 import type { MailboxAdapter } from "./adapter.ts";
 import { appendAuditRecord } from "./audit.ts";
@@ -36,28 +38,28 @@ function startSpinner(write: (text: string) => void, label: string, enabled: boo
     return () => {};
   }
 
-  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const spinner = cliSpinners.dots;
   const startedAt = Date.now();
   let frame = 0;
-  let lastRenderedSecond: number | undefined;
+  let lastLine = "";
 
-  // One line, never a repeated message: the status line is repainted in place, and only
-  // when the elapsed second changes, so a terminal that ignores \r still gets at most
-  // one line per second instead of ten.
-  const render = (elapsedSeconds: number): void => {
-    lastRenderedSecond = elapsedSeconds;
-    write(`\r\u001b[K${frames[frame % frames.length]} ${label}${elapsedSeconds > 0 ? ` ${elapsedSeconds}s` : ""}`);
+  // One line, never a repeated message: erase before repainting, and skip a repaint when
+  // the rendered line would not change (so a terminal that ignores \r sees no duplicates).
+  const render = (): void => {
+    const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+    const line = `${spinner.frames[frame % spinner.frames.length]} ${label}${elapsedSeconds > 0 ? ` ${elapsedSeconds}s` : ""}`;
     frame += 1;
+
+    if (line === lastLine) {
+      return;
+    }
+
+    lastLine = line;
+    write(`\r\u001b[K${line}`);
   };
 
-  render(0);
-
-  const timer = setInterval(() => {
-    const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
-    if (elapsedSeconds !== lastRenderedSecond) {
-      render(elapsedSeconds);
-    }
-  }, 200);
+  render();
+  const timer = setInterval(render, spinner.interval);
   timer.unref?.();
 
   return () => {
