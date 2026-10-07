@@ -4,7 +4,9 @@ import url from "node:url";
 
 import { M365MailboxAdapter } from "./adapter_m365.ts";
 import type { MailboxAdapter } from "./adapter.ts";
+import { runLiveApply } from "./apply.ts";
 import { appendAuditRecord } from "./audit.ts";
+import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { runDryRun } from "./dry_run.ts";
 
@@ -34,6 +36,18 @@ function readOption(args: string[], name: string): string | undefined {
   return args[index + 1];
 }
 
+function readOptions(args: string[], name: string): string[] {
+  const values: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === name && index + 1 < args.length) {
+      values.push(args[index + 1]);
+    }
+  }
+
+  return values;
+}
+
 function readNumberOption(args: string[], name: string, fallback: number): number {
   const value = readOption(args, name);
   if (!value) {
@@ -55,7 +69,8 @@ function renderHelp(version: string): string {
     "  node src/cli.ts --help",
     "  node src/cli.ts --version",
     "  node src/cli.ts demo [--config <path>] [--message-id <id>]",
-    "  node src/cli.ts dry-run [--config <path>] [--limit <n>]"
+    "  node src/cli.ts dry-run [--config <path>] [--limit <n>]",
+    "  node src/cli.ts live-apply --plan <path> [--config <path>] [--approve-category <name>] [--reject-category <name>]"
   ].join("\n");
 }
 
@@ -131,6 +146,55 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
     io.stdout(`dry-run complete: ingested ${result.ingestedCount} message(s)`);
     io.stdout(`plan artifact: ${result.planPath}`);
     io.stdout(`run record: ${result.runPath}`);
+    return 0;
+  }
+
+  if (command === "live-apply") {
+    const configPath = readOption(args, "--config");
+    const planPath = readOption(args, "--plan");
+    if (!planPath) {
+      throw new Error("Missing required option: --plan <path>");
+    }
+
+    const approvals: Partial<Record<EmailCategory, boolean>> = {};
+
+    for (const category of readOptions(args, "--approve-category")) {
+      if (!isEmailCategory(category)) {
+        throw new Error(`Invalid category for --approve-category: ${category}`);
+      }
+      approvals[category] = true;
+    }
+
+    for (const category of readOptions(args, "--reject-category")) {
+      if (!isEmailCategory(category)) {
+        throw new Error(`Invalid category for --reject-category: ${category}`);
+      }
+
+      if (approvals[category] === true) {
+        throw new Error(`Conflicting approval options for category: ${category}`);
+      }
+
+      approvals[category] = false;
+    }
+
+    const config = await loadConfig({ configPath });
+    const createAdapter = dependencies.createAdapter ?? createAdapterFromConfig;
+    const adapter = createAdapter(config);
+    const now = dependencies.now;
+
+    const result = await runLiveApply({
+      adapter,
+      account: config.account,
+      dataDir: config.dataDir,
+      planPath,
+      auditLogPath: config.auditLogPath,
+      approvals,
+      now
+    });
+
+    io.stdout(`email-cleanup ${version}`);
+    io.stdout(`live-apply complete: applied ${result.appliedActions} action(s), skipped ${result.skippedActions}`);
+    io.stdout(`live run record: ${result.runPath}`);
     return 0;
   }
 

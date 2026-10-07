@@ -134,3 +134,98 @@ test("cli dry-run writes persisted plan artifacts and performs zero mailbox muta
   assert.deepEqual(plan.exception_queue, []);
   assert.ok(stdout.some((line) => line.includes("dry-run complete")));
 });
+
+test("cli live-apply applies only approved categories", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-live-apply-"));
+  const configPath = path.join(dir, "config.json");
+  const planPath = path.join(dir, "plan.json");
+
+  await fs.writeFile(
+    configPath,
+    JSON.stringify({
+      account: "pilot@example.com",
+      data_dir: dir,
+      audit_log_path: path.join(dir, "audit.jsonl")
+    }),
+    "utf8"
+  );
+
+  await fs.writeFile(
+    planPath,
+    `${JSON.stringify(
+      {
+        plan_id: "plan-run-9",
+        run_id: "run-9",
+        actions: [
+          {
+            message_id: "msg-1",
+            action: "classify",
+            category: "Action Needed",
+            rationale: {
+              policy: [],
+              rule: ["manual"],
+              model: []
+            }
+          },
+          {
+            message_id: "msg-2",
+            action: "classify",
+            category: "Bulk/Archive",
+            rationale: {
+              policy: [],
+              rule: ["bulk"],
+              model: []
+            }
+          },
+          { message_id: "msg-2", action: "archive" }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const applyCalls: Array<{ messageId: string; action: "classify" | "archive"; category?: string }> = [];
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [];
+    },
+    async apply(messageId, action, category) {
+      applyCalls.push({ messageId, action, category });
+      return { ok: true };
+    }
+  };
+
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+
+  const code = await runCli(
+    [
+      "live-apply",
+      "--config",
+      configPath,
+      "--plan",
+      planPath,
+      "--approve-category",
+      "Bulk/Archive",
+      "--reject-category",
+      "Action Needed"
+    ],
+    {
+      stdout: (text) => stdout.push(text),
+      stderr: (text) => stderr.push(text)
+    },
+    {
+      createAdapter: () => adapter,
+      now: () => new Date("2026-01-06T00:00:00.000Z")
+    }
+  );
+
+  assert.equal(code, 0, stderr.join("\n"));
+  assert.deepEqual(applyCalls, [
+    { messageId: "msg-2", action: "classify", category: "Bulk/Archive" },
+    { messageId: "msg-2", action: "archive", category: undefined }
+  ]);
+  assert.ok(stdout.some((line) => line.includes("live-apply complete")));
+});
