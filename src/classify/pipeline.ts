@@ -1,7 +1,7 @@
 import type { MailboxMessage } from "../adapter.ts";
 import type { EmailCategory } from "./categories.ts";
 import type { SecondPassClassifier } from "./ollama.ts";
-import type { ClassifierSystem1 } from "./system1.ts";
+import { KeywordSystem1Fallback, type ClassifierSystem1, type System1Classification } from "./system1.ts";
 
 export type ClassificationRationaleTrace = {
   policy: string[];
@@ -88,10 +88,26 @@ export async function classifyMessageForDryRun(
     };
   }
 
-  const system1Result = await options.system1.classify(message);
-  rationale.model.push(`system1:${system1Result.rationale}:confidence=${system1Result.confidence.toFixed(2)}`);
-
   const confidenceThreshold = options.confidenceThreshold ?? DEFAULT_CONFIDENCE_THRESHOLD;
+
+  let system1Result: System1Classification;
+  try {
+    system1Result = await options.system1.classify(message);
+    rationale.model.push(`system1:${system1Result.rationale}:confidence=${system1Result.confidence.toFixed(2)}`);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    rationale.model.push(`system1-error:${reason}`);
+
+    const fallback = await new KeywordSystem1Fallback().classify(message);
+    const forcedConfidence = fallback.confidence <= confidenceThreshold ? fallback.confidence : confidenceThreshold - 0.01;
+    system1Result = {
+      ...fallback,
+      confidence: forcedConfidence
+    };
+
+    rationale.model.push(`system1-fallback:${fallback.rationale}:confidence=${system1Result.confidence.toFixed(2)}`);
+  }
+
   if (system1Result.confidence >= confidenceThreshold) {
     return {
       messageId: message.id,

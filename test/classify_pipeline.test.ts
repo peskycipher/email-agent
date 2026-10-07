@@ -127,3 +127,44 @@ test("system1 handles majority pass and second pass only runs for low-confidence
     assert.ok(Array.isArray(result.rationale.model));
   }
 });
+
+test("pipeline falls back after system1 error and still escalates to second pass", async () => {
+  const message = createMessage("msg-fallback", "Contract attached for review");
+
+  const system1: ClassifierSystem1 = {
+    async classify() {
+      throw new Error("system1-down");
+    }
+  };
+
+  let secondPassCalls = 0;
+  const secondPass: SecondPassClassifier = {
+    async classify(received) {
+      secondPassCalls += 1;
+      assert.equal(received.id, message.id);
+      return {
+        category: "Waiting/Follow-up",
+        rationale: "resolved by ollama",
+        model: "deepseek-4.1-flash"
+      };
+    }
+  };
+
+  const result = await classifyMessagesForDryRun([message], new Map(), {
+    system1,
+    secondPass,
+    confidenceThreshold: 0.7
+  });
+
+  const classified = result.get(message.id);
+  assert.ok(classified);
+  if (!classified) {
+    throw new Error("missing classification");
+  }
+
+  assert.equal(secondPassCalls, 1);
+  assert.equal(classified.category, "Waiting/Follow-up");
+  assert.ok(classified.rationale.model.some((entry) => entry.startsWith("system1-error:system1-down")));
+  assert.ok(classified.rationale.model.some((entry) => entry.startsWith("system1-fallback:keyword 'contract':confidence=")));
+  assert.ok(classified.rationale.model.some((entry) => entry.startsWith("ollama:deepseek-4.1-flash")));
+});
