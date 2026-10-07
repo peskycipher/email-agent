@@ -166,6 +166,85 @@ test("cli dry-run writes persisted plan artifacts and performs zero mailbox muta
   assert.match(summary, /duration\s+0ms/);
 });
 
+test("cli dry-run shows a spinner while the classifier runs when a TTY is available", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-spinner-"));
+  const configPath = path.join(dir, "config.json");
+  await fs.writeFile(configPath, JSON.stringify({ account: "pilot@example.com", data_dir: dir }), "utf8");
+
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [
+        { id: "msg-1", from: "s@example.com", subject: "Hello", date: "2025-12-01T00:00:00.000Z", unread: true, flagged: false, categories: [] }
+      ];
+    },
+    async getMessage() {
+      return { id: "msg-1", from: "s@example.com", subject: "Hello", flagged: false, unread: true };
+    },
+    async apply() {
+      return { ok: true };
+    }
+  };
+
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+
+  const code = await runCli(
+    ["dry-run", "--config", configPath, "--limit", "1"],
+    { stdout: (text) => stdout.push(text), stderr: (text) => stderr.push(text) },
+    {
+      createAdapter: () => adapter,
+      spinner: true,
+      system1Classifier: { async classify() { return { category: "FYI/Reference", confidence: 0.9, rationale: "stub" }; } },
+      secondPassClassifier: { async classify() { return { category: "FYI/Reference", rationale: "stub", model: "stub" }; } },
+      now: () => new Date("2026-01-03T00:00:00.000Z")
+    }
+  );
+
+  assert.equal(code, 0);
+  const spinnerOutput = stderr.join("");
+  // A spinner frame with the label, then a cleared line before the summary.
+  assert.match(spinnerOutput, /dry-run: ingesting and classifying/);
+  assert.match(spinnerOutput, /\r/);
+  assert.ok(spinnerOutput.endsWith("\r\u001b[K"), "spinner line must be cleared when it stops");
+  // stdout stays clean: no spinner frames leak into the machine-readable output.
+  assert.ok(!stdout.join("\n").includes("⠋"));
+  assert.ok(stdout.some((line) => line.includes("Summary")));
+});
+
+test("cli dry-run prints no spinner when stderr is not a TTY", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-nospinner-"));
+  const configPath = path.join(dir, "config.json");
+  await fs.writeFile(configPath, JSON.stringify({ account: "pilot@example.com", data_dir: dir }), "utf8");
+
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [];
+    },
+    async getMessage() {
+      return { id: "x", from: "", subject: "", flagged: false, unread: false };
+    },
+    async apply() {
+      return { ok: true };
+    }
+  };
+
+  const stderr: string[] = [];
+  const code = await runCli(
+    ["dry-run", "--config", configPath, "--limit", "1"],
+    { stdout: () => {}, stderr: (text) => stderr.push(text) },
+    {
+      createAdapter: () => adapter,
+      spinner: false,
+      system1Classifier: { async classify() { return { category: "FYI/Reference", confidence: 0.9, rationale: "stub" }; } },
+      secondPassClassifier: { async classify() { return { category: "FYI/Reference", rationale: "stub", model: "stub" }; } },
+      now: () => new Date("2026-01-03T00:00:00.000Z")
+    }
+  );
+
+  assert.equal(code, 0);
+  assert.deepEqual(stderr, []);
+});
+
 test("cli live-apply applies only approved categories", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-live-apply-"));
   const configPath = path.join(dir, "config.json");

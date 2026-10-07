@@ -22,8 +22,40 @@ type CliDependencies = {
   createAdapter?: (config: Config) => MailboxAdapter;
   system1Classifier?: ClassifierSystem1;
   secondPassClassifier?: SecondPassClassifier;
+  /** Override spinner availability; defaults to whether stderr is a TTY. */
+  spinner?: boolean;
   now?: () => Date;
 };
+
+/**
+ * Writes an animated status line to stderr so stdout stays clean for the summary.
+ * Returns a stop function that clears the line — always call it, including on throw.
+ */
+function startSpinner(write: (text: string) => void, label: string, enabled: boolean): () => void {
+  if (!enabled) {
+    return () => {};
+  }
+
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const startedAt = Date.now();
+  let frame = 0;
+
+  const render = (): void => {
+    const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+    write(`\r${frames[frame % frames.length]} ${label}${elapsedSeconds > 0 ? ` ${elapsedSeconds}s` : ""}`);
+    frame += 1;
+  };
+
+  // First frame immediately: instant feedback, and a short run still shows one.
+  render();
+  const timer = setInterval(render, 100);
+  timer.unref?.();
+
+  return () => {
+    clearInterval(timer);
+    write("\r\u001b[K");
+  };
+}
 
 function formatDuration(durationMs: number): string {
   if (durationMs < 1000) {
@@ -198,15 +230,26 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
     const adapter = createAdapter(config);
     const now = dependencies.now;
 
-    const result = await runDryRun({
-      adapter,
-      config: buildConfigSnapshot(config),
-      dataDir: config.dataDir,
-      limit,
-      now,
-      system1Classifier: dependencies.system1Classifier,
-      secondPassClassifier: dependencies.secondPassClassifier
-    });
+    const stopSpinner = startSpinner(
+      io.stderr,
+      "dry-run: ingesting and classifying",
+      dependencies.spinner ?? Boolean(process.stderr.isTTY)
+    );
+
+    let result;
+    try {
+      result = await runDryRun({
+        adapter,
+        config: buildConfigSnapshot(config),
+        dataDir: config.dataDir,
+        limit,
+        now,
+        system1Classifier: dependencies.system1Classifier,
+        secondPassClassifier: dependencies.secondPassClassifier
+      });
+    } finally {
+      stopSpinner();
+    }
 
     io.stdout(`email-cleanup ${version}`);
     io.stdout(`dry-run complete: ingested ${result.ingestedCount} message(s)`);
