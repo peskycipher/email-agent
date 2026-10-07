@@ -1,16 +1,19 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import type { MailboxAdapter, MailboxAction } from "./adapter.ts";
+import type { MailboxAdapter, MailboxAction, MailboxMessage } from "./adapter.ts";
 import { appendAuditRecord } from "./audit.ts";
 import { collectPlannedCategories, requireApprovalDecisions, type CategoryApprovals } from "./approval.ts";
 import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
-import type { PlannedAction } from "./store.ts";
+import { buildRunMetrics, type EvaluatedAction } from "./metrics.ts";
+import { buildRunReport } from "./report.ts";
+import type { ExceptionQueueItem, PlannedAction } from "./store.ts";
 
 type StoredDryRunPlan = {
   plan_id: string;
   run_id: string;
   actions: PlannedAction[];
+  exception_queue?: ExceptionQueueItem[];
 };
 
 type AppliedAction = {
@@ -71,6 +74,10 @@ async function readDryRunPlan(planPath: string): Promise<StoredDryRunPlan> {
     throw new Error(`Invalid dry-run plan file: missing run_id in ${planPath}`);
   }
 
+  if (parsed.exception_queue !== undefined && !Array.isArray(parsed.exception_queue)) {
+    throw new Error(`Invalid dry-run plan file: exception_queue must be an array in ${planPath}`);
+  }
+
   return parsed as StoredDryRunPlan;
 }
 
@@ -121,6 +128,82 @@ function resolveActionCategory(action: PlannedAction, categoryByMessageId: Map<s
   return category;
 }
 
+function toMailboxMessages(value: unknown): MailboxMessage[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const messages: MailboxMessage[] = [];
+
+  for (const item of value) {
+    if (!item || typeof item !== "object") {
+      return undefined;
+    }
+
+    const message = item as Record<string, unknown>;
+    if (
+      typeof message.id !== "string" ||
+      typeof message.from !== "string" ||
+      typeof message.subject !== "string" ||
+      typeof message.date !== "string" ||
+      typeof message.unread !== "boolean" ||
+      typeof message.flagged !== "boolean" ||
+      !Array.isArray(message.categories) ||
+      message.categories.some((category) => typeof category !== "string")
+    ) {
+      return undefined;
+    }
+
+    messages.push({
+      id: message.id,
+      from: message.from,
+      subject: message.subject,
+      date: message.date,
+      unread: message.unread,
+      flagged: message.flagged,
+      categories: [...message.categories]
+    });
+  }
+
+  return messages;
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+async function readSourceIngestMessages(dataDir: string, sourceRunId: string): Promise<MailboxMessage[] | undefined> {
+  const sourceRunPath = path.join(dataDir, "runs", `${sourceRunId}.json`);
+
+  let sourceRunRaw: string;
+  try {
+    sourceRunRaw = await fs.readFile(sourceRunPath, "utf8");
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+
+  const sourceRun = JSON.parse(sourceRunRaw) as { ingest_path?: unknown };
+  if (typeof sourceRun.ingest_path !== "string" || sourceRun.ingest_path.trim().length === 0) {
+    return undefined;
+  }
+
+  let ingestRaw: string;
+  try {
+    ingestRaw = await fs.readFile(sourceRun.ingest_path, "utf8");
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+
+  const ingest = JSON.parse(ingestRaw) as { messages?: unknown };
+  return toMailboxMessages(ingest.messages);
+}
+
 export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApplyResult> {
   const now = options.now ?? (() => new Date());
   const startedAt = now();
@@ -132,6 +215,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
   const decisions = requireApprovalDecisions(plannedCategories, options.approvals);
 
   const appliedActions: AppliedAction[] = [];
+  const evaluatedActions: EvaluatedAction[] = [];
   let skippedActions = 0;
 
   for (const action of plan.actions) {
@@ -140,10 +224,17 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
     const category = resolveActionCategory(action, categoryByMessageId);
     if (!decisions[category]) {
       skippedActions += 1;
+      evaluatedActions.push({
+        message_id: action.message_id,
+        action: action.action,
+        category,
+        status: "skipped"
+      });
       continue;
     }
 
     const result = await options.adapter.apply(action.message_id, action.action, action.action === "classify" ? category : undefined);
+    const status: EvaluatedAction["status"] = result.ok ? "success" : "failed";
     const outcome = result.ok ? "success" : `failed:${result.error ?? "unknown"}`;
 
     await appendAuditRecord(options.auditLogPath, {
@@ -163,7 +254,28 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
       category,
       outcome
     });
+
+    evaluatedActions.push({
+      message_id: action.message_id,
+      action: action.action,
+      category,
+      status
+    });
   }
+
+  const exceptionQueue = plan.exception_queue ?? [];
+  const sourceMessages = await readSourceIngestMessages(options.dataDir, plan.run_id);
+  const metrics = buildRunMetrics({
+    evaluatedActions,
+    exceptionQueue
+  });
+  const report = buildRunReport({
+    plannedActions: plan.actions,
+    evaluatedActions,
+    categoryTotals: metrics.category_totals,
+    exceptionQueue,
+    sourceMessages
+  });
 
   const runsDir = path.join(options.dataDir, "runs");
   await fs.mkdir(runsDir, { recursive: true });
@@ -182,7 +294,9 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
         source_run_id: plan.run_id,
         approvals: decisions,
         applied_actions: appliedActions,
-        skipped_actions: skippedActions
+        skipped_actions: skippedActions,
+        report,
+        metrics
       },
       null,
       2
