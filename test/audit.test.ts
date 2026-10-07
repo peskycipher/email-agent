@@ -41,10 +41,29 @@ test("appendAuditRecord rejects missing required fields", async () => {
       account: "pilot@example.com",
       message_id: "",
       action: "archive",
+      category: "Bulk/Archive",
       outcome: "success",
       rationale: "rule:demo",
       run_id: "run-1"
     }),
     /Missing required audit field: message_id/
+  );
+});
+
+test("appendAuditRecord rejects a record without a category", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "audit-test-"));
+  const logPath = path.join(dir, "audit.jsonl");
+
+  await assert.rejects(
+    appendAuditRecord(logPath, {
+      timestamp: "2026-01-01T00:00:00.000Z",
+      account: "pilot@example.com",
+      message_id: "message-1",
+      action: "archive",
+      outcome: "success",
+      rationale: "rule:demo",
+      run_id: "run-1"
+    } as unknown as Parameters<typeof appendAuditRecord>[1]),
+    /Missing required audit field: category/
   );
 });

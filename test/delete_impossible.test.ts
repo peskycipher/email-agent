@@ -29,6 +29,7 @@ test("audit writer rejects the delete action at runtime", async () => {
       account: "pilot@example.com",
       message_id: "message-1",
       action: "delete" as unknown as AuditAction,
+      category: "Bulk/Archive",
       outcome: "success",
       rationale: "should-not-be-possible",
       run_id: "run-1"
