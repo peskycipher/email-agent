@@ -1,9 +1,9 @@
 {
-  "account": "pilot@example.com",
+  "account": "mail@lorin.io",
   "data_dir": "data",
   "audit_log_path": "data/audit.jsonl",
-  "vip_senders": ["ceo@example.com", "lawyer@example.com"],
-  "finance_legal_keywords": ["invoice", "contract", "tax", "legal", "payment"],
+  "vip_senders": ["tonyzn@affinityskin.com.au", "william@lamlegalgroup.com.au"],
+  "finance_legal_keywords": ["invoice", "contract", "tax", "legal", "payment", "receipt"],
   "recent_days": 7,
   "confidence_threshold": 0.7
 }

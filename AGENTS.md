@@ -1,5 +1,7 @@
 ## Agent skills
 
+Only use models from Ollama-Cloud & Typesafe's Jev
+
 ### Issue tracker
 
 Issues are tracked in GitHub Issues via `gh`. See `docs/agents/issue-tracker.md`.
