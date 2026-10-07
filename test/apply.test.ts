@@ -547,7 +547,7 @@ test("runLiveApply blocks archive when getMessage fails", async () => {
 
   const auditLogPath = path.join(dataDir, "audit.jsonl");
 
-  await runLiveApply({
+  const result = await runLiveApply({
     adapter,
     account: "pilot@example.com",
     dataDir,
@@ -564,7 +564,57 @@ test("runLiveApply blocks archive when getMessage fails", async () => {
   const auditLines = (await fs.readFile(auditLogPath, "utf8")).trim().split("\n").map((line: string) => JSON.parse(line));
   const archiveRecord = auditLines.find((record: { action: string }) => record.action === "archive");
   assert.ok(archiveRecord);
-  assert.equal(archiveRecord.outcome, "blocked:no-touch-fetch-failed");
+  // A transient fetch failure is an operational failure, not a no-touch policy miss (P6).
+  assert.equal(archiveRecord.outcome, "failed:mailbox-fetch");
+
+  const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
+  assert.equal(runRecord.metrics.no_touch_miss_count, 0);
+  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.failed, 1);
+});
+
+test("runLiveApply checks category approval before any no-touch re-check or mailbox access", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
+  const planPath = await writePlanFile(dataDir, {
+    actions: [
+      { message_id: "msg-protected", action: "classify", category: "Bulk/Archive", rationale: { policy: [], rule: ["bulk-rule"], model: [] } },
+      { message_id: "msg-protected", action: "archive" }
+    ],
+    exceptionQueue: [{ message_id: "msg-protected", reasons: ["vip-sender"], unread: true }]
+  });
+
+  let getMessageCalls = 0;
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [];
+    },
+    async getMessage() {
+      getMessageCalls += 1;
+      return { id: "msg-protected", from: "vip@example.com", subject: "hello", flagged: true, unread: true };
+    },
+    async apply() {
+      throw new Error("adapter.apply must not run for rejected categories");
+    }
+  };
+
+  const result = await runLiveApply({
+    adapter,
+    account: "pilot@example.com",
+    dataDir,
+    planPath,
+    auditLogPath: path.join(dataDir, "audit.jsonl"),
+    approvals: {
+      "Bulk/Archive": false // rejected category
+    },
+    now: () => new Date("2026-01-05T00:00:00.000Z")
+  });
+
+  // Rejected category: no mailbox reads, no apply, no misses attributed (P4).
+  assert.equal(getMessageCalls, 0);
+  const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
+  assert.equal(runRecord.metrics.no_touch_miss_count, 0);
+  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.skipped, 1);
+  // classify and archive both belong to the rejected category
+  assert.equal(runRecord.skipped_actions, 2);
 });
 
 test("runLiveApply passes existing message categories to the adapter for classify actions", async () => {

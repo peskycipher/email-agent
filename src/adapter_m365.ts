@@ -13,7 +13,6 @@ type M365Message = {
   subject?: string;
   receivedDateTime?: string;
   isRead?: boolean;
-  unread?: boolean;
   categories?: unknown;
   flag?: {
     flagStatus?: string;
@@ -109,7 +108,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
     const token = await this.getAccessToken();
     const encodedAccount = encodeURIComponent(this.config.account);
     const encodedMessageId = encodeURIComponent(messageId);
-    const url = `https://graph.microsoft.com/v1.0/users/${encodedAccount}/messages/${encodedMessageId}?$select=subject,from,flag,unread`;
+    const url = `https://graph.microsoft.com/v1.0/users/${encodedAccount}/messages/${encodedMessageId}?$select=subject,from,flag,isRead`;
 
     const response = await this.fetchFn(url, {
       headers: {
@@ -217,7 +216,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
       from: item.from?.emailAddress?.address ?? "",
       subject: item.subject ?? "",
       date: item.receivedDateTime ?? "",
-      unread: item.unread === true || item.isRead === false,
+      unread: item.isRead === false,
       flagged: item.flag?.flagStatus === "flagged",
       categories: Array.isArray(item.categories) ? item.categories.filter((value): value is string => typeof value === "string") : []
     };

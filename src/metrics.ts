@@ -9,6 +9,8 @@ export type EvaluatedAction = {
   action: MailboxAction;
   category: EmailCategory;
   status: AppliedActionStatus;
+  /** True when the action failed for operational reasons (e.g. mailbox fetch); excluded from precision and miss evidence. */
+  operationalFailure?: boolean;
 };
 
 export type ActionTotals = {
@@ -66,8 +68,13 @@ export function buildRunMetrics(input: BuildRunMetricsInput): RunMetrics {
 
   const exceptionMessageIds = new Set(input.exceptionQueue.map((item) => item.message_id));
 
+  // Archive attempts feed precision/miss evidence; operational failures (fetch errors)
+  // are excluded so transient issues neither distort precision nor count as policy misses.
   const archiveAttempts = input.evaluatedActions.filter(
-    (action) => action.action === "archive" && (action.status === "success" || action.status === "failed")
+    (action) =>
+      action.action === "archive" &&
+      (action.status === "success" || action.status === "failed") &&
+      !action.operationalFailure
   );
 
   const cleanArchiveAttempts = archiveAttempts.filter((action) => !exceptionMessageIds.has(action.message_id));
@@ -78,7 +85,7 @@ export function buildRunMetrics(input: BuildRunMetricsInput): RunMetrics {
   const noTouchMissCount = blockedArchiveActions + protectedArchiveAttempts;
 
   const archivePrecisionEstimate =
-    cleanArchiveAttempts.length === 0 ? 1 : Number((cleanArchiveSuccesses / cleanArchiveAttempts.length).toFixed(4));
+    cleanArchiveAttempts.length === 0 ? 0 : Number((cleanArchiveSuccesses / cleanArchiveAttempts.length).toFixed(4));
 
   return {
     processed_count: new Set(input.evaluatedActions.map((action) => action.message_id)).size,

@@ -34,7 +34,7 @@ test("buildRunMetrics computes precision from clean archive attempts and counts 
   assert.equal(metrics.category_totals["Bulk/Archive"].archive.skipped, 1);
 });
 
-test("buildRunMetrics treats zero archive attempts as perfect precision", () => {
+test("buildRunMetrics fails precision closed when there are zero archive attempts", () => {
   const metrics = buildRunMetrics({
     evaluatedActions: [
       { message_id: "clean-1", action: "classify", category: "Bulk/Archive", status: "success" }
@@ -42,6 +42,6 @@ test("buildRunMetrics treats zero archive attempts as perfect precision", () => 
     exceptionQueue: []
   });
 
-  assert.equal(metrics.archive_precision_estimate, 1);
+  assert.equal(metrics.archive_precision_estimate, 0);
   assert.equal(metrics.no_touch_miss_count, 0);
 });

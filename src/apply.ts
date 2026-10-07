@@ -293,6 +293,17 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
   for (const action of plan.actions) {
     const category = resolveActionCategory(action, categoryByMessageId);
 
+    if (!decisions[category]) {
+      skippedActions += 1;
+      evaluatedActions.push({
+        message_id: action.message_id,
+        action: action.action,
+        category,
+        status: "skipped"
+      });
+      continue;
+    }
+
     if (action.action === "archive" && protectedMessageIds.has(action.message_id)) {
       evaluatedActions.push({
         message_id: action.message_id,
@@ -323,7 +334,8 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
           message_id: action.message_id,
           action: action.action,
           category,
-          status: "blocked"
+          status: "failed",
+          operationalFailure: true
         });
 
         await appendAuditRecord(options.auditLogPath, {
@@ -332,7 +344,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
           message_id: action.message_id,
           action: action.action,
           category,
-          outcome: "blocked:no-touch-fetch-failed",
+          outcome: "failed:mailbox-fetch",
           rationale: toRationaleText(action),
           run_id: runId
         });
@@ -375,17 +387,6 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
         });
         continue;
       }
-    }
-
-    if (!decisions[category]) {
-      skippedActions += 1;
-      evaluatedActions.push({
-        message_id: action.message_id,
-        action: action.action,
-        category,
-        status: "skipped"
-      });
-      continue;
     }
 
     const existingCategories = action.action === "classify" ? existingCategoriesByMessageId.get(action.message_id) : undefined;

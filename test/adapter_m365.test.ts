@@ -93,7 +93,7 @@ test("M365MailboxAdapter fetches one message by id for apply-time no-touch check
       JSON.stringify({
         id: "immutable-7",
         subject: "Follow-up",
-        unread: true,
+        isRead: false,
         flag: { flagStatus: "flagged" },
         from: { emailAddress: { address: "owner@example.com" } }
       }),
@@ -117,7 +117,7 @@ test("M365MailboxAdapter fetches one message by id for apply-time no-touch check
   const message = await adapter.getMessage("immutable-7");
 
   assert.equal(calls.length, 2);
-  assert.match(String(calls[1].input), /\/messages\/immutable-7\?\$select=subject,from,flag,unread$/);
+  assert.match(String(calls[1].input), /\/messages\/immutable-7\?\$select=subject,from,flag,isRead$/);
   const headers = new Headers(calls[1].init?.headers);
   assert.equal(headers.get("prefer"), 'IdType="ImmutableId"');
   assert.equal(message.id, "immutable-7");

@@ -33,28 +33,28 @@ export const KEYWORD_RULES: KeywordRule[] = [
   {
     category: "Action Needed",
     keywords: ["action required", "asap", "payment", "contract"],
-    pipelineRationale: "keyword rule: invoice/approval/urgent",
+    pipelineRationale: "keyword rule: action-required/asap/payment/contract",
     fallbackConfidence: 0.92,
     appliesToPipeline: false
   },
   {
     category: "Waiting/Follow-up",
     keywords: ["check in", "reminder"],
-    pipelineRationale: "keyword rule: follow-up/waiting",
+    pipelineRationale: "keyword rule: check-in/reminder",
     fallbackConfidence: 0.84,
     appliesToPipeline: false
   },
   {
     category: "Bulk/Archive",
     keywords: ["promo", "sale"],
-    pipelineRationale: "keyword rule: newsletter/unsubscribe/digest",
+    pipelineRationale: "keyword rule: promo/sale",
     fallbackConfidence: 0.88,
     appliesToPipeline: false
   },
   {
     category: "FYI/Reference",
     keywords: ["fyi", "reference", "minutes", "receipt", "summary", "update"],
-    pipelineRationale: "keyword rule: fyi/reference",
+    pipelineRationale: "keyword rule: fyi/reference/minutes/receipt",
     fallbackConfidence: 0.76,
     appliesToPipeline: false
   }

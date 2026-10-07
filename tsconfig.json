@@ -5,9 +5,10 @@
     "moduleResolution": "NodeNext",
     "strict": true,
     "skipLibCheck": true,
+    "types": ["node"],
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "types/**/*.d.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

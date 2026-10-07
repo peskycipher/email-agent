@@ -20,6 +20,8 @@ export type MessageClassification = {
 export type ClassificationPipelineOptions = {
   system1: ClassifierSystem1;
   secondPass: SecondPassClassifier;
+  /** Used when the System1 call itself fails; defaults to KeywordSystem1Fallback. */
+  system1Fallback?: ClassifierSystem1;
   confidenceThreshold?: number;
 };
 
@@ -87,11 +89,11 @@ export async function classifyMessageForDryRun(
     const reason = error instanceof Error ? error.message : String(error);
     rationale.model.push(`system1-error:${reason}`);
 
-    const fallback = await new KeywordSystem1Fallback().classify(message);
-    const forcedConfidence = fallback.confidence <= confidenceThreshold ? fallback.confidence : confidenceThreshold - 0.01;
+    const fallback = await (options.system1Fallback ?? new KeywordSystem1Fallback()).classify(message);
+    // Keep the fallback below the threshold so System1-unavailable items still escalate to the second pass.
     system1Result = {
       ...fallback,
-      confidence: forcedConfidence
+      confidence: Math.min(fallback.confidence, Math.max(0, confidenceThreshold - 0.01))
     };
 
     rationale.model.push(`system1-fallback:${fallback.rationale}:confidence=${system1Result.confidence.toFixed(2)}`);

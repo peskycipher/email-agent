@@ -50,15 +50,13 @@ npm install
 
 Set these as environment variables or in the config file (see [Configuration](#configuration)).
 
-Quick start:
-
 ```bash
 cp .env.example .env
 # edit .env with real values
 set -a; source .env; set +a
 ```
 
-> This project does **not** auto-load `.env` by itself (no dotenv). Source it in your shell before running commands.
+> The CLI does **not** auto-load `.env` by itself (no dotenv). Source it in your shell before running commands, or use your shell profile/secret manager.
 
 | Purpose | Variable | Notes |
 | --- | --- | --- |
@@ -67,43 +65,9 @@ set -a; source .env; set +a
 | JEV System1 | `TYPESAFE_API_KEY` | Optional `TYPESAFE_API_URL` overrides the default `https://api.typesafe.ai`. |
 | Ollama Cloud | `OLLAMA_API_KEY` | Second-pass classifier. |
 
-Keep secrets in the environment rather than in a committed file.
+For config-file based setup, copy the template and edit it: `cp config.example.json config.json` (`config.json` is git-ignored). The CLI **does not** interpolate `${VAR}` placeholders — any unexpanded placeholder in a config file is a load error.
 
 For full step-by-step setup (Microsoft Graph app registration, Ollama key, TypeSafe key), see [`docs/setup-credentials.md`](./docs/setup-credentials.md).
-
-An example env file is in the repo root: [`./.env.example`](./.env.example).
-
-```bash
-cp .env.example .env
-# edit .env with real values
-set -a; source .env; set +a
-```
-
-> The CLI does **not** auto-load `.env` by itself (no `dotenv` dependency). Load it in your shell before running commands.
-
-You can copy `.env.example` to `.env` and fill it:
-
-```bash
-cp .env.example .env
-```
-
-Then load it before running commands (the CLI does **not** auto-load `.env`):
-
-```bash
-set -a
-source .env
-set +a
-```
-
-A ready-to-copy template is in `.env.example`:
-
-```bash
-cp .env.example .env
-# edit .env with real values
-set -a; source .env; set +a
-```
-
-> This project does not auto-load `.env` files. Source it in your shell (as above), or use your shell profile/secret manager.
 
 ## Usage
 
@@ -233,12 +197,14 @@ npm test            # node --test (no network; adapters and models are stubbed)
 npm run typecheck   # tsc --noEmit
 ```
 
-Tests exercise behavior at the orchestrator seam (`src/orchestrator.ts`) with stubbed mailbox and model clients.
+Tests exercise behavior through the orchestrator seam (`src/orchestrator.ts`, which re-exports the dry-run and live-apply entry points) with stubbed mailbox and model clients.
 
 ```
 src/
   cli.ts             commands and argument parsing
-  orchestrator.ts    run lifecycle: dry-run and live-apply
+  orchestrator.ts    provider-neutral run seam; re-exports dry_run + apply
+  dry_run.ts         dry-run lifecycle: ingest, classify, plan, persist
+  apply.ts           live-apply lifecycle: approval gating, no-touch re-check, audit, report
   policy.ts          no-touch rules and exception queue
   classify/          rules, JEV System1, Ollama Cloud, pipeline
   adapter.ts         mailbox contract (provider seam)

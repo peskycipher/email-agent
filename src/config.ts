@@ -44,6 +44,22 @@ type LoadConfigOptions = {
   env?: Record<string, string | undefined>;
 };
 
+function findUnexpandedPlaceholders(value: unknown, keyPath = "", found: string[] = []): string[] {
+  if (typeof value === "string") {
+    if (/\$\{[^}]*\}/.test(value)) {
+      found.push(keyPath || "(root)");
+    }
+  } else if (Array.isArray(value)) {
+    value.forEach((item, index) => findUnexpandedPlaceholders(item, `${keyPath}[${index}]`, found));
+  } else if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) {
+      findUnexpandedPlaceholders(child, keyPath ? `${keyPath}.${key}` : key, found);
+    }
+  }
+
+  return found;
+}
+
 async function readConfigFile(configPath: string): Promise<ConfigFile> {
   let raw: string;
   try {
@@ -52,16 +68,27 @@ async function readConfigFile(configPath: string): Promise<ConfigFile> {
     throw new Error(`Failed to read config file: ${configPath}`);
   }
 
+  let parsed: ConfigFile;
   try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") {
-      throw new Error("Config file must contain a JSON object");
-    }
-    return parsed as ConfigFile;
+    parsed = JSON.parse(raw) as ConfigFile;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to parse config file: ${configPath} (${message})`);
   }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Config file must contain a JSON object");
+  }
+
+  const placeholders = findUnexpandedPlaceholders(parsed);
+  if (placeholders.length > 0) {
+    throw new Error(
+      `Config validation failed: unexpanded ${"\${PLACEHOLDER}"} values at: ${placeholders.join(", ")}. ` +
+        "This file is not interpolated — set those values in the environment instead."
+    );
+  }
+
+  return parsed;
 }
 
 function parseListFromConfig(value: unknown): string[] | undefined {

@@ -51,3 +51,23 @@ test("loadConfig throws clear parse error for invalid config files", async () =>
 
   await assert.rejects(loadConfig({ configPath, env: {} }), /Failed to parse config file/);
 });
+
+test("loadConfig rejects unexpanded ${PLACEHOLDER} values in the config file", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "config-test-"));
+  const configPath = path.join(dir, "config.json");
+
+  await fs.writeFile(
+    configPath,
+    JSON.stringify({
+      account: "${MAILBOX_ACCOUNT}",
+      vip_senders: ["${VIP_SENDERS}"],
+      data_dir: "${DATA_DIR}"
+    }),
+    "utf8"
+  );
+
+  await assert.rejects(
+    loadConfig({ configPath, env: {} }),
+    /unexpanded .*PLACEHOLDER.* values at: account, vip_senders\[0\], data_dir/
+  );
+});

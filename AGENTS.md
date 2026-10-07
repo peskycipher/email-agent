@@ -1,6 +1,10 @@
-## Agent skills
+### Models
 
-Only use models from Ollama-Cloud & Typesafe's Jev
+Only use models from Ollama-Cloud or Typesafe's Jev. No other model providers. This applies to every agent in this project, including code review and any classifier/model calls in the codebase.
+
+### Delegation
+
+Do not use subagents for this project. Work directly in the main agent only.
 
 ### Issue tracker
 
