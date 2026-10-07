@@ -69,6 +69,8 @@ set -a; source .env; set +a
 
 Keep secrets in the environment rather than in a committed file.
 
+For full step-by-step setup (Microsoft Graph app registration, Ollama key, TypeSafe key), see [`docs/setup-credentials.md`](./docs/setup-credentials.md).
+
 An example env file is in the repo root: [`./.env.example`](./.env.example).
 
 ```bash
