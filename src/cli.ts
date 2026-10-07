@@ -122,7 +122,9 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
       account: config.account,
       dataDir: config.dataDir,
       limit,
-      now
+      now,
+      vipSenders: config.vipSenders,
+      financeLegalKeywords: config.financeLegalKeywords
     });
 
     io.stdout(`email-cleanup ${version}`);

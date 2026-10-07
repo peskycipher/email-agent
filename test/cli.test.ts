@@ -87,7 +87,7 @@ test("cli dry-run writes persisted plan artifacts and performs zero mailbox muta
           id: "msg-7",
           from: "sender@example.com",
           subject: "Hello",
-          date: "2026-01-01T00:00:00.000Z",
+          date: "2025-12-01T00:00:00.000Z",
           unread: true,
           flagged: false,
           categories: []
@@ -123,6 +123,10 @@ test("cli dry-run writes persisted plan artifacts and performs zero mailbox muta
   assert.equal(plans.length, 1);
 
   const plan = JSON.parse(await fs.readFile(path.join(planDir, plans[0]), "utf8"));
-  assert.deepEqual(plan.actions, [{ message_id: "msg-7", action: "classify", category: "FYI/Reference" }]);
+  assert.deepEqual(plan.actions, [
+    { message_id: "msg-7", action: "classify", category: "FYI/Reference" },
+    { message_id: "msg-7", action: "archive" }
+  ]);
+  assert.deepEqual(plan.exception_queue, []);
   assert.ok(stdout.some((line) => line.includes("dry-run complete")));
 });

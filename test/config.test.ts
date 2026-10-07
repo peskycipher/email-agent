@@ -14,7 +14,9 @@ test("loadConfig reads file and lets env override values", async () => {
     configPath,
     JSON.stringify({
       account: "file@example.com",
-      audit_log_path: path.join(dir, "from-file.jsonl")
+      audit_log_path: path.join(dir, "from-file.jsonl"),
+      vip_senders: ["file-vip@example.com"],
+      finance_legal_keywords: ["invoice"]
     }),
     "utf8"
   );
@@ -22,12 +24,15 @@ test("loadConfig reads file and lets env override values", async () => {
   const config = await loadConfig({
     configPath,
     env: {
-      MAILBOX_ACCOUNT: "env@example.com"
+      MAILBOX_ACCOUNT: "env@example.com",
+      VIP_SENDERS: "env-vip@example.com, env-legal@example.com"
     }
   });
 
   assert.equal(config.account, "env@example.com");
   assert.equal(config.auditLogPath, path.join(dir, "from-file.jsonl"));
+  assert.deepEqual(config.vipSenders, ["env-vip@example.com", "env-legal@example.com"]);
+  assert.deepEqual(config.financeLegalKeywords, ["invoice"]);
 });
 
 test("loadConfig throws clear validation error when required keys are missing", async () => {

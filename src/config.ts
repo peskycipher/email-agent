@@ -8,6 +8,8 @@ export type Config = {
   m365TenantId?: string;
   m365ClientId?: string;
   m365ClientSecret?: string;
+  vipSenders?: string[];
+  financeLegalKeywords?: string[];
 };
 
 type ConfigFile = {
@@ -17,6 +19,8 @@ type ConfigFile = {
   m365_tenant_id?: string;
   m365_client_id?: string;
   m365_client_secret?: string;
+  vip_senders?: unknown;
+  finance_legal_keywords?: unknown;
 };
 
 type LoadConfigOptions = {
@@ -44,6 +48,25 @@ async function readConfigFile(configPath: string): Promise<ConfigFile> {
   }
 }
 
+function parseListFromConfig(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  return value.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+}
+
+function parseListFromEnv(value: string | undefined): string[] | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
 export async function loadConfig(options: LoadConfigOptions = {}): Promise<Config> {
   const env = options.env ?? process.env;
   const configPath = options.configPath ?? env.EMAIL_CLEANUP_CONFIG;
@@ -63,6 +86,8 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Confi
     dataDir,
     m365TenantId: env.M365_TENANT_ID ?? fileConfig.m365_tenant_id,
     m365ClientId: env.M365_CLIENT_ID ?? fileConfig.m365_client_id,
-    m365ClientSecret: env.M365_CLIENT_SECRET ?? fileConfig.m365_client_secret
+    m365ClientSecret: env.M365_CLIENT_SECRET ?? fileConfig.m365_client_secret,
+    vipSenders: parseListFromEnv(env.VIP_SENDERS) ?? parseListFromConfig(fileConfig.vip_senders),
+    financeLegalKeywords: parseListFromEnv(env.FINANCE_LEGAL_KEYWORDS) ?? parseListFromConfig(fileConfig.finance_legal_keywords)
   };
 }

@@ -6,7 +6,12 @@ import type { MailboxAction, MailboxMessage } from "./adapter.ts";
 export type PlannedAction = {
   message_id: string;
   action: MailboxAction;
-  category: string;
+  category?: string;
+};
+
+export type ExceptionQueueItem = {
+  message_id: string;
+  reasons: string[];
 };
 
 export type PersistDryRunInput = {
@@ -15,6 +20,7 @@ export type PersistDryRunInput = {
   createdAt: string;
   messages: MailboxMessage[];
   plannedActions: PlannedAction[];
+  exceptionQueue: ExceptionQueueItem[];
 };
 
 export type PersistDryRunOutput = {
@@ -41,7 +47,8 @@ export async function persistDryRunArtifacts(dataDir: string, input: PersistDryR
     account: input.account,
     created_at: input.createdAt,
     dry_run: true,
-    actions: input.plannedActions
+    actions: input.plannedActions,
+    exception_queue: input.exceptionQueue
   };
 
   const runRecord = {
@@ -52,7 +59,8 @@ export async function persistDryRunArtifacts(dataDir: string, input: PersistDryR
     plan_id: planId,
     ingest_path: ingestPath,
     plan_path: planPath,
-    planned_actions: input.plannedActions
+    planned_actions: input.plannedActions,
+    exception_queue: input.exceptionQueue
   };
 
   const ingestRecord = {

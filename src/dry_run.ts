@@ -1,4 +1,5 @@
 import type { MailboxAdapter } from "./adapter.ts";
+import { buildNoTouchDryRunPlan } from "./policy.ts";
 import { persistDryRunArtifacts } from "./store.ts";
 
 export type DryRunOptions = {
@@ -7,6 +8,8 @@ export type DryRunOptions = {
   dataDir: string;
   limit: number;
   now?: () => Date;
+  vipSenders?: string[];
+  financeLegalKeywords?: string[];
 };
 
 export type DryRunResult = {
@@ -24,18 +27,19 @@ export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
   const runId = `run-${startedAt.getTime()}`;
 
   const messages = await options.adapter.listRecentInbox(options.limit);
-  const plannedActions = messages.map((message) => ({
-    message_id: message.id,
-    action: "classify" as const,
-    category: "FYI/Reference"
-  }));
+  const plan = buildNoTouchDryRunPlan(messages, {
+    vipSenders: options.vipSenders,
+    financeLegalKeywords: options.financeLegalKeywords,
+    now
+  });
 
   const persisted = await persistDryRunArtifacts(options.dataDir, {
     runId,
     account: options.account,
     createdAt: startedAt.toISOString(),
     messages,
-    plannedActions
+    plannedActions: plan.plannedActions,
+    exceptionQueue: plan.exceptionQueue
   });
 
   return {
