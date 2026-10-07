@@ -4,6 +4,8 @@ A safety-first inbox cleanup agent. V1 targets a single pilot **Microsoft 365** 
 
 Gmail and the other mailboxes are deferred until the pilot passes a measured rollout gate. See [`SPEC-email-cleanup-agent-v1.md`](SPEC-email-cleanup-agent-v1.md) for the full spec.
 
+**Running it:** [How to use](#how-to-use) (the workflow and every command) and [Configuration](#configuration). **Working on it:** [Development](#development), [Known limits](#known-limits), and [Project docs](#project-docs).
+
 ## How it works
 
 ```
@@ -69,61 +71,62 @@ For config-file based setup, copy the template and edit it: `cp config.example.j
 
 For full step-by-step setup (Microsoft Graph app registration, Ollama key, TypeSafe key), see [`docs/setup-credentials.md`](./docs/setup-credentials.md).
 
-## Usage
+## How to use
 
 Run the CLI with `node src/cli.ts <command>` or `npm start -- <command>`.
 
-### 1. Dry run
+### The workflow
+
+The cleanup is a step-by-step loop you drive yourself. Nothing touches the mailbox until you approve a category, and the agent never expands beyond the pilot on its own.
 
 ```bash
+# 1. Plan — read the inbox, classify, apply no-touch rules. Zero mailbox changes.
 node src/cli.ts dry-run --config ./config.json --limit 500
-```
 
-Reads the inbox, classifies it, applies the no-touch policy, and writes a plan. **It makes zero changes to the mailbox.** `--limit` defaults to 50 and caps how many messages are ingested.
+# 2. Review the plan it printed (actions, rationale traces, exception queue).
 
-It prints the paths of the plan artifact and run record. Review the plan, including the exception queue, before moving on.
-
-### 2. Approve and apply
-
-```bash
+# 3. Apply — decide every category that appears in the plan.
 node src/cli.ts live-apply \
   --plan data/plans/<plan-id>.json \
   --config ./config.json \
   --approve-category "Bulk/Archive" \
   --approve-category "FYI/Reference" \
   --reject-category "Action Needed"
-```
 
-You must give an explicit decision for **every** category that appears in the plan. A missing decision is an error, so nothing is applied by accident. Rejected categories leave mail untouched. Each live run is linked to the dry-run plan it came from.
-
-Even with a category approved, an archive for any message in the exception queue is blocked, not sent. It is logged as `blocked:no-touch` and counted as a no-touch miss.
-
-### 3. Check the rollout gate
-
-```bash
+# 4. Check the rollout gate against cumulative pilot evidence.
 node src/cli.ts gate --run data/runs/<live-run-id>.json
+
+# 5. Record your go/no-go once the gate thresholds are met.
+node src/cli.ts sign-off \
+  --run data/runs/<live-run-id>.json \
+  --decision go \
+  --actor you@example.com \
+  --note "Spot-checked 50 traces, all fine."
 ```
 
-Prints each condition and whether expansion is allowed:
+**1. Dry run.** Reads the inbox, classifies every message, applies the no-touch policy, and writes a plan. **It makes zero changes to the mailbox.** `--limit` defaults to 50 and caps how many messages are ingested. It prints the path of the plan artifact and run record — review the plan, including the exception queue, before moving on.
 
-```
-evidence: cumulative across 3 run(s)
-processed >= 500: true (612)
-precision >= 98%: true (0.99)
-no-touch misses = 0: true (0)
-sign-off go: false
-allowed: false
-```
+**2. Approve and apply.** You must give an explicit decision for **every** category that appears in the plan; a missing decision is an error, so nothing is applied by accident. Rejected categories leave their mail untouched, and each live run is linked to the dry-run plan it came from. Even with a category approved, an archive for a protected message is blocked rather than sent: it is audited as `blocked:no-touch` and counted as a no-touch miss.
 
-Evidence is **cumulative across live runs for the account**: `gate` scans the account's live run records and unions processed message ids and sums archive attempts, successes, and misses. It reports the evidence source — `cumulative across N run(s)` or `run record` (the fallback when a run carries no cumulative evidence).
+**3. Check the gate.** `gate` reads cumulative evidence and prints all four expansion conditions (see [Rollout gate](#rollout-gate)).
 
-### Other commands
+**4. Sign off.** Only when you are satisfied. The decision is written to `signoffs/<run-id>.json`, so the run record stays immutable, and `gate` picks it up on its next evaluation.
 
-```bash
-node src/cli.ts --help
-node src/cli.ts --version
-node src/cli.ts demo --config ./config.json   # writes one sample audit record, no mailbox access
-```
+Then repeat 1–3 for the next batch. Evidence accumulates across live runs, so the pilot reaches the 500-processed and precision thresholds over as many runs as it takes. V1 has no command that expands to other mailboxes — the gate is the evidence you check before doing that yourself.
+
+### Command reference
+
+| Command | What it does | Reads/writes the mailbox |
+| --- | --- | --- |
+| `dry-run [--config <path>] [--limit <n>]` | Ingests, classifies, applies no-touch rules, and writes a plan + run + ingest record. `--limit` default 50. | Reads only |
+| `live-apply --plan <path> [--config <path>] --approve-category <name> --reject-category <name>` | Applies approved categories from a plan: `classify` and `archive` only. Repeat the flags per category. | Writes (approved categories only) |
+| `gate --run <path-to-run-json>` | Prints the four expansion conditions from cumulative evidence and whether expansion is allowed. | Reads local records |
+| `sign-off --run <path-to-run-json> --decision <go\|no-go> [--actor <you>] [--note "..."]` | Records your expansion decision in `signoffs/<run-id>.json`. Invalid decisions and a missing `--run` are errors. | Reads local records |
+| `demo [--config <path>] [--message-id <id>]` | Writes one sample audit record to prove the pipeline end to end. | Local only |
+| `--help` (or `help`) | Prints the command list. | None |
+| `--version` (or `version`) | Prints the version. | None |
+
+All commands accept `--config <path>`, or read `EMAIL_CLEANUP_CONFIG`. Environment variables override values from the file (see [Configuration](#configuration)). `dry-run`, `live-apply`, and `demo` need a config with an account (plus Graph or model credentials where relevant); `gate` and `sign-off` take only the run path.
 
 ## Configuration
 
@@ -149,12 +152,12 @@ A ready-to-copy version ships as `config.example.json` in the repo root.
 | `data_dir` | `DATA_DIR` | `./data` | Where plans, runs, and sign-offs are stored. |
 | `audit_log_path` | `AUDIT_LOG_PATH` | `./data/audit.jsonl` | Append-only audit log. |
 | `m365_tenant_id`, `m365_client_id`, `m365_client_secret` | `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` | none | Graph credentials. |
-
-> **Body inclusion** is configured on the M365 adapter itself (`bodyMode`: `"preview"` (default) or `"full"` for the HTML body with tags stripped; `bodyMaxChars`: default `4000`). See [ADR-0004](docs/adr/0004-email-body-in-classification.md).
 | `vip_senders` | `VIP_SENDERS` | empty | Comma-separated in the environment. Always protected. |
 | `finance_legal_keywords` | `FINANCE_LEGAL_KEYWORDS` | empty | Comma-separated in the environment. Subject matches are protected. |
 | `recent_days` | `RECENT_DAYS` | `7` | Messages this recent are protected. |
 | `confidence_threshold` | `CONFIDENCE_THRESHOLD` | `0.7` | System1 confidence below this escalates to the second pass. |
+
+> **Body inclusion** is configured on the M365 adapter itself (`bodyMode`: `"preview"` (default) or `"full"` for the HTML body with tags stripped; `bodyMaxChars`: default `4000`). See [ADR-0004](docs/adr/0004-email-body-in-classification.md).
 
 > **Set your VIP list and keywords before a real run.** Both default to empty, and an empty list protects nothing. The thresholds and lists in effect are saved into every plan and run record, so each run shows what protected it.
 
@@ -182,19 +185,19 @@ Expanding beyond the pilot mailbox is blocked until **all four** hold:
 4. an explicit human **go** sign-off
 
 `gate` reports all four from cumulative persisted evidence: the 500-processed count is the **union of distinct message ids across live runs**, and precision/miss tallies accumulate the same way, so a pilot can cross the thresholds over several runs.
-V1 has no command that expands to other mailboxes, so the gate is the evidence you check before doing that yourself.
 
-Record the sign-off with the CLI:
-
-```bash
-node src/cli.ts sign-off \
-  --run data/runs/<live-run-id>.json \
-  --decision go \
-  --actor you@example.com \
-  --note "Spot-checked 50 traces, all fine."
+```
+evidence: cumulative across 3 run(s)
+processed >= 500: true (612)
+precision >= 98%: true (0.99)
+no-touch misses = 0: true (0)
+sign-off go: false
+allowed: false
 ```
 
-The decision (or `no-go`) is written to `signoffs/<run-id>.json`; the run record stays untouched. `gate` picks it up on the next evaluation.
+It reports the evidence source — `cumulative across N run(s)`, or `run record` (the fallback when a run carries no cumulative evidence).
+
+V1 has no command that expands to other mailboxes, so the gate is the evidence you check before doing that yourself. Record the sign-off with [`sign-off`](#command-reference).
 
 ## Development
 
@@ -203,7 +206,7 @@ npm test            # node --test (no network; adapters and models are stubbed)
 npm run typecheck   # tsc --noEmit
 ```
 
-Tests exercise behavior through the orchestrator seam (`src/orchestrator.ts`, which re-exports the dry-run and live-apply entry points) with stubbed mailbox and model clients.
+Tests stub the mailbox adapter and both model clients, so the suite never touches the network. They cover the dry-run, live-apply, metrics, gate, and audit behavior at their module boundaries.
 
 ```
 src/
@@ -215,7 +218,6 @@ src/
   classify/          rules, JEV System1, Ollama Cloud, pipeline
   adapter.ts         mailbox contract (provider seam)
   adapter_m365.ts    Microsoft Graph adapter
-  apply.ts           approval gating and live apply
   metrics.ts         run metrics
   report.ts          run report
   gate.ts            expansion gate, sign-off, and cumulative evidence scan
