@@ -544,3 +544,183 @@ test("cli sign-off records a no-go decision and rejects invalid input", async ()
     /Missing required option: --run/
   );
 });
+
+// --reuse-approvals fixtures -------------------------------------------------
+
+async function writeApprovalReuseFixtures(dir: string, options: { priorRecord?: object } = {}): Promise<{ configPath: string; planPath: string }> {
+  const configPath = path.join(dir, "config.json");
+  const planPath = path.join(dir, "plan.json");
+
+  await fs.writeFile(configPath, JSON.stringify({ account: "pilot@example.com", data_dir: dir, audit_log_path: path.join(dir, "audit.jsonl") }), "utf8");
+
+  await fs.writeFile(
+    planPath,
+    `${JSON.stringify(
+      {
+        plan_id: "plan-run-12",
+        run_id: "run-12",
+        actions: [
+          {
+            message_id: "msg-1",
+            action: "classify",
+            labels: ["Newsletters"],
+            rationale: { policy: [], rule: ["bulk"], model: [] }
+          },
+          { message_id: "msg-1", action: "archive" }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  await fs.mkdir(path.join(dir, "runs"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "runs", "run-12-ingest.json"),
+    `${JSON.stringify(
+      {
+        run_id: "run-12",
+        account: "pilot@example.com",
+        messages: [
+          { id: "msg-1", from: "sender@example.com", subject: "Digest", date: "2025-12-01T00:00:00.000Z", unread: true, flagged: false, categories: [] }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  await fs.writeFile(path.join(dir, "runs", "run-12.json"), `${JSON.stringify({ run_id: "run-12", ingest_path: path.join(dir, "runs", "run-12-ingest.json") }, null, 2)}\n`, "utf8");
+
+  await fs.writeFile(
+    path.join(dir, "runs", "live-9.json"),
+    `${JSON.stringify(
+      options.priorRecord ?? {
+        run_id: "live-9",
+        mode: "live-apply",
+        approvals: { Newsletters: true, "Action Needed": false, "Bulk/Archive": true }
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  return { configPath, planPath };
+}
+
+function reuseAdapter() {
+  const applyCalls: Array<{ messageId: string; action: "classify" | "archive"; labels?: string[] }> = [];
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [];
+    },
+    async getMessage(messageId) {
+      return { id: messageId, from: "sender@example.com", subject: "Digest", flagged: false, unread: true };
+    },
+    async apply(messageId, action, labels) {
+      applyCalls.push({ messageId, action, labels });
+      return { ok: true };
+    }
+  };
+  return { applyCalls, adapter };
+}
+
+test("cli live-apply --reuse-approvals applies a prior run's decisions without flags", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-reuse-"));
+  const { configPath, planPath } = await writeApprovalReuseFixtures(dir);
+  const { applyCalls, adapter } = reuseAdapter();
+
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const code = await runCli(
+    ["live-apply", "--config", configPath, "--plan", planPath, "--reuse-approvals", "live-9"],
+    {
+      stdout: (text) => stdout.push(text),
+      stderr: (text) => stderr.push(text)
+    },
+    { createAdapter: () => adapter, now: () => new Date("2026-01-07T00:00:00.000Z") }
+  );
+
+  assert.equal(code, 0, stderr.join("\n"));
+  assert.deepEqual(applyCalls, [
+    { messageId: "msg-1", action: "classify", labels: ["Newsletters"] },
+    { messageId: "msg-1", action: "archive", labels: undefined }
+  ]);
+
+  // Provenance is recorded in the new run record.
+  const runs = await fs.readdir(path.join(dir, "runs"));
+  const liveRun = runs.filter((file) => file.startsWith("live-") && !file.includes("ingest"))[0];
+  const record = JSON.parse(await fs.readFile(path.join(dir, "runs", liveRun), "utf8"));
+  assert.equal(record.approvals_source, "reused:live-9");
+  assert.equal(record.approvals["Newsletters"], true);
+});
+
+test("cli live-apply rejects --reuse-approvals combined with per-label flags", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-reuse-flag-"));
+  const { configPath, planPath } = await writeApprovalReuseFixtures(dir);
+  const { adapter } = reuseAdapter();
+
+  await assert.rejects(
+    runCli(
+      ["live-apply", "--config", configPath, "--plan", planPath, "--reuse-approvals", "live-9", "--reject-label", "Newsletters"],
+      { stdout: () => {}, stderr: () => {} },
+      { createAdapter: () => adapter, now: () => new Date("2026-01-07T00:00:00.000Z") }
+    ),
+    /--reuse-approvals cannot be combined with --approve-label\/--reject-label/
+  );
+});
+
+test("cli live-apply --reuse-approvals errors when a planned label has no decision in the reused record", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-reuse-miss-"));
+  // Prior record only covers Newsletters; plan (from fixtures) needs just that, so
+  // craft a plan with an extra label the reused record does not know about.
+  const { configPath } = await writeApprovalReuseFixtures(dir);
+  const planPath = path.join(dir, "plan-extra.json");
+  await fs.writeFile(
+    planPath,
+    `${JSON.stringify(
+      {
+        plan_id: "plan-run-13",
+        run_id: "run-13",
+        actions: [
+          {
+            message_id: "msg-1",
+            action: "classify",
+            labels: ["Crypto"],
+            rationale: { policy: [], rule: [], model: [] }
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  const { adapter } = reuseAdapter();
+
+  await assert.rejects(
+    runCli(
+      ["live-apply", "--config", configPath, "--plan", planPath, "--reuse-approvals", "live-9"],
+      { stdout: () => {}, stderr: () => {} },
+      { createAdapter: () => adapter, now: () => new Date("2026-01-07T00:00:00.000Z") }
+    ),
+    /Missing explicit approval decision for label: Crypto/
+  );
+});
+
+test("cli live-apply --reuse-approvals rejects a record without approval decisions", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-reuse-dry-"));
+  const { configPath, planPath } = await writeApprovalReuseFixtures(dir, { priorRecord: { run_id: "live-9", mode: "dry-run" } });
+  const { adapter } = reuseAdapter();
+
+  await assert.rejects(
+    runCli(
+      ["live-apply", "--config", configPath, "--plan", planPath, "--reuse-approvals", "live-9"],
+      { stdout: () => {}, stderr: () => {} },
+      { createAdapter: () => adapter, now: () => new Date("2026-01-07T00:00:00.000Z") }
+    ),
+    /no approval decisions/
+  );
+});

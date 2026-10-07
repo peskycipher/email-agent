@@ -33,6 +33,8 @@ export type LiveApplyOptions = {
   planPath: string;
   auditLogPath: string;
   approvals: LabelApprovals;
+  /** Provenance of the approval decisions, recorded in the run record. */
+  approvalsSource?: string;
   config?: ConfigSnapshot;
   now?: () => Date;
 };
@@ -465,6 +467,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
         source_run_id: plan.run_id,
         config,
         approvals: decisions,
+        approvals_source: options.approvalsSource ?? "flags",
         applied_actions: appliedActions,
         skipped_actions: skippedActions,
         message_ids: [...new Set(evaluatedActions.map((action) => action.message_id))],

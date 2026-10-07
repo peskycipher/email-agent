@@ -9,6 +9,9 @@ import type { MailboxAdapter } from "./adapter.ts";
 import { appendAuditRecord } from "./audit.ts";
 import { isEmailLabel, EMAIL_LABELS, type EmailLabel } from "./classify/labels.ts";
 import { buildConfigSnapshot, loadConfig, type Config } from "./config.ts";
+import { isMissingFileError } from "./http.ts";
+import { type LabelApprovals } from "./approval.ts";
+import { runRecordPath } from "./store.ts";
 import type { DryRunSummary } from "./dry_run.ts";
 import { evaluateExpansionGate, loadGateEvidence, loadExpansionSignOffFromRun, recordExpansionSignOff } from "./gate.ts";
 import { runDryRun, runLiveApply } from "./orchestrator.ts";
@@ -146,9 +149,8 @@ function readNumberOption(args: string[], name: string, fallback: number): numbe
   return parsed;
 }
 
-function readLabelApprovals(args: string[]): Partial<Record<EmailLabel, boolean>> {
+function readLabelApprovals(args: string[]): LabelApprovals {
   const approvals: Partial<Record<EmailLabel, boolean>> = {};
-
   for (const label of readOptions(args, "--approve-label")) {
     if (!isEmailLabel(label)) {
       throw new Error(`Invalid label for --approve-label: ${label}`);
@@ -171,6 +173,46 @@ function readLabelApprovals(args: string[]): Partial<Record<EmailLabel, boolean>
   return approvals;
 }
 
+/**
+ * Story 27: load the decisions recorded by a prior live run so a repeat run can
+ * reuse them. The operator must name the exact run -- nothing is reused implicitly.
+ */
+async function loadRunApprovals(dataDir: string, runId: string): Promise<LabelApprovals> {
+  const runPath = runRecordPath(dataDir, runId);
+
+  let raw: string;
+  try {
+    raw = await fs.readFile(runPath, "utf8");
+  } catch (error) {
+    if (!isMissingFileError(error)) {
+      throw error;
+    }
+
+    throw new Error(`Reused run record not found: ${runPath}`);
+  }
+
+  const parsed = JSON.parse(raw) as { approvals?: unknown };
+  if (!parsed.approvals || typeof parsed.approvals !== "object") {
+    throw new Error(`Run record ${runId} has no approval decisions (only live-apply runs store them)`);
+  }
+
+  const approvals: LabelApprovals = {};
+  for (const [key, value] of Object.entries(parsed.approvals)) {
+    // Stale keys (e.g. pre-T8 category names) are ignored, never trusted.
+    if (!isEmailLabel(key)) {
+      continue;
+    }
+
+    if (typeof value !== "boolean") {
+      throw new Error(`Run record ${runId} has an invalid approval decision for label: ${key}`);
+    }
+
+    approvals[key] = value;
+  }
+
+  return approvals;
+}
+
 function renderHelp(version: string): string {
   return [
     `email-cleanup ${version}`,
@@ -179,7 +221,7 @@ function renderHelp(version: string): string {
     "  node src/cli.ts --version",
     "  node src/cli.ts demo [--config <path>] [--message-id <id>]",
     "  node src/cli.ts dry-run [--config <path>] [--limit <n>]",
-    "  node src/cli.ts live-apply --plan <path> [--config <path>] [--approve-label <name>] [--reject-label <name>]",
+    "  node src/cli.ts live-apply --plan <path> [--config <path>] [--approve-label <name>] [--reject-label <name>] [--reuse-approvals <run-id>]",
     "  node src/cli.ts sign-off --run <path-to-run-json> --decision <go|no-go> [--actor <you>] [--note \"...\"]",
     "  node src/cli.ts gate --run <path-to-run-json>"
   ].join("\n");
@@ -280,9 +322,13 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
       throw new Error("Missing required option: --plan <path>");
     }
 
-    const approvals = readLabelApprovals(args);
+    const reuseRunId = readOption(args, "--reuse-approvals");
+    if (reuseRunId && (readOptions(args, "--approve-label").length > 0 || readOptions(args, "--reject-label").length > 0)) {
+      throw new Error("--reuse-approvals cannot be combined with --approve-label/--reject-label");
+    }
 
     const config = await loadConfig({ configPath });
+    const approvals: LabelApprovals = reuseRunId ? await loadRunApprovals(config.dataDir, reuseRunId) : readLabelApprovals(args);
     const createAdapter = dependencies.createAdapter ?? createAdapterFromConfig;
     const adapter = createAdapter(config);
     const now = dependencies.now;
@@ -294,6 +340,7 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
       planPath,
       auditLogPath: config.auditLogPath,
       approvals,
+      approvalsSource: reuseRunId ? `reused:${reuseRunId}` : undefined,
       config: buildConfigSnapshot(config),
       now
     });
