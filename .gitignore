@@ -3,3 +3,15 @@
 
 # pi runtime logs
 /.pi/
+
+# dependencies
+node_modules/
+
+# local config & secrets
+config.yaml
+.env
+
+# build output
+dist/
+coverage/
+*.tsbuildinfo

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/adapters/**/*", "src/orch/**/*"],
+  "references": [{ "path": "./tsconfig.core.json" }]
+}
