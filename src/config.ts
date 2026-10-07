@@ -4,11 +4,19 @@ import path from "node:path";
 export type Config = {
   account: string;
   auditLogPath: string;
+  dataDir: string;
+  m365TenantId?: string;
+  m365ClientId?: string;
+  m365ClientSecret?: string;
 };
 
 type ConfigFile = {
   account?: string;
   audit_log_path?: string;
+  data_dir?: string;
+  m365_tenant_id?: string;
+  m365_client_id?: string;
+  m365_client_secret?: string;
 };
 
 type LoadConfigOptions = {
@@ -20,7 +28,7 @@ async function readConfigFile(configPath: string): Promise<ConfigFile> {
   let raw: string;
   try {
     raw = await fs.readFile(configPath, "utf8");
-  } catch (error) {
+  } catch {
     throw new Error(`Failed to read config file: ${configPath}`);
   }
 
@@ -47,9 +55,14 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Confi
   }
 
   const auditLogPath = env.AUDIT_LOG_PATH ?? fileConfig.audit_log_path ?? path.resolve("data", "audit.jsonl");
+  const dataDir = env.DATA_DIR ?? fileConfig.data_dir ?? path.resolve("data");
 
   return {
     account,
-    auditLogPath
+    auditLogPath,
+    dataDir,
+    m365TenantId: env.M365_TENANT_ID ?? fileConfig.m365_tenant_id,
+    m365ClientId: env.M365_CLIENT_ID ?? fileConfig.m365_client_id,
+    m365ClientSecret: env.M365_CLIENT_SECRET ?? fileConfig.m365_client_secret
   };
 }

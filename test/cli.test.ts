@@ -5,7 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import childProcess from "node:child_process";
 
-function runCli(args: string[], cwd: string): { status: number | null; stdout: string; stderr: string } {
+import type { MailboxAdapter } from "../src/adapter.ts";
+import { runCli } from "../src/cli.ts";
+
+function runCliProcess(args: string[], cwd: string): { status: number | null; stdout: string; stderr: string } {
   const result = childProcess.spawnSync("node", ["src/cli.ts", ...args], {
     cwd,
     encoding: "utf8"
@@ -21,13 +24,13 @@ function runCli(args: string[], cwd: string): { status: number | null; stdout: s
 test("cli supports --help and --version without mailbox config", async () => {
   const cwd = path.resolve(".");
 
-  const help = runCli(["--help"], cwd);
+  const help = runCliProcess(["--help"], cwd);
   assert.equal(help.status, 0);
   assert.match(help.stdout, /Usage:/);
 
   const pkg = JSON.parse(await fs.readFile(path.join(cwd, "package.json"), "utf8"));
 
-  const version = runCli(["--version"], cwd);
+  const version = runCliProcess(["--version"], cwd);
   assert.equal(version.status, 0);
   assert.equal(version.stdout.trim(), pkg.version);
 });
@@ -47,7 +50,7 @@ test("cli demo command writes one verifiable audit record", async () => {
     "utf8"
   );
 
-  const result = runCli(["demo", "--config", configPath, "--message-id", "msg-42"], cwd);
+  const result = runCliProcess(["demo", "--config", configPath, "--message-id", "msg-42"], cwd);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /demo complete/);
 
@@ -61,4 +64,65 @@ test("cli demo command writes one verifiable audit record", async () => {
   assert.equal(record.action, "classify");
   assert.equal(record.outcome, "success");
   assert.equal(record.rationale, "demo-run");
+});
+
+test("cli dry-run writes persisted plan artifacts and performs zero mailbox mutations", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-dry-run-"));
+  const configPath = path.join(dir, "config.json");
+
+  await fs.writeFile(
+    configPath,
+    JSON.stringify({
+      account: "pilot@example.com",
+      data_dir: dir
+    }),
+    "utf8"
+  );
+
+  let applyCalls = 0;
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [
+        {
+          id: "msg-7",
+          from: "sender@example.com",
+          subject: "Hello",
+          date: "2026-01-01T00:00:00.000Z",
+          unread: true,
+          flagged: false,
+          categories: []
+        }
+      ];
+    },
+    async apply() {
+      applyCalls += 1;
+      return { ok: true };
+    }
+  };
+
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+
+  const code = await runCli(
+    ["dry-run", "--config", configPath, "--limit", "1"],
+    {
+      stdout: (text) => stdout.push(text),
+      stderr: (text) => stderr.push(text)
+    },
+    {
+      createAdapter: () => adapter,
+      now: () => new Date("2026-01-03T00:00:00.000Z")
+    }
+  );
+
+  assert.equal(code, 0, stderr.join("\n"));
+  assert.equal(applyCalls, 0);
+
+  const planDir = path.join(dir, "plans");
+  const plans = await fs.readdir(planDir);
+  assert.equal(plans.length, 1);
+
+  const plan = JSON.parse(await fs.readFile(path.join(planDir, plans[0]), "utf8"));
+  assert.deepEqual(plan.actions, [{ message_id: "msg-7", action: "classify", category: "FYI/Reference" }]);
+  assert.ok(stdout.some((line) => line.includes("dry-run complete")));
 });
