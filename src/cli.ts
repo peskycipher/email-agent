@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import url from "node:url";
 
-import cliSpinners from "cli-spinners";
+import ora from "ora";
 
 import { M365MailboxAdapter } from "./adapter_m365.ts";
 import type { MailboxAdapter } from "./adapter.ts";
@@ -20,29 +20,45 @@ type CliIo = {
   stderr: (text: string) => void;
 };
 
+/** The slice of a TTY stream ora needs; tests inject a fake, production passes stderr. */
+type SpinnerStream = {
+  isTTY?: boolean;
+  columns?: number;
+  write(chunk: string): boolean;
+  cursorTo?(x: number): void;
+  clearLine?(dir?: number): void;
+  moveCursor?(dx: number, dy: number): void;
+};
+
 type CliDependencies = {
   createAdapter?: (config: Config) => MailboxAdapter;
   system1Classifier?: ClassifierSystem1;
   secondPassClassifier?: SecondPassClassifier;
-  /** Override spinner availability; defaults to whether stderr is a TTY. */
+  /** Override spinner availability; defaults to whether the spinner stream is a TTY. */
   spinner?: boolean;
+  /** Override the stream the spinner writes to; defaults to process.stderr. */
+  spinnerStream?: SpinnerStream;
   now?: () => Date;
 };
 
 /**
- * Writes an animated status line to stderr so stdout stays clean for the summary.
- * Returns a stop function that clears the line — always call it, including on throw.
+ * Spinner on stderr while a run works, so stdout keeps only the summary and artifact
+ * paths. Returns a stop function that clears the line — always call it, including on
+ * throw. When `enabled` is false ora writes nothing at all.
  */
-function startSpinner(write: (text: string) => void, label: string, enabled: boolean): () => void {
+function startSpinner(stream: SpinnerStream, label: string, enabled: boolean): () => void {
+  // ora writes a plain-text fallback line even when disabled; a non-TTY stream should get
+  // nothing at all, so gate it here.
   if (!enabled) {
     return () => {};
   }
 
-  // One line, written once. A terminal that renders each write as its own line (rather
-  // than repainting on a carriage return) would otherwise show every animation frame as
-  // the message repeating, so the status line does not animate: the elapsed time belongs
-  // in the summary, not on a spinning line.
-  write(`\r\u001b[K${cliSpinners.dots.frames[0]} ${label}`);
+  const spinner = ora({
+    text: label,
+    spinner: "dots",
+    stream: stream as unknown as NodeJS.WriteStream,
+    isEnabled: true
+  }).start();
 
   let stopped = false;
   return () => {
@@ -50,7 +66,7 @@ function startSpinner(write: (text: string) => void, label: string, enabled: boo
       return;
     }
     stopped = true;
-    write("\r\u001b[K");
+    spinner.stop();
   };
 }
 
@@ -227,10 +243,11 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
     const adapter = createAdapter(config);
     const now = dependencies.now;
 
+    const spinnerStream = dependencies.spinnerStream ?? (process.stderr as unknown as SpinnerStream);
     const stopSpinner = startSpinner(
-      io.stderr,
+      spinnerStream,
       "dry-run: ingesting and classifying",
-      dependencies.spinner ?? Boolean(process.stderr.isTTY)
+      dependencies.spinner ?? Boolean(spinnerStream.isTTY)
     );
 
     let result;

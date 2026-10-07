@@ -4,7 +4,6 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import childProcess from "node:child_process";
-import cliSpinners from "cli-spinners";
 
 import type { MailboxAdapter } from "../src/adapter.ts";
 import { loadExpansionSignOffFromRun } from "../src/gate.ts";
@@ -188,6 +187,19 @@ test("cli dry-run shows a spinner while the classifier runs when a TTY is availa
 
   const stdout: string[] = [];
   const stderr: string[] = [];
+  // A TTY-shaped stream so the spinner writes where the test can see it.
+  const spinnerWrites: string[] = [];
+  const spinnerStream = {
+    isTTY: true,
+    columns: 80,
+    write: (chunk: string) => {
+      spinnerWrites.push(String(chunk));
+      return true;
+    },
+    cursorTo: () => spinnerWrites.push("\u001b[1G"),
+    clearLine: () => spinnerWrites.push("\u001b[2K"),
+    moveCursor: () => {}
+  };
 
   const code = await runCli(
     ["dry-run", "--config", configPath, "--limit", "1"],
@@ -195,6 +207,7 @@ test("cli dry-run shows a spinner while the classifier runs when a TTY is availa
     {
       createAdapter: () => adapter,
       spinner: true,
+      spinnerStream,
       system1Classifier: { async classify() { return { category: "FYI/Reference", confidence: 0.9, rationale: "stub" }; } },
       secondPassClassifier: { async classify() { return { category: "FYI/Reference", rationale: "stub", model: "stub" }; } },
       now: () => new Date("2026-01-03T00:00:00.000Z")
@@ -202,24 +215,16 @@ test("cli dry-run shows a spinner while the classifier runs when a TTY is availa
   );
 
   assert.equal(code, 0);
-  const spinnerOutput = stderr.join("");
+  const spinnerOutput = spinnerWrites.join("");
+  // ora renders the label; the run is stopped before the summary prints.
   assert.match(spinnerOutput, /dry-run: ingesting and classifying/);
-  assert.ok(spinnerOutput.endsWith("\r\u001b[K"), "spinner line must be cleared when it stops");
-
-  const statusWrites = stderr.filter((text) => text.includes("ingesting and classifying"));
-  // Written once, never repeated: no frames to stack up in a terminal that ignores \r.
-  assert.equal(statusWrites.length, 1);
-  assert.equal(statusWrites[0], `\r\u001b[K${cliSpinners.dots.frames[0]} dry-run: ingesting and classifying`);
-  // No elapsed-seconds counter on the status line; the summary reports the total time.
-  assert.doesNotMatch(statusWrites[0], /\d+s\b/);
-  assert.ok(stdout.some((line) => /duration\s+\d/.test(line)), "the summary still reports the duration");
-
-  // stdout stays clean: no spinner frames leak into the machine-readable output.
-  assert.ok(!stdout.join("\n").includes(cliSpinners.dots.frames[0]));
+  // stdout stays clean: no spinner output leaks into the machine-readable output.
+  assert.ok(!stdout.join("\n").includes("dry-run: ingesting and classifying"));
   assert.ok(stdout.some((line) => line.includes("Summary")));
+  assert.ok(stdout.some((line) => /duration\s+\d/.test(line)), "the summary reports the duration");
 });
 
-test("cli dry-run prints no spinner when stderr is not a TTY", async () => {
+test("cli dry-run prints no spinner when the stream is not a TTY", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-nospinner-"));
   const configPath = path.join(dir, "config.json");
   await fs.writeFile(configPath, JSON.stringify({ account: "pilot@example.com", data_dir: dir }), "utf8");
@@ -237,12 +242,25 @@ test("cli dry-run prints no spinner when stderr is not a TTY", async () => {
   };
 
   const stderr: string[] = [];
+  const spinnerWrites: string[] = [];
+  const spinnerStream = {
+    isTTY: false,
+    columns: 80,
+    write: (chunk: string) => {
+      spinnerWrites.push(String(chunk));
+      return true;
+    },
+    cursorTo: () => {},
+    clearLine: () => {},
+    moveCursor: () => {}
+  };
+
   const code = await runCli(
     ["dry-run", "--config", configPath, "--limit", "1"],
     { stdout: () => {}, stderr: (text) => stderr.push(text) },
     {
       createAdapter: () => adapter,
-      spinner: false,
+      spinnerStream,
       system1Classifier: { async classify() { return { category: "FYI/Reference", confidence: 0.9, rationale: "stub" }; } },
       secondPassClassifier: { async classify() { return { category: "FYI/Reference", rationale: "stub", model: "stub" }; } },
       now: () => new Date("2026-01-03T00:00:00.000Z")
@@ -251,6 +269,7 @@ test("cli dry-run prints no spinner when stderr is not a TTY", async () => {
 
   assert.equal(code, 0);
   assert.deepEqual(stderr, []);
+  assert.deepEqual(spinnerWrites, [], "a non-TTY stream must not receive spinner output");
 });
 
 test("cli live-apply applies only approved categories", async () => {

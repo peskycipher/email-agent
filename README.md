@@ -39,7 +39,7 @@ Each step only handles what the earlier ones left unresolved. Model output never
 ## Requirements
 
 - Node.js **22.18 or newer** (or 23.6+). The CLI runs TypeScript directly through Node's built-in type stripping, so there is no build step. Older 22.x releases need `--experimental-strip-types`. The project is developed on Node 26.
-- One runtime dependency: [`cli-spinners`](https://github.com/sindresorhus/cli-spinners) — the status-line frame glyph (pure data, no transitive dependencies). `typescript` is a dev dependency used for type checking only.
+- One runtime dependency: [`ora`](https://github.com/sindresorhus/ora) for the terminal spinner. `typescript` is a dev dependency used for type checking only.
 - Credentials for the services below.
 
 ## Setup
@@ -125,7 +125,9 @@ Summary
 
 A run where every message is protected is self-explaining: `archives planned 0` plus the reason breakdown tells you the recent-thread window (or your VIP/keyword lists) is covering the whole batch — raise `--limit` to reach older mail, or lower `recent_days`.
 
-While it works, one status line appears on **stderr** (`⠋ dry-run: ingesting and classifying`), using the frame glyph from [`cli-spinners`](https://github.com/sindresorhus/cli-spinners). It is written once and never repainted — a terminal that renders every write as its own line would otherwise show the message repeating — and it is cleared before the summary. The total run time is reported as the `duration` row in the summary, not on the status line. stdout stays clean, so piped output is unaffected; piped stderr gets no status line at all.
+While it works, [`ora`](https://github.com/sindresorhus/ora) spins a status line on **stderr** (`⠋ dry-run: ingesting and classifying`), clearing it before the summary prints. stdout stays clean, so piped output is unaffected; when stderr is not a TTY the spinner writes nothing at all. The total run time is reported as the `duration` row in the summary rather than on the spinner line.
+
+> **If the status line repeats instead of spinning in place**, your terminal is rendering each repaint as its own line instead of honouring the carriage return — the spinner cannot repaint in a renderer that appends. Redirect stderr (`node src/cli.ts dry-run 2>/dev/null`) to silence it, or ask for the single-line mode, which writes the status text once and never repaints.
 
 **2. Approve and apply.** You must give an explicit decision for **every** category that appears in the plan; a missing decision is an error, so nothing is applied by accident. Rejected categories leave their mail untouched, and each live run is linked to the dry-run plan it came from. Even with a category approved, an archive for a protected message is blocked rather than sent: it is audited as `blocked:no-touch` and counted as a no-touch miss.
 
