@@ -390,3 +390,49 @@ test("runLiveApply passes existing message categories to the adapter for classif
     { messageId: "msg-1", category: "Bulk/Archive", existingCategories: ["Existing", "Bulk/Archive"] }
   ]);
 });
+
+test("runLiveApply passes undefined categories when source ingest snapshot is missing", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
+  const planPath = await writePlanFile(dataDir, {
+    actions: [
+      {
+        message_id: "msg-1",
+        action: "classify",
+        category: "Bulk/Archive",
+        rationale: {
+          policy: [],
+          rule: ["bulk-rule"],
+          model: []
+        }
+      }
+    ]
+  });
+
+  const classifyCalls: Array<{ messageId: string; category?: string; existingCategories?: string[] }> = [];
+
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [];
+    },
+    async apply(messageId, action, category, existingCategories) {
+      if (action === "classify") {
+        classifyCalls.push({ messageId, category, existingCategories });
+      }
+      return { ok: true };
+    }
+  };
+
+  await runLiveApply({
+    adapter,
+    account: "pilot@example.com",
+    dataDir,
+    planPath,
+    auditLogPath: path.join(dataDir, "audit.jsonl"),
+    approvals: {
+      "Bulk/Archive": true
+    },
+    now: () => new Date("2026-01-05T00:00:00.000Z")
+  });
+
+  assert.deepEqual(classifyCalls, [{ messageId: "msg-1", category: "Bulk/Archive", existingCategories: undefined }]);
+});

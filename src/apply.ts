@@ -263,7 +263,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
       continue;
     }
 
-    const existingCategories = action.action === "classify" ? existingCategoriesByMessageId.get(action.message_id) ?? [] : [];
+    const existingCategories = action.action === "classify" ? existingCategoriesByMessageId.get(action.message_id) : undefined;
     const result = await options.adapter.apply(
       action.message_id,
       action.action,

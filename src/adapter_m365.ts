@@ -79,7 +79,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
     const messages: MailboxMessage[] = [];
     let nextUrl: string | undefined = requestUrl.toString();
 
-    while (nextUrl) {
+    while (nextUrl && messages.length < limit) {
       const response = await this.fetchFn(nextUrl, { headers });
       const payload = await fetchJson(response, "M365 response");
       if (!response.ok) {
@@ -94,17 +94,21 @@ export class M365MailboxAdapter implements MailboxAdapter {
         );
       }
 
+      if (messages.length >= limit) {
+        break;
+      }
+
       nextUrl = typeof payload["@odata.nextLink"] === "string" && payload["@odata.nextLink"].length > 0 ? payload["@odata.nextLink"] : undefined;
     }
 
-    return messages;
+    return messages.slice(0, limit);
   }
 
   async apply(
     messageId: string,
     action: MailboxAction,
     category?: string,
-    existingCategories: string[] = []
+    existingCategories?: string[]
   ): Promise<{ ok: boolean; error?: string }> {
     const token = await this.getAccessToken();
     const encodedAccount = encodeURIComponent(this.config.account);
@@ -117,7 +121,34 @@ export class M365MailboxAdapter implements MailboxAdapter {
     if (action === "classify") {
       method = "PATCH";
       url = `https://graph.microsoft.com/v1.0/users/${encodedAccount}/messages/${encodedMessageId}`;
-      const mergedCategories = [...new Set([...(existingCategories ?? []), category ?? "FYI/Reference"])];
+
+      let categoriesToMerge = existingCategories;
+      if (!categoriesToMerge || categoriesToMerge.length === 0) {
+        try {
+          const categoriesUrl = `https://graph.microsoft.com/v1.0/users/${encodedAccount}/messages/${encodedMessageId}?$select=categories`;
+          const categoriesResponse = await this.fetchFn(categoriesUrl, {
+            headers: {
+              authorization: `Bearer ${token}`,
+              prefer: 'IdType="ImmutableId"'
+            }
+          });
+          const categoriesPayload = await fetchJson(categoriesResponse, "M365 response");
+
+          if (!categoriesResponse.ok) {
+            const readError =
+              categoriesPayload.error?.message ?? categoriesPayload.error_description ?? `M365 categories fetch failed (${categoriesResponse.status})`;
+            return { ok: false, error: readError };
+          }
+
+          categoriesToMerge = Array.isArray(categoriesPayload.categories)
+            ? categoriesPayload.categories.filter((value: unknown): value is string => typeof value === "string")
+            : [];
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : "M365 categories fetch failed" };
+        }
+      }
+
+      const mergedCategories = [...new Set([...(categoriesToMerge ?? []), category ?? "FYI/Reference"])];
       body = JSON.stringify({ categories: mergedCategories });
     } else {
       url = `https://graph.microsoft.com/v1.0/users/${encodedAccount}/messages/${encodedMessageId}/move`;
