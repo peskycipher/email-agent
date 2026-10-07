@@ -1,5 +1,6 @@
 import type { MailboxMessage } from "./adapter.ts";
 import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
+import type { RationaleTrace } from "./classify/pipeline.ts";
 import type { CategoryActionTotals, EvaluatedAction } from "./metrics.ts";
 import type { ExceptionQueueItem, PlannedAction } from "./store.ts";
 
@@ -8,11 +9,7 @@ const DEFAULT_TRACE_SAMPLE_SIZE = 5;
 export type TraceSample = {
   message_id: string;
   category: EmailCategory;
-  rationale: {
-    policy: string[];
-    rule: string[];
-    model: string[];
-  };
+  rationale: RationaleTrace;
 };
 
 export type RunReport = {

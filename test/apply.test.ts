@@ -243,6 +243,9 @@ test("runLiveApply applies approved categories and persists run report + metrics
   assert.equal(runRecord.mode, "live-apply");
   assert.equal(runRecord.source_plan_id, "plan-run-1");
   assert.equal(runRecord.source_plan_path, planPath);
+  assert.equal(runRecord.config.account, "pilot@example.com");
+  assert.equal(runRecord.config.recentDays, 7);
+  assert.equal(runRecord.config.confidenceThreshold, 0.7);
 
   assert.equal(runRecord.report.summary.unread_delta, 1);
   assert.equal(runRecord.report.summary.category_action_totals["Action Needed"].classify.skipped, 1);
@@ -263,7 +266,7 @@ test("runLiveApply applies approved categories and persists run report + metrics
 });
 
 
-test("runLiveApply counts no-touch misses when archived messages appear in exception queue", async () => {
+test("runLiveApply blocks protected archive actions and never calls the adapter for them", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
   const planPath = await writePlanFile(dataDir, {
     actions: [
@@ -285,16 +288,93 @@ test("runLiveApply counts no-touch misses when archived messages appear in excep
     exceptionQueue: [{ message_id: "msg-protected", reasons: ["vip-sender"] }]
   });
 
+  const applyCalls: Array<{ messageId: string; action: "classify" | "archive" }> = [];
+
   const adapter: MailboxAdapter = {
     async listRecentInbox() {
       return [];
     },
-    async apply() {
+    async apply(messageId, action) {
+      applyCalls.push({ messageId, action });
       return { ok: true };
     }
   };
 
+  const auditLogPath = path.join(dataDir, "audit.jsonl");
+
   const result = await runLiveApply({
+    adapter,
+    account: "pilot@example.com",
+    dataDir,
+    planPath,
+    auditLogPath,
+    approvals: {
+      "Bulk/Archive": true
+    },
+    now: () => new Date("2026-01-05T00:00:00.000Z")
+  });
+
+  assert.deepEqual(applyCalls, [{ messageId: "msg-protected", action: "classify" }]);
+
+  const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
+  assert.equal(runRecord.metrics.no_touch_miss_count, 0);
+  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.blocked, 1);
+  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.success, 0);
+
+  const auditLines = (await fs.readFile(auditLogPath, "utf8")).trim().split("\n");
+  assert.equal(auditLines.length, 2);
+
+  const auditRecords = auditLines.map((line: string) => JSON.parse(line));
+  const blockedArchive = auditRecords.find((record: { action: string }) => record.action === "archive");
+  assert.ok(blockedArchive);
+  assert.equal(blockedArchive.outcome, "blocked:no-touch");
+  assert.equal(blockedArchive.category, "Bulk/Archive");
+});
+
+test("runLiveApply passes existing message categories to the adapter for classify actions", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
+  const planPath = await writePlanFile(dataDir, {
+    actions: [
+      {
+        message_id: "msg-1",
+        action: "classify",
+        category: "Bulk/Archive",
+        rationale: {
+          policy: [],
+          rule: ["bulk-rule"],
+          model: []
+        }
+      }
+    ]
+  });
+
+  await writeSourceRunArtifacts(dataDir, [
+    {
+      id: "msg-1",
+      from: "news@example.com",
+      subject: "Digest",
+      date: "2025-12-20T00:00:00.000Z",
+      unread: true,
+      flagged: false,
+      categories: ["Existing", "Bulk/Archive"]
+    }
+  ]);
+
+  const classifyCalls: Array<{ messageId: string; category?: string; existingCategories?: string[] }> = [];
+
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [];
+    },
+    async apply(messageId, action, category, existingCategories) {
+      if (action === "classify") {
+        classifyCalls.push({ messageId, category, existingCategories });
+      }
+      return { ok: true };
+    }
+  };
+
+  await runLiveApply({
     adapter,
     account: "pilot@example.com",
     dataDir,
@@ -306,6 +386,7 @@ test("runLiveApply counts no-touch misses when archived messages appear in excep
     now: () => new Date("2026-01-05T00:00:00.000Z")
   });
 
-  const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
-  assert.equal(runRecord.metrics.no_touch_miss_count, 1);
+  assert.deepEqual(classifyCalls, [
+    { messageId: "msg-1", category: "Bulk/Archive", existingCategories: ["Existing", "Bulk/Archive"] }
+  ]);
 });

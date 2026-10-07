@@ -71,3 +71,36 @@ test("buildNoTouchDryRunPlan excludes protected messages from archive and routes
     { message_id: "msg-finance", reasons: ["finance-legal-keyword"] }
   ]);
 });
+
+test("buildNoTouchDryRunPlan treats unparseable and exact-boundary dates as protected", () => {
+  const messages: MailboxMessage[] = [
+    {
+      id: "msg-unparseable",
+      from: "owner@example.com",
+      subject: "Subject",
+      date: "not-a-date",
+      unread: true,
+      flagged: false,
+      categories: []
+    },
+    {
+      id: "msg-boundary",
+      from: "owner@example.com",
+      subject: "Subject",
+      date: "2026-01-03T00:00:00.000Z",
+      unread: true,
+      flagged: false,
+      categories: []
+    }
+  ];
+
+  const result = buildNoTouchDryRunPlan(messages, {
+    now: () => new Date("2026-01-10T00:00:00.000Z")
+  });
+
+  assert.deepEqual(result.exceptionQueue, [
+    { message_id: "msg-unparseable", reasons: ["recent-thread"] },
+    { message_id: "msg-boundary", reasons: ["recent-thread"] }
+  ]);
+  assert.equal(result.plannedActions.length, 0);
+});

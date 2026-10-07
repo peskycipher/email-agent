@@ -4,11 +4,11 @@ import url from "node:url";
 
 import { M365MailboxAdapter } from "./adapter_m365.ts";
 import type { MailboxAdapter } from "./adapter.ts";
-import { runLiveApply } from "./apply.ts";
 import { appendAuditRecord } from "./audit.ts";
 import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
-import { loadConfig, type Config } from "./config.ts";
-import { runDryRun } from "./dry_run.ts";
+import { buildConfigSnapshot, loadConfig, type Config } from "./config.ts";
+import { evaluateExpansionGate, loadExpansionGateMetricsFromRun, loadExpansionSignOffFromRun } from "./gate.ts";
+import { runDryRun, runLiveApply } from "./orchestrator.ts";
 
 type CliIo = {
   stdout: (text: string) => void;
@@ -62,6 +62,31 @@ function readNumberOption(args: string[], name: string, fallback: number): numbe
   return parsed;
 }
 
+function readCategoryApprovals(args: string[]): Partial<Record<EmailCategory, boolean>> {
+  const approvals: Partial<Record<EmailCategory, boolean>> = {};
+
+  for (const category of readOptions(args, "--approve-category")) {
+    if (!isEmailCategory(category)) {
+      throw new Error(`Invalid category for --approve-category: ${category}`);
+    }
+    approvals[category] = true;
+  }
+
+  for (const category of readOptions(args, "--reject-category")) {
+    if (!isEmailCategory(category)) {
+      throw new Error(`Invalid category for --reject-category: ${category}`);
+    }
+
+    if (approvals[category] === true) {
+      throw new Error(`Conflicting approval options for category: ${category}`);
+    }
+
+    approvals[category] = false;
+  }
+
+  return approvals;
+}
+
 function renderHelp(version: string): string {
   return [
     `email-cleanup ${version}`,
@@ -70,7 +95,8 @@ function renderHelp(version: string): string {
     "  node src/cli.ts --version",
     "  node src/cli.ts demo [--config <path>] [--message-id <id>]",
     "  node src/cli.ts dry-run [--config <path>] [--limit <n>]",
-    "  node src/cli.ts live-apply --plan <path> [--config <path>] [--approve-category <name>] [--reject-category <name>]"
+    "  node src/cli.ts live-apply --plan <path> [--config <path>] [--approve-category <name>] [--reject-category <name>]",
+    "  node src/cli.ts gate --run <path-to-run-json>"
   ].join("\n");
 }
 
@@ -139,7 +165,10 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
       limit,
       now,
       vipSenders: config.vipSenders,
-      financeLegalKeywords: config.financeLegalKeywords
+      financeLegalKeywords: config.financeLegalKeywords,
+      recentDays: config.recentDays,
+      confidenceThreshold: config.confidenceThreshold,
+      auditLogPath: config.auditLogPath
     });
 
     io.stdout(`email-cleanup ${version}`);
@@ -156,26 +185,7 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
       throw new Error("Missing required option: --plan <path>");
     }
 
-    const approvals: Partial<Record<EmailCategory, boolean>> = {};
-
-    for (const category of readOptions(args, "--approve-category")) {
-      if (!isEmailCategory(category)) {
-        throw new Error(`Invalid category for --approve-category: ${category}`);
-      }
-      approvals[category] = true;
-    }
-
-    for (const category of readOptions(args, "--reject-category")) {
-      if (!isEmailCategory(category)) {
-        throw new Error(`Invalid category for --reject-category: ${category}`);
-      }
-
-      if (approvals[category] === true) {
-        throw new Error(`Conflicting approval options for category: ${category}`);
-      }
-
-      approvals[category] = false;
-    }
+    const approvals = readCategoryApprovals(args);
 
     const config = await loadConfig({ configPath });
     const createAdapter = dependencies.createAdapter ?? createAdapterFromConfig;
@@ -189,12 +199,32 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
       planPath,
       auditLogPath: config.auditLogPath,
       approvals,
+      config: buildConfigSnapshot(config),
       now
     });
 
     io.stdout(`email-cleanup ${version}`);
     io.stdout(`live-apply complete: applied ${result.appliedActions} action(s), skipped ${result.skippedActions}`);
     io.stdout(`live run record: ${result.runPath}`);
+    return 0;
+  }
+
+  if (command === "gate") {
+    const runPath = readOption(args, "--run");
+    if (!runPath) {
+      throw new Error("Missing required option: --run <path-to-run-json>");
+    }
+
+    const metrics = await loadExpansionGateMetricsFromRun(runPath);
+    const signOff = await loadExpansionSignOffFromRun(runPath);
+    const evaluation = evaluateExpansionGate(metrics, signOff);
+
+    io.stdout(`email-cleanup ${version}`);
+    io.stdout(`processed >= 500: ${evaluation.conditions.processed_count_met} (${metrics.processed_count})`);
+    io.stdout(`precision >= 98%: ${evaluation.conditions.archive_precision_met} (${metrics.archive_precision_estimate})`);
+    io.stdout(`no-touch misses = 0: ${evaluation.conditions.no_touch_misses_met} (${metrics.no_touch_miss_count})`);
+    io.stdout(`sign-off go: ${evaluation.conditions.sign_off_met}`);
+    io.stdout(`allowed: ${evaluation.allowed}`);
     return 0;
   }
 

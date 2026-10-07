@@ -1,4 +1,5 @@
 import type { MailboxAction, MailboxAdapter, MailboxMessage } from "./adapter.ts";
+import { fetchJson, type FetchFn } from "./http.ts";
 
 export type M365MailboxAdapterConfig = {
   tenantId: string;
@@ -22,21 +23,6 @@ type M365Message = {
     };
   };
 };
-
-type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
-
-async function readJson(response: Response): Promise<any> {
-  const text = await response.text();
-  if (!text) {
-    return {};
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`M365 response was not valid JSON (${response.status})`);
-  }
-}
 
 export class M365MailboxAdapter implements MailboxAdapter {
   private readonly config: M365MailboxAdapterConfig;
@@ -65,7 +51,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
       body: body.toString()
     });
 
-    const payload = await readJson(response);
+    const payload = await fetchJson(response, "M365 response");
     if (!response.ok) {
       throw new Error(`M365 auth failed (${response.status}): ${payload.error_description ?? payload.error ?? "unknown error"}`);
     }
@@ -85,28 +71,41 @@ export class M365MailboxAdapter implements MailboxAdapter {
     requestUrl.searchParams.set("$orderby", "receivedDateTime DESC");
     requestUrl.searchParams.set("$select", "id,from,subject,receivedDateTime,isRead,flag,categories");
 
-    const response = await this.fetchFn(requestUrl.toString(), {
-      headers: {
-        authorization: `Bearer ${token}`,
-        prefer: 'IdType="ImmutableId"'
+    const headers = {
+      authorization: `Bearer ${token}`,
+      prefer: 'IdType="ImmutableId"'
+    };
+
+    const messages: MailboxMessage[] = [];
+    let nextUrl: string | undefined = requestUrl.toString();
+
+    while (nextUrl) {
+      const response = await this.fetchFn(nextUrl, { headers });
+      const payload = await fetchJson(response, "M365 response");
+      if (!response.ok) {
+        throw new Error(`M365 list inbox failed (${response.status})`);
       }
-    });
 
-    const payload = await readJson(response);
-    if (!response.ok) {
-      throw new Error(`M365 list inbox failed (${response.status})`);
+      if (Array.isArray(payload.value)) {
+        messages.push(
+          ...payload.value
+            .map((item: M365Message) => this.mapMessage(item))
+            .filter((item: MailboxMessage | null): item is MailboxMessage => item !== null)
+        );
+      }
+
+      nextUrl = typeof payload["@odata.nextLink"] === "string" && payload["@odata.nextLink"].length > 0 ? payload["@odata.nextLink"] : undefined;
     }
 
-    if (!Array.isArray(payload.value)) {
-      return [];
-    }
-
-    return payload.value
-      .map((item: M365Message) => this.mapMessage(item))
-      .filter((item: MailboxMessage | null): item is MailboxMessage => item !== null);
+    return messages;
   }
 
-  async apply(messageId: string, action: MailboxAction, category?: string): Promise<{ ok: boolean; error?: string }> {
+  async apply(
+    messageId: string,
+    action: MailboxAction,
+    category?: string,
+    existingCategories: string[] = []
+  ): Promise<{ ok: boolean; error?: string }> {
     const token = await this.getAccessToken();
     const encodedAccount = encodeURIComponent(this.config.account);
     const encodedMessageId = encodeURIComponent(messageId);
@@ -118,7 +117,8 @@ export class M365MailboxAdapter implements MailboxAdapter {
     if (action === "classify") {
       method = "PATCH";
       url = `https://graph.microsoft.com/v1.0/users/${encodedAccount}/messages/${encodedMessageId}`;
-      body = JSON.stringify({ categories: [category ?? "FYI/Reference"] });
+      const mergedCategories = [...new Set([...(existingCategories ?? []), category ?? "FYI/Reference"])];
+      body = JSON.stringify({ categories: mergedCategories });
     } else {
       url = `https://graph.microsoft.com/v1.0/users/${encodedAccount}/messages/${encodedMessageId}/move`;
       body = JSON.stringify({ destinationId: "archive" });
@@ -137,7 +137,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
       return { ok: true };
     }
 
-    const payload = await readJson(response);
+    const payload = await fetchJson(response, "M365 response");
     const error = payload.error?.message ?? payload.error_description ?? `M365 apply failed (${response.status})`;
     return { ok: false, error };
   }

@@ -1,12 +1,8 @@
 import type { MailboxMessage } from "./adapter.ts";
-import type { PlannedAction } from "./store.ts";
+import { DEFAULT_RECENT_DAYS } from "./config.ts";
+import type { ExceptionQueueItem, PlannedAction } from "./store.ts";
 
 export type NoTouchReason = "vip-sender" | "flagged" | "recent-thread" | "finance-legal-keyword";
-
-export type ExceptionQueueItem = {
-  message_id: string;
-  reasons: NoTouchReason[];
-};
 
 export type NoTouchPolicyOptions = {
   vipSenders?: string[];
@@ -20,8 +16,6 @@ export type NoTouchDryRunPlan = {
   exceptionQueue: ExceptionQueueItem[];
 };
 
-const DEFAULT_RECENT_DAYS = 7;
-
 function normalizeList(values: string[] | undefined): Set<string> {
   return new Set(
     (values ?? [])
@@ -33,7 +27,7 @@ function normalizeList(values: string[] | undefined): Set<string> {
 function isRecentMessage(dateValue: string, now: Date, recentDays: number): boolean {
   const messageTime = Date.parse(dateValue);
   if (!Number.isFinite(messageTime)) {
-    return false;
+    return true;
   }
 
   const ageMs = now.getTime() - messageTime;
@@ -41,7 +35,7 @@ function isRecentMessage(dateValue: string, now: Date, recentDays: number): bool
     return true;
   }
 
-  return ageMs < recentDays * 24 * 60 * 60 * 1000;
+  return ageMs <= recentDays * 24 * 60 * 60 * 1000;
 }
 
 function hasKeywordMatch(subject: string, keywords: Set<string>): boolean {
@@ -91,12 +85,6 @@ export function buildNoTouchDryRunPlan(messages: MailboxMessage[], options: NoTo
   const exceptionQueue: ExceptionQueueItem[] = [];
 
   for (const message of messages) {
-    plannedActions.push({
-      message_id: message.id,
-      action: "classify",
-      category: "FYI/Reference"
-    });
-
     const reasons = evaluateNoTouchReasons(message, now, vipSenders, financeLegalKeywords, recentDays);
     if (reasons.length > 0) {
       exceptionQueue.push({

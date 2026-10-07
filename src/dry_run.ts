@@ -1,8 +1,11 @@
+import path from "node:path";
+
 import type { MailboxAdapter } from "./adapter.ts";
-import { classifyMessagesForDryRun, type ClassificationRationaleTrace } from "./classify/pipeline.ts";
+import { classifyMessagesForDryRun } from "./classify/pipeline.ts";
 import { OllamaCloudClassifier, type SecondPassClassifier } from "./classify/ollama.ts";
 import { JevSystem1Classifier, type ClassifierSystem1 } from "./classify/system1.ts";
-import { buildNoTouchDryRunPlan, type NoTouchReason } from "./policy.ts";
+import { buildConfigSnapshot } from "./config.ts";
+import { buildNoTouchDryRunPlan } from "./policy.ts";
 import { persistDryRunArtifacts, type PlannedAction } from "./store.ts";
 
 export type DryRunOptions = {
@@ -13,6 +16,8 @@ export type DryRunOptions = {
   now?: () => Date;
   vipSenders?: string[];
   financeLegalKeywords?: string[];
+  recentDays?: number;
+  auditLogPath?: string;
   system1Classifier?: ClassifierSystem1;
   secondPassClassifier?: SecondPassClassifier;
   confidenceThreshold?: number;
@@ -27,18 +32,6 @@ export type DryRunResult = {
   ingestedCount: number;
 };
 
-function toStoredRationale(rationale: ClassificationRationaleTrace): {
-  policy: string[];
-  rule: string[];
-  model: string[];
-} {
-  return {
-    policy: [...rationale.policy],
-    rule: [...rationale.rule],
-    model: [...rationale.model]
-  };
-}
-
 export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
   const now = options.now ?? (() => new Date());
   const startedAt = now();
@@ -48,13 +41,23 @@ export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
   const plan = buildNoTouchDryRunPlan(messages, {
     vipSenders: options.vipSenders,
     financeLegalKeywords: options.financeLegalKeywords,
+    recentDays: options.recentDays,
     now
+  });
+
+  const config = buildConfigSnapshot({
+    account: options.account,
+    auditLogPath: options.auditLogPath ?? path.resolve("data", "audit.jsonl"),
+    recentDays: options.recentDays,
+    confidenceThreshold: options.confidenceThreshold,
+    vipSenders: options.vipSenders,
+    financeLegalKeywords: options.financeLegalKeywords
   });
 
   const system1Classifier = options.system1Classifier ?? new JevSystem1Classifier();
   const secondPassClassifier = options.secondPassClassifier ?? new OllamaCloudClassifier();
 
-  const noTouchReasonsByMessageId = new Map<string, NoTouchReason[]>();
+  const noTouchReasonsByMessageId = new Map<string, string[]>();
   for (const item of plan.exceptionQueue) {
     noTouchReasonsByMessageId.set(item.message_id, item.reasons);
   }
@@ -78,7 +81,7 @@ export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
       message_id: message.id,
       action: "classify",
       category: classified.category,
-      rationale: toStoredRationale(classified.rationale)
+      rationale: classified.rationale
     });
 
     if (archiveMessageIds.has(message.id)) {
@@ -95,7 +98,8 @@ export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
     createdAt: startedAt.toISOString(),
     messages,
     plannedActions,
-    exceptionQueue: plan.exceptionQueue
+    exceptionQueue: plan.exceptionQueue,
+    config
   });
 
   return {

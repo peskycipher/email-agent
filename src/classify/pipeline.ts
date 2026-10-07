@@ -1,9 +1,10 @@
 import type { MailboxMessage } from "../adapter.ts";
-import type { EmailCategory } from "./categories.ts";
+import { EMAIL_CATEGORIES, type EmailCategory } from "./categories.ts";
+import { DEFAULT_CONFIDENCE_THRESHOLD } from "../config.ts";
 import type { SecondPassClassifier } from "./ollama.ts";
 import { KeywordSystem1Fallback, type ClassifierSystem1, type System1Classification } from "./system1.ts";
 
-export type ClassificationRationaleTrace = {
+export type RationaleTrace = {
   policy: string[];
   rule: string[];
   model: string[];
@@ -12,7 +13,7 @@ export type ClassificationRationaleTrace = {
 export type MessageClassification = {
   messageId: string;
   category: EmailCategory;
-  rationale: ClassificationRationaleTrace;
+  rationale: RationaleTrace;
 };
 
 export type ClassificationPipelineOptions = {
@@ -21,13 +22,11 @@ export type ClassificationPipelineOptions = {
   confidenceThreshold?: number;
 };
 
-const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
-
 function classifyByRules(message: MailboxMessage): { category: EmailCategory; rationale: string } | undefined {
   for (const category of message.categories) {
-    if (category === "Action Needed" || category === "Waiting/Follow-up" || category === "FYI/Reference" || category === "Bulk/Archive") {
+    if (EMAIL_CATEGORIES.includes(category as EmailCategory)) {
       return {
-        category,
+        category: category as EmailCategory,
         rationale: "existing mailbox category"
       };
     }
@@ -63,7 +62,7 @@ export async function classifyMessageForDryRun(
   policyReasons: string[],
   options: ClassificationPipelineOptions
 ): Promise<MessageClassification> {
-  const rationale: ClassificationRationaleTrace = {
+  const rationale: RationaleTrace = {
     policy: policyReasons.map((reason) => `no-touch:${reason}`),
     rule: [],
     model: []

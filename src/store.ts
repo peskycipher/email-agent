@@ -2,16 +2,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { MailboxAction, MailboxMessage } from "./adapter.ts";
+import type { RationaleTrace } from "./classify/pipeline.ts";
+import type { ConfigSnapshot } from "./config.ts";
 
 export type PlannedAction = {
   message_id: string;
   action: MailboxAction;
   category?: string;
-  rationale?: {
-    policy: string[];
-    rule: string[];
-    model: string[];
-  };
+  rationale?: RationaleTrace;
 };
 
 export type ExceptionQueueItem = {
@@ -26,6 +24,7 @@ export type PersistDryRunInput = {
   messages: MailboxMessage[];
   plannedActions: PlannedAction[];
   exceptionQueue: ExceptionQueueItem[];
+  config: ConfigSnapshot;
 };
 
 export type PersistDryRunOutput = {
@@ -52,6 +51,7 @@ export async function persistDryRunArtifacts(dataDir: string, input: PersistDryR
     account: input.account,
     created_at: input.createdAt,
     dry_run: true,
+    config: input.config,
     actions: input.plannedActions,
     exception_queue: input.exceptionQueue
   };
@@ -64,6 +64,7 @@ export async function persistDryRunArtifacts(dataDir: string, input: PersistDryR
     plan_id: planId,
     ingest_path: ingestPath,
     plan_path: planPath,
+    config: input.config,
     planned_actions: input.plannedActions,
     exception_queue: input.exceptionQueue
   };

@@ -1,4 +1,5 @@
 import type { MailboxMessage } from "../adapter.ts";
+import { fetchJson, type FetchFn } from "../http.ts";
 import { isEmailCategory, type EmailCategory } from "./categories.ts";
 
 export type System1Classification = {
@@ -10,8 +11,6 @@ export type System1Classification = {
 export type ClassifierSystem1 = {
   classify(message: MailboxMessage): Promise<System1Classification>;
 };
-
-type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
 export type JevSystem1ClassifierOptions = {
   apiKey?: string;
@@ -120,7 +119,7 @@ export class JevSystem1Classifier implements ClassifierSystem1 {
       body: JSON.stringify(toClassificationRequest(message, this.model))
     });
 
-    const payload = await this.readJson(response);
+    const payload = await fetchJson(response, "JEV System1 response");
 
     if (!response.ok) {
       throw new Error(readSystem1Error(payload, response.status));
@@ -143,19 +142,6 @@ export class JevSystem1Classifier implements ClassifierSystem1 {
       confidence,
       rationale: `jev:category=${answer.choice}:confidence=${confidence}`
     };
-  }
-
-  private async readJson(response: Response): Promise<unknown> {
-    const raw = await response.text();
-    if (!raw || raw.trim().length === 0) {
-      return {};
-    }
-
-    try {
-      return JSON.parse(raw);
-    } catch {
-      throw new Error(`JEV System1 response was not valid JSON (${response.status})`);
-    }
   }
 }
 

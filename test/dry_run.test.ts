@@ -97,6 +97,11 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
 
   const planRecord = JSON.parse(await fs.readFile(result.planPath, "utf8"));
   assert.equal(planRecord.account, "pilot@example.com");
+  assert.equal(planRecord.config.account, "pilot@example.com");
+  assert.equal(planRecord.config.recentDays, 7);
+  assert.equal(planRecord.config.confidenceThreshold, 0.7);
+  assert.deepEqual(planRecord.config.vipSenders, []);
+  assert.deepEqual(planRecord.config.financeLegalKeywords, []);
   assert.deepEqual(planRecord.actions, [
     {
       message_id: "msg-1",
@@ -137,6 +142,7 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
 
   const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
   assert.equal(runRecord.plan_id, planRecord.plan_id);
+  assert.equal(runRecord.config.account, "pilot@example.com");
   assert.deepEqual(runRecord.planned_actions, planRecord.actions);
   assert.deepEqual(runRecord.exception_queue, planRecord.exception_queue);
 });

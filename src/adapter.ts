@@ -12,5 +12,10 @@ export type MailboxAction = "classify" | "archive";
 
 export type MailboxAdapter = {
   listRecentInbox(limit: number): Promise<MailboxMessage[]>;
-  apply(messageId: string, action: MailboxAction, category?: string): Promise<{ ok: boolean; error?: string }>;
+  apply(
+    messageId: string,
+    action: MailboxAction,
+    category?: string,
+    existingCategories?: string[]
+  ): Promise<{ ok: boolean; error?: string }>;
 };

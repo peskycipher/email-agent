@@ -5,6 +5,7 @@ import type { MailboxAdapter, MailboxAction, MailboxMessage } from "./adapter.ts
 import { appendAuditRecord } from "./audit.ts";
 import { collectPlannedCategories, requireApprovalDecisions, type CategoryApprovals } from "./approval.ts";
 import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
+import { buildConfigSnapshot, type ConfigSnapshot } from "./config.ts";
 import { buildRunMetrics, type EvaluatedAction } from "./metrics.ts";
 import { buildRunReport } from "./report.ts";
 import type { ExceptionQueueItem, PlannedAction } from "./store.ts";
@@ -30,6 +31,7 @@ export type LiveApplyOptions = {
   planPath: string;
   auditLogPath: string;
   approvals: CategoryApprovals;
+  config?: ConfigSnapshot;
   now?: () => Date;
 };
 
@@ -214,6 +216,12 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
   const plannedCategories = collectPlannedCategories(plan.actions);
   const decisions = requireApprovalDecisions(plannedCategories, options.approvals);
 
+  const exceptionQueue = plan.exception_queue ?? [];
+  const protectedMessageIds = new Set(exceptionQueue.map((item) => item.message_id));
+  const sourceMessages = await readSourceIngestMessages(options.dataDir, plan.run_id);
+  const existingCategoriesByMessageId = new Map((sourceMessages ?? []).map((message) => [message.id, message.categories]));
+  const config = options.config ?? buildConfigSnapshot({ account: options.account, auditLogPath: options.auditLogPath });
+
   const appliedActions: AppliedAction[] = [];
   const evaluatedActions: EvaluatedAction[] = [];
   let skippedActions = 0;
@@ -222,6 +230,28 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
     validateAction(action);
 
     const category = resolveActionCategory(action, categoryByMessageId);
+
+    if (action.action === "archive" && protectedMessageIds.has(action.message_id)) {
+      evaluatedActions.push({
+        message_id: action.message_id,
+        action: action.action,
+        category,
+        status: "blocked"
+      });
+
+      await appendAuditRecord(options.auditLogPath, {
+        timestamp: now().toISOString(),
+        account: options.account,
+        message_id: action.message_id,
+        action: action.action,
+        category,
+        outcome: "blocked:no-touch",
+        rationale: toRationaleText(action),
+        run_id: runId
+      });
+      continue;
+    }
+
     if (!decisions[category]) {
       skippedActions += 1;
       evaluatedActions.push({
@@ -233,7 +263,13 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
       continue;
     }
 
-    const result = await options.adapter.apply(action.message_id, action.action, action.action === "classify" ? category : undefined);
+    const existingCategories = action.action === "classify" ? existingCategoriesByMessageId.get(action.message_id) ?? [] : [];
+    const result = await options.adapter.apply(
+      action.message_id,
+      action.action,
+      action.action === "classify" ? category : undefined,
+      existingCategories
+    );
     const status: EvaluatedAction["status"] = result.ok ? "success" : "failed";
     const outcome = result.ok ? "success" : `failed:${result.error ?? "unknown"}`;
 
@@ -263,8 +299,6 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
     });
   }
 
-  const exceptionQueue = plan.exception_queue ?? [];
-  const sourceMessages = await readSourceIngestMessages(options.dataDir, plan.run_id);
   const metrics = buildRunMetrics({
     evaluatedActions,
     exceptionQueue
@@ -292,6 +326,7 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
         source_plan_id: plan.plan_id,
         source_plan_path: options.planPath,
         source_run_id: plan.run_id,
+        config,
         approvals: decisions,
         applied_actions: appliedActions,
         skipped_actions: skippedActions,

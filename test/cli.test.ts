@@ -229,3 +229,60 @@ test("cli live-apply applies only approved categories", async () => {
   ]);
   assert.ok(stdout.some((line) => line.includes("live-apply complete")));
 });
+
+test("cli gate evaluates a run record and separate sign-off file", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cli-gate-"));
+  const runsDir = path.join(dir, "runs");
+  const signOffDir = path.join(dir, "signoffs");
+  await fs.mkdir(runsDir, { recursive: true });
+  await fs.mkdir(signOffDir, { recursive: true });
+
+  const runPath = path.join(runsDir, "live-1.json");
+  await fs.writeFile(
+    runPath,
+    `${JSON.stringify(
+      {
+        run_id: "live-1",
+        mode: "live-apply",
+        metrics: {
+          processed_count: 600,
+          archive_precision_estimate: 0.99,
+          no_touch_miss_count: 0
+        }
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  await fs.writeFile(
+    path.join(signOffDir, "live-1.json"),
+    `${JSON.stringify(
+      {
+        run_id: "live-1",
+        recorded: true,
+        decision: "go",
+        recorded_at: "2026-01-12T09:30:00.000Z"
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+
+  const code = await runCli(["gate", "--run", runPath], {
+    stdout: (text) => stdout.push(text),
+    stderr: (text) => stderr.push(text)
+  });
+
+  assert.equal(code, 0, stderr.join("\n"));
+  assert.ok(stdout.some((line) => line.includes("processed >= 500: true (600)")));
+  assert.ok(stdout.some((line) => line.includes("precision >= 98%: true (0.99)")));
+  assert.ok(stdout.some((line) => line.includes("no-touch misses = 0: true (0)")));
+  assert.ok(stdout.some((line) => line.includes("sign-off go: true")));
+  assert.ok(stdout.some((line) => line.includes("allowed: true")));
+});

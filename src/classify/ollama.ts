@@ -1,5 +1,6 @@
 import type { MailboxMessage } from "../adapter.ts";
-import { isEmailCategory, type EmailCategory } from "./categories.ts";
+import { fetchJson, type FetchFn } from "../http.ts";
+import { EMAIL_CATEGORIES, isEmailCategory, type EmailCategory } from "./categories.ts";
 
 export type SecondPassClassification = {
   category: EmailCategory;
@@ -10,8 +11,6 @@ export type SecondPassClassification = {
 export type SecondPassClassifier = {
   classify(message: MailboxMessage): Promise<SecondPassClassification>;
 };
-
-type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
 export type OllamaCloudClassifierOptions = {
   baseUrl?: string;
@@ -46,7 +45,7 @@ function parseCategory(content: string): { category: EmailCategory; rationale: s
     }
   }
 
-  for (const category of ["Action Needed", "Waiting/Follow-up", "FYI/Reference", "Bulk/Archive"] as const) {
+  for (const category of EMAIL_CATEGORIES) {
     if (trimmed.toLowerCase().includes(category.toLowerCase())) {
       return {
         category,
@@ -128,7 +127,7 @@ export class OllamaCloudClassifier implements SecondPassClassifier {
       })
     });
 
-    const payload = await this.readJson(response);
+    const payload = await fetchJson(response, "Ollama response");
     if (!response.ok) {
       const error = typeof payload?.error === "string" ? payload.error : `HTTP ${response.status}`;
       throw new Error(error);
@@ -140,18 +139,5 @@ export class OllamaCloudClassifier implements SecondPassClassifier {
     }
 
     return parseCategory(content);
-  }
-
-  private async readJson(response: Response): Promise<ChatCompletionResponse & { error?: unknown }> {
-    const text = await response.text();
-    if (!text) {
-      return {};
-    }
-
-    try {
-      return JSON.parse(text) as ChatCompletionResponse & { error?: unknown };
-    } catch {
-      throw new Error(`invalid JSON response (${response.status})`);
-    }
   }
 }
