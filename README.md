@@ -128,6 +128,8 @@ Settings come from a JSON file (`--config <path>`, or the `EMAIL_CLEANUP_CONFIG`
 }
 ```
 
+A ready-to-copy version ships as `config.example.json` in the repo root.
+
 | File key | Environment variable | Default | Meaning |
 | --- | --- | --- | --- |
 | `account` | `MAILBOX_ACCOUNT` | none, required | Mailbox to clean. |
