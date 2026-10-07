@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-export type AuditAction = "classify" | "archive";
+import type { MailboxAction } from "./adapter.ts";
+
+export type AuditAction = MailboxAction;
 
 export type AuditRecord = {
   timestamp: string;

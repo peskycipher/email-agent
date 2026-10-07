@@ -1,6 +1,7 @@
 import type { MailboxMessage } from "./adapter.ts";
+import { type EmailCategory } from "./classify/categories.ts";
 import { DEFAULT_RECENT_DAYS } from "./config.ts";
-import type { ExceptionQueueItem, PlannedAction } from "./store.ts";
+import type { ExceptionQueueItem } from "./store.ts";
 
 export type NoTouchReason = "vip-sender" | "flagged" | "recent-thread" | "finance-legal-keyword";
 
@@ -12,7 +13,6 @@ export type NoTouchPolicyOptions = {
 };
 
 export type NoTouchDryRunPlan = {
-  plannedActions: PlannedAction[];
   exceptionQueue: ExceptionQueueItem[];
 };
 
@@ -53,7 +53,11 @@ function hasKeywordMatch(subject: string, keywords: Set<string>): boolean {
   return false;
 }
 
-function evaluateNoTouchReasons(message: MailboxMessage, now: Date, vipSenders: Set<string>, financeLegalKeywords: Set<string>, recentDays: number): NoTouchReason[] {
+export function evaluateNoTouchReasons(message: Pick<MailboxMessage, "from" | "subject" | "date" | "flagged">, options: NoTouchPolicyOptions = {}): NoTouchReason[] {
+  const now = options.now ? options.now() : new Date();
+  const vipSenders = normalizeList(options.vipSenders);
+  const financeLegalKeywords = normalizeList(options.financeLegalKeywords);
+  const recentDays = options.recentDays ?? DEFAULT_RECENT_DAYS;
   const reasons: NoTouchReason[] = [];
 
   if (vipSenders.has(message.from.trim().toLowerCase())) {
@@ -75,33 +79,27 @@ function evaluateNoTouchReasons(message: MailboxMessage, now: Date, vipSenders: 
   return reasons;
 }
 
-export function buildNoTouchDryRunPlan(messages: MailboxMessage[], options: NoTouchPolicyOptions = {}): NoTouchDryRunPlan {
-  const now = options.now ? options.now() : new Date();
-  const vipSenders = normalizeList(options.vipSenders);
-  const financeLegalKeywords = normalizeList(options.financeLegalKeywords);
-  const recentDays = options.recentDays ?? DEFAULT_RECENT_DAYS;
+export function shouldArchiveCategory(category: EmailCategory): boolean {
+  return category === "Bulk/Archive" || category === "FYI/Reference";
+}
 
-  const plannedActions: PlannedAction[] = [];
+export function buildNoTouchDryRunPlan(messages: MailboxMessage[], options: NoTouchPolicyOptions = {}): NoTouchDryRunPlan {
   const exceptionQueue: ExceptionQueueItem[] = [];
 
   for (const message of messages) {
-    const reasons = evaluateNoTouchReasons(message, now, vipSenders, financeLegalKeywords, recentDays);
-    if (reasons.length > 0) {
-      exceptionQueue.push({
-        message_id: message.id,
-        reasons
-      });
+    const reasons = evaluateNoTouchReasons(message, options);
+    if (reasons.length === 0) {
       continue;
     }
 
-    plannedActions.push({
+    exceptionQueue.push({
       message_id: message.id,
-      action: "archive"
+      reasons,
+      unread: message.unread
     });
   }
 
   return {
-    plannedActions,
     exceptionQueue
   };
 }

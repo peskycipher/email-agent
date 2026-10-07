@@ -15,9 +15,10 @@ export type TraceSample = {
 export type RunReport = {
   summary: {
     category_action_totals: CategoryActionTotals;
-    unread_before: number;
-    unread_after: number;
-    unread_delta: number;
+    unread_before: number | null;
+    unread_after: number | null;
+    unread_delta: number | null;
+    ingest_unavailable?: true;
   };
   trace_samples: TraceSample[];
   exception_queue_snapshot: ExceptionQueueItem[];
@@ -36,7 +37,7 @@ function buildTraceSamples(plannedActions: PlannedAction[], sampleSize: number):
   const samples: TraceSample[] = [];
 
   for (const action of plannedActions) {
-    if (action.action !== "classify" || !action.category || !isEmailCategory(action.category)) {
+    if (action.action !== "classify" || !isEmailCategory(action.category)) {
       continue;
     }
 
@@ -59,21 +60,23 @@ function buildTraceSamples(plannedActions: PlannedAction[], sampleSize: number):
 }
 
 function computeUnreadSummary(sourceMessages: MailboxMessage[] | undefined, evaluatedActions: EvaluatedAction[]): {
-  unreadBefore: number;
-  unreadAfter: number;
-  unreadDelta: number;
+  unreadBefore: number | null;
+  unreadAfter: number | null;
+  unreadDelta: number | null;
+  ingestUnavailable: boolean;
 } {
+  if (!sourceMessages) {
+    return {
+      unreadBefore: null,
+      unreadAfter: null,
+      unreadDelta: null,
+      ingestUnavailable: true
+    };
+  }
+
   const archivedMessageIds = evaluatedActions
     .filter((action) => action.action === "archive" && action.status === "success")
     .map((action) => action.message_id);
-
-  if (!sourceMessages) {
-    return {
-      unreadBefore: archivedMessageIds.length,
-      unreadAfter: 0,
-      unreadDelta: archivedMessageIds.length
-    };
-  }
 
   const unreadMessageIds = new Set(sourceMessages.filter((message) => message.unread).map((message) => message.id));
   const unreadBefore = unreadMessageIds.size;
@@ -90,7 +93,8 @@ function computeUnreadSummary(sourceMessages: MailboxMessage[] | undefined, eval
   return {
     unreadBefore,
     unreadAfter,
-    unreadDelta: unreadBefore - unreadAfter
+    unreadDelta: unreadBefore - unreadAfter,
+    ingestUnavailable: false
   };
 }
 
@@ -102,12 +106,14 @@ export function buildRunReport(input: BuildRunReportInput): RunReport {
       category_action_totals: input.categoryTotals,
       unread_before: unread.unreadBefore,
       unread_after: unread.unreadAfter,
-      unread_delta: unread.unreadDelta
+      unread_delta: unread.unreadDelta,
+      ...(unread.ingestUnavailable ? { ingest_unavailable: true } : {})
     },
     trace_samples: buildTraceSamples(input.plannedActions, input.traceSampleSize ?? DEFAULT_TRACE_SAMPLE_SIZE),
     exception_queue_snapshot: input.exceptionQueue.map((item) => ({
       message_id: item.message_id,
-      reasons: [...item.reasons]
+      reasons: [...item.reasons],
+      unread: item.unread
     }))
   };
 }

@@ -153,7 +153,7 @@ Everything lives under `data_dir` (default `./data`, which is git-ignored).
 | `runs/<run-id>-ingest.json` | The messages ingested by a dry run. |
 | `signoffs/<run-id>.json` | Your go/no-go decision. Kept separate so run records stay immutable. |
 
-Run metrics are `processed_count`, `archive_precision_estimate`, `no_touch_miss_count`, and category totals. Archive precision is the success rate over archives of non-protected messages. A no-touch miss is any archive attempt on a protected message.
+Run metrics are `processed_count`, `archive_precision_estimate`, `no_touch_miss_count`, and category totals. Archive precision is the success rate over archives of non-protected messages. A no-touch miss is any blocked archive plus any archive attempt on a protected message.
 
 ## Rollout gate
 

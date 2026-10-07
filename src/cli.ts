@@ -160,15 +160,10 @@ export async function runCli(args: string[], io: CliIo, dependencies: CliDepende
 
     const result = await runDryRun({
       adapter,
-      account: config.account,
+      config: buildConfigSnapshot(config),
       dataDir: config.dataDir,
       limit,
-      now,
-      vipSenders: config.vipSenders,
-      financeLegalKeywords: config.financeLegalKeywords,
-      recentDays: config.recentDays,
-      confidenceThreshold: config.confidenceThreshold,
-      auditLogPath: config.auditLogPath
+      now
     });
 
     io.stdout(`email-cleanup ${version}`);

@@ -1,6 +1,8 @@
 export type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
-export async function fetchJson(response: Response, errorContext = "response"): Promise<any> {
+export const defaultFetch: FetchFn = (input, init) => fetch(input, init);
+
+export async function parseJsonBody(response: Response, errorContext = "response"): Promise<any> {
   const text = await response.text();
   if (!text) {
     return {};
@@ -11,4 +13,8 @@ export async function fetchJson(response: Response, errorContext = "response"): 
   } catch {
     throw new Error(`${errorContext} was not valid JSON (${response.status})`);
   }
+}
+
+export function isMissingFileError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { MailboxAdapter, MailboxMessage } from "../src/adapter.ts";
+import { buildConfigSnapshot } from "../src/config.ts";
 import { runDryRun } from "../src/dry_run.ts";
 
 test("runDryRun persists ingest, plan, and run records without mailbox mutations", async () => {
@@ -37,6 +38,15 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
       unread: true,
       flagged: false,
       categories: []
+    },
+    {
+      id: "msg-4",
+      from: "owner@example.com",
+      subject: "Urgent approval",
+      date: "2025-12-10T00:00:00.000Z",
+      unread: true,
+      flagged: false,
+      categories: []
     }
   ];
 
@@ -49,6 +59,20 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
       assert.equal(limit, 5);
       return messages;
     },
+    async getMessage(messageId) {
+      const message = messages.find((entry) => entry.id === messageId);
+      if (!message) {
+        throw new Error(`missing ${messageId}`);
+      }
+
+      return {
+        id: message.id,
+        from: message.from,
+        subject: message.subject,
+        flagged: message.flagged,
+        unread: message.unread
+      };
+    },
     async apply() {
       applyCalls += 1;
       return { ok: true };
@@ -57,7 +81,10 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
 
   const result = await runDryRun({
     adapter,
-    account: "pilot@example.com",
+    config: buildConfigSnapshot({
+      account: "pilot@example.com",
+      auditLogPath: path.join(dataDir, "audit.jsonl")
+    }),
     dataDir,
     limit: 5,
     now: () => new Date("2026-01-03T00:00:00.000Z"),
@@ -92,7 +119,7 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
   assert.equal(ingestRecord.account, "pilot@example.com");
   assert.deepEqual(
     ingestRecord.messages.map((message: MailboxMessage) => message.id),
-    ["msg-1", "msg-2", "msg-3"]
+    ["msg-1", "msg-2", "msg-3", "msg-4"]
   );
 
   const planRecord = JSON.parse(await fs.readFile(result.planPath, "utf8"));
@@ -133,11 +160,21 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
         model: []
       }
     },
-    { message_id: "msg-3", action: "archive" }
+    { message_id: "msg-3", action: "archive" },
+    {
+      message_id: "msg-4",
+      action: "classify",
+      category: "Action Needed",
+      rationale: {
+        policy: [],
+        rule: ["keyword rule: invoice/approval/urgent"],
+        model: []
+      }
+    }
   ]);
   assert.deepEqual(planRecord.exception_queue, [
-    { message_id: "msg-1", reasons: ["recent-thread"] },
-    { message_id: "msg-2", reasons: ["flagged", "recent-thread"] }
+    { message_id: "msg-1", reasons: ["recent-thread"], unread: true },
+    { message_id: "msg-2", reasons: ["flagged", "recent-thread"], unread: false }
   ]);
 
   const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
@@ -145,4 +182,10 @@ test("runDryRun persists ingest, plan, and run records without mailbox mutations
   assert.equal(runRecord.config.account, "pilot@example.com");
   assert.deepEqual(runRecord.planned_actions, planRecord.actions);
   assert.deepEqual(runRecord.exception_queue, planRecord.exception_queue);
+
+  const archives = planRecord.actions.filter((action: { action: string }) => action.action === "archive");
+  assert.deepEqual(
+    archives.map((action: { message_id: string }) => action.message_id),
+    ["msg-3"]
+  );
 });

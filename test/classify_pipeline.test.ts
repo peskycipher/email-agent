@@ -166,5 +166,5 @@ test("pipeline falls back after system1 error and still escalates to second pass
   assert.equal(classified.category, "Waiting/Follow-up");
   assert.ok(classified.rationale.model.some((entry) => entry.startsWith("system1-error:system1-down")));
   assert.ok(classified.rationale.model.some((entry) => entry.startsWith("system1-fallback:keyword 'contract':confidence=")));
-  assert.ok(classified.rationale.model.some((entry) => entry.startsWith("ollama:deepseek-4.1-flash")));
+  assert.ok(classified.rationale.model.some((entry) => entry === "ollama:deepseek-4.1-flash:resolved by ollama"));
 });

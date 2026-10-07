@@ -1,7 +1,8 @@
 import type { MailboxMessage } from "../adapter.ts";
-import { EMAIL_CATEGORIES, type EmailCategory } from "./categories.ts";
 import { DEFAULT_CONFIDENCE_THRESHOLD } from "../config.ts";
+import { EMAIL_CATEGORIES, type EmailCategory } from "./categories.ts";
 import type { SecondPassClassifier } from "./ollama.ts";
+import { KEYWORD_RULES, findKeywordRuleMatch } from "./rules.ts";
 import { KeywordSystem1Fallback, type ClassifierSystem1, type System1Classification } from "./system1.ts";
 
 export type RationaleTrace = {
@@ -32,29 +33,18 @@ function classifyByRules(message: MailboxMessage): { category: EmailCategory; ra
     }
   }
 
-  const subject = message.subject.toLowerCase();
-  if (subject.includes("newsletter") || subject.includes("unsubscribe") || subject.includes("digest")) {
-    return {
-      category: "Bulk/Archive",
-      rationale: "keyword rule: newsletter/unsubscribe/digest"
-    };
+  const match = findKeywordRuleMatch(
+    message.subject,
+    KEYWORD_RULES.filter((rule) => rule.appliesToPipeline)
+  );
+  if (!match) {
+    return undefined;
   }
 
-  if (subject.includes("follow-up") || subject.includes("follow up") || subject.includes("waiting") || subject.includes("pending")) {
-    return {
-      category: "Waiting/Follow-up",
-      rationale: "keyword rule: follow-up/waiting"
-    };
-  }
-
-  if (subject.includes("invoice") || subject.includes("approval") || subject.includes("urgent")) {
-    return {
-      category: "Action Needed",
-      rationale: "keyword rule: invoice/approval/urgent"
-    };
-  }
-
-  return undefined;
+  return {
+    category: match.rule.category,
+    rationale: match.rule.pipelineRationale
+  };
 }
 
 export async function classifyMessageForDryRun(
@@ -117,7 +107,7 @@ export async function classifyMessageForDryRun(
 
   try {
     const secondPassResult = await options.secondPass.classify(message);
-    rationale.model.push(`ollama:${secondPassResult.model}`);
+    rationale.model.push(`ollama:${secondPassResult.model}:${secondPassResult.rationale}`);
     return {
       messageId: message.id,
       category: secondPassResult.category,

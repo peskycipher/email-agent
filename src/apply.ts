@@ -6,15 +6,17 @@ import { appendAuditRecord } from "./audit.ts";
 import { collectPlannedCategories, requireApprovalDecisions, type CategoryApprovals } from "./approval.ts";
 import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
 import { buildConfigSnapshot, type ConfigSnapshot } from "./config.ts";
+import { isMissingFileError } from "./http.ts";
 import { buildRunMetrics, type EvaluatedAction } from "./metrics.ts";
+import { evaluateNoTouchReasons } from "./policy.ts";
 import { buildRunReport } from "./report.ts";
-import type { ExceptionQueueItem, PlannedAction } from "./store.ts";
+import { ingestRecordPath, runRecordPath, type ExceptionQueueItem, type PlannedAction } from "./store.ts";
 
 type StoredDryRunPlan = {
   plan_id: string;
   run_id: string;
   actions: PlannedAction[];
-  exception_queue?: ExceptionQueueItem[];
+  exception_queue: ExceptionQueueItem[];
 };
 
 type AppliedAction = {
@@ -60,9 +62,89 @@ function toRationaleText(action: PlannedAction): string {
   return combined.join("; ");
 }
 
+function assertObject(value: unknown, message: string): asserts value is Record<string, unknown> {
+  if (!value || typeof value !== "object") {
+    throw new Error(message);
+  }
+}
+
+function parseRationale(value: unknown): PlannedAction["rationale"] {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  assertObject(value, "Invalid dry-run plan file: rationale must be an object");
+
+  const parseList = (item: unknown, key: string): string[] => {
+    if (!Array.isArray(item) || item.some((entry) => typeof entry !== "string")) {
+      throw new Error(`Invalid dry-run plan file: rationale.${key} must be an array of strings`);
+    }
+    return [...item];
+  };
+
+  return {
+    policy: parseList(value.policy, "policy"),
+    rule: parseList(value.rule, "rule"),
+    model: parseList(value.model, "model")
+  };
+}
+
+function parsePlannedAction(value: unknown): PlannedAction {
+  assertObject(value, "Invalid dry-run plan file: action must be an object");
+
+  if (typeof value.message_id !== "string" || value.message_id.trim().length === 0) {
+    throw new Error("Invalid dry-run plan file: action.message_id must be a non-empty string");
+  }
+
+  if (value.action === "archive") {
+    return {
+      message_id: value.message_id,
+      action: "archive",
+      rationale: parseRationale(value.rationale)
+    };
+  }
+
+  if (value.action === "classify") {
+    if (typeof value.category !== "string" || !isEmailCategory(value.category)) {
+      throw new Error(`Invalid category in dry-run plan for message ${value.message_id}`);
+    }
+
+    return {
+      message_id: value.message_id,
+      action: "classify",
+      category: value.category,
+      rationale: parseRationale(value.rationale)
+    };
+  }
+
+  throw new Error(`Invalid planned action ${String(value.action)} for message ${value.message_id}`);
+}
+
+function parseExceptionQueueItem(value: unknown): ExceptionQueueItem {
+  assertObject(value, "Invalid dry-run plan file: exception_queue entry must be an object");
+
+  if (typeof value.message_id !== "string" || value.message_id.trim().length === 0) {
+    throw new Error("Invalid dry-run plan file: exception_queue.message_id must be a non-empty string");
+  }
+
+  if (!Array.isArray(value.reasons) || value.reasons.some((reason) => typeof reason !== "string")) {
+    throw new Error(`Invalid dry-run plan file: exception_queue reasons must be string[] for message ${value.message_id}`);
+  }
+
+  if (value.unread !== undefined && typeof value.unread !== "boolean") {
+    throw new Error(`Invalid dry-run plan file: exception_queue unread must be boolean for message ${value.message_id}`);
+  }
+
+  return {
+    message_id: value.message_id,
+    reasons: [...value.reasons],
+    unread: value.unread ?? false
+  };
+}
+
 async function readDryRunPlan(planPath: string): Promise<StoredDryRunPlan> {
   const raw = await fs.readFile(planPath, "utf8");
-  const parsed = JSON.parse(raw);
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
 
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.actions)) {
     throw new Error(`Invalid dry-run plan file: ${planPath}`);
@@ -76,35 +158,25 @@ async function readDryRunPlan(planPath: string): Promise<StoredDryRunPlan> {
     throw new Error(`Invalid dry-run plan file: missing run_id in ${planPath}`);
   }
 
-  if (parsed.exception_queue !== undefined && !Array.isArray(parsed.exception_queue)) {
+  const exceptionQueueRaw = parsed.exception_queue;
+  if (exceptionQueueRaw !== undefined && !Array.isArray(exceptionQueueRaw)) {
     throw new Error(`Invalid dry-run plan file: exception_queue must be an array in ${planPath}`);
   }
 
-  return parsed as StoredDryRunPlan;
-}
-
-function validateAction(action: PlannedAction): void {
-  if (action.action !== "classify" && action.action !== "archive") {
-    throw new Error(`Invalid planned action ${String(action.action)} for message ${action.message_id}`);
-  }
-
-  if (action.action === "classify" && (!action.category || !isEmailCategory(action.category))) {
-    throw new Error(`Invalid category in dry-run plan for message ${action.message_id}`);
-  }
+  return {
+    plan_id: parsed.plan_id,
+    run_id: parsed.run_id,
+    actions: parsed.actions.map((action) => parsePlannedAction(action)),
+    exception_queue: (exceptionQueueRaw ?? []).map((item) => parseExceptionQueueItem(item))
+  };
 }
 
 function buildCategoryByMessage(actions: PlannedAction[]): Map<string, EmailCategory> {
   const categoryByMessageId = new Map<string, EmailCategory>();
 
   for (const action of actions) {
-    validateAction(action);
-
     if (action.action !== "classify") {
       continue;
-    }
-
-    if (!action.category || !isEmailCategory(action.category)) {
-      throw new Error(`Invalid category in dry-run plan for message ${action.message_id}`);
     }
 
     categoryByMessageId.set(action.message_id, action.category);
@@ -115,10 +187,6 @@ function buildCategoryByMessage(actions: PlannedAction[]): Map<string, EmailCate
 
 function resolveActionCategory(action: PlannedAction, categoryByMessageId: Map<string, EmailCategory>): EmailCategory {
   if (action.action === "classify") {
-    if (!action.category || !isEmailCategory(action.category)) {
-      throw new Error(`Invalid category in dry-run plan for message ${action.message_id}`);
-    }
-
     return action.category;
   }
 
@@ -170,12 +238,8 @@ function toMailboxMessages(value: unknown): MailboxMessage[] | undefined {
   return messages;
 }
 
-function isMissingFileError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-
 async function readSourceIngestMessages(dataDir: string, sourceRunId: string): Promise<MailboxMessage[] | undefined> {
-  const sourceRunPath = path.join(dataDir, "runs", `${sourceRunId}.json`);
+  const sourceRunPath = runRecordPath(dataDir, sourceRunId);
 
   let sourceRunRaw: string;
   try {
@@ -188,13 +252,12 @@ async function readSourceIngestMessages(dataDir: string, sourceRunId: string): P
   }
 
   const sourceRun = JSON.parse(sourceRunRaw) as { ingest_path?: unknown };
-  if (typeof sourceRun.ingest_path !== "string" || sourceRun.ingest_path.trim().length === 0) {
-    return undefined;
-  }
+  const fallbackIngestPath = ingestRecordPath(dataDir, sourceRunId);
+  const ingestPath = typeof sourceRun.ingest_path === "string" && sourceRun.ingest_path.trim().length > 0 ? sourceRun.ingest_path : fallbackIngestPath;
 
   let ingestRaw: string;
   try {
-    ingestRaw = await fs.readFile(sourceRun.ingest_path, "utf8");
+    ingestRaw = await fs.readFile(ingestPath, "utf8");
   } catch (error) {
     if (isMissingFileError(error)) {
       return undefined;
@@ -216,9 +279,10 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
   const plannedCategories = collectPlannedCategories(plan.actions);
   const decisions = requireApprovalDecisions(plannedCategories, options.approvals);
 
-  const exceptionQueue = plan.exception_queue ?? [];
+  const exceptionQueue = plan.exception_queue;
   const protectedMessageIds = new Set(exceptionQueue.map((item) => item.message_id));
   const sourceMessages = await readSourceIngestMessages(options.dataDir, plan.run_id);
+  const sourceMessageById = new Map((sourceMessages ?? []).map((message) => [message.id, message]));
   const existingCategoriesByMessageId = new Map((sourceMessages ?? []).map((message) => [message.id, message.categories]));
   const config = options.config ?? buildConfigSnapshot({ account: options.account, auditLogPath: options.auditLogPath });
 
@@ -227,8 +291,6 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
   let skippedActions = 0;
 
   for (const action of plan.actions) {
-    validateAction(action);
-
     const category = resolveActionCategory(action, categoryByMessageId);
 
     if (action.action === "archive" && protectedMessageIds.has(action.message_id)) {
@@ -250,6 +312,69 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
         run_id: runId
       });
       continue;
+    }
+
+    if (action.action === "archive") {
+      let currentMessage;
+      try {
+        currentMessage = await options.adapter.getMessage(action.message_id);
+      } catch {
+        evaluatedActions.push({
+          message_id: action.message_id,
+          action: action.action,
+          category,
+          status: "blocked"
+        });
+
+        await appendAuditRecord(options.auditLogPath, {
+          timestamp: now().toISOString(),
+          account: options.account,
+          message_id: action.message_id,
+          action: action.action,
+          category,
+          outcome: "blocked:no-touch-fetch-failed",
+          rationale: toRationaleText(action),
+          run_id: runId
+        });
+        continue;
+      }
+
+      const sourceMessage = sourceMessageById.get(action.message_id);
+      const noTouchReasons = evaluateNoTouchReasons(
+        {
+          from: currentMessage.from,
+          subject: currentMessage.subject,
+          date: sourceMessage?.date ?? "",
+          flagged: currentMessage.flagged
+        },
+        {
+          vipSenders: config.vipSenders,
+          financeLegalKeywords: config.financeLegalKeywords,
+          recentDays: config.recentDays,
+          now
+        }
+      );
+
+      if (noTouchReasons.length > 0) {
+        evaluatedActions.push({
+          message_id: action.message_id,
+          action: action.action,
+          category,
+          status: "blocked"
+        });
+
+        await appendAuditRecord(options.auditLogPath, {
+          timestamp: now().toISOString(),
+          account: options.account,
+          message_id: action.message_id,
+          action: action.action,
+          category,
+          outcome: "blocked:no-touch",
+          rationale: toRationaleText(action),
+          run_id: runId
+        });
+        continue;
+      }
     }
 
     if (!decisions[category]) {
@@ -311,9 +436,8 @@ export async function runLiveApply(options: LiveApplyOptions): Promise<LiveApply
     sourceMessages
   });
 
-  const runsDir = path.join(options.dataDir, "runs");
-  await fs.mkdir(runsDir, { recursive: true });
-  const runPath = path.join(runsDir, `${runId}.json`);
+  const runPath = runRecordPath(options.dataDir, runId);
+  await fs.mkdir(path.dirname(runPath), { recursive: true });
 
   await fs.writeFile(
     runPath,

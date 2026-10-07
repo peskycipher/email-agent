@@ -38,7 +38,7 @@ test("buildNoTouchDryRunPlan excludes protected messages from archive and routes
       from: "billing@example.com",
       subject: "Invoice legal review",
       date: "2025-12-01T00:00:00.000Z",
-      unread: true,
+      unread: false,
       flagged: false,
       categories: []
     },
@@ -59,16 +59,11 @@ test("buildNoTouchDryRunPlan excludes protected messages from archive and routes
     now: () => new Date("2026-01-10T00:00:00.000Z")
   });
 
-  assert.deepEqual(
-    result.plannedActions.filter((action) => action.action === "archive").map((action) => action.message_id),
-    ["msg-safe"]
-  );
-
   assert.deepEqual(result.exceptionQueue, [
-    { message_id: "msg-vip", reasons: ["vip-sender"] },
-    { message_id: "msg-flagged", reasons: ["flagged"] },
-    { message_id: "msg-recent", reasons: ["recent-thread"] },
-    { message_id: "msg-finance", reasons: ["finance-legal-keyword"] }
+    { message_id: "msg-vip", reasons: ["vip-sender"], unread: true },
+    { message_id: "msg-flagged", reasons: ["flagged"], unread: true },
+    { message_id: "msg-recent", reasons: ["recent-thread"], unread: true },
+    { message_id: "msg-finance", reasons: ["finance-legal-keyword"], unread: false }
   ]);
 });
 
@@ -99,8 +94,7 @@ test("buildNoTouchDryRunPlan treats unparseable and exact-boundary dates as prot
   });
 
   assert.deepEqual(result.exceptionQueue, [
-    { message_id: "msg-unparseable", reasons: ["recent-thread"] },
-    { message_id: "msg-boundary", reasons: ["recent-thread"] }
+    { message_id: "msg-unparseable", reasons: ["recent-thread"], unread: true },
+    { message_id: "msg-boundary", reasons: ["recent-thread"], unread: true }
   ]);
-  assert.equal(result.plannedActions.length, 0);
 });

@@ -1,12 +1,24 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import type { ExpansionSignOff, ExpansionSignOffDecision, RunMetrics } from "./metrics.ts";
+import { isMissingFileError } from "./http.ts";
+import type { RunMetrics } from "./metrics.ts";
+import { signOffPathForRun } from "./store.ts";
 
 export const EXPANSION_GATE_MIN_PROCESSED_COUNT = 500;
 export const EXPANSION_GATE_MIN_ARCHIVE_PRECISION = 0.98;
 
 export type GateMetrics = Pick<RunMetrics, "processed_count" | "archive_precision_estimate" | "no_touch_miss_count">;
+
+export type ExpansionSignOffDecision = "go" | "no-go";
+
+export type ExpansionSignOff = {
+  recorded: true;
+  decision: ExpansionSignOffDecision;
+  recorded_at?: string;
+  actor?: string;
+  note?: string;
+};
 
 export type ExpansionGateEvaluation = {
   allowed: boolean;
@@ -97,14 +109,6 @@ function parseExpansionSignOff(value: unknown): ExpansionSignOff {
   return signOff;
 }
 
-function isMissingFileError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-
-function signOffPathForRun(runPath: string, runId: string): string {
-  return path.join(path.dirname(path.dirname(runPath)), "signoffs", `${runId}.json`);
-}
-
 async function readRunRecord(runPath: string): Promise<{ run_id: string; metrics: unknown }> {
   const raw = await fs.readFile(runPath, "utf8");
   const parsed = JSON.parse(raw);
@@ -126,8 +130,8 @@ export async function loadExpansionGateMetricsFromRun(runPath: string): Promise<
 }
 
 export async function loadExpansionSignOffFromRun(runPath: string): Promise<ExpansionSignOff | undefined> {
-  const runRecord = await readRunRecord(runPath);
-  const signOffPath = signOffPathForRun(runPath, runRecord.run_id);
+  await readRunRecord(runPath);
+  const signOffPath = signOffPathForRun(runPath);
 
   let raw: string;
   try {
@@ -176,7 +180,7 @@ export async function recordExpansionSignOff(runPath: string, input: RecordExpan
     signOff.note = input.note;
   }
 
-  const signOffPath = signOffPathForRun(runPath, runRecord.run_id);
+  const signOffPath = signOffPathForRun(runPath);
   await fs.mkdir(path.dirname(signOffPath), { recursive: true });
   await fs.writeFile(
     signOffPath,

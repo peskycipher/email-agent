@@ -1,5 +1,5 @@
 import type { MailboxMessage } from "../adapter.ts";
-import { fetchJson, type FetchFn } from "../http.ts";
+import { defaultFetch, parseJsonBody, type FetchFn } from "../http.ts";
 import { EMAIL_CATEGORIES, isEmailCategory, type EmailCategory } from "./categories.ts";
 
 export type SecondPassClassification = {
@@ -60,7 +60,7 @@ function parseCategory(content: string): { category: EmailCategory; rationale: s
 function toPrompt(message: MailboxMessage): string {
   return [
     "Classify this email into exactly one category:",
-    "Action Needed, Waiting/Follow-up, FYI/Reference, Bulk/Archive.",
+    `${EMAIL_CATEGORIES.join(", ")}.`,
     "Respond as compact JSON with keys category and rationale.",
     `From: ${message.from}`,
     `Subject: ${message.subject}`,
@@ -82,7 +82,7 @@ export class OllamaCloudClassifier implements SecondPassClassifier {
     this.apiKey = options.apiKey ?? process.env.OLLAMA_API_KEY;
     this.primaryModel = options.primaryModel ?? "deepseek-4.1-flash";
     this.backupModel = options.backupModel ?? "glm-5.3-flash";
-    this.fetchFn = options.fetchFn ?? ((input, init) => fetch(input, init));
+    this.fetchFn = options.fetchFn ?? defaultFetch;
   }
 
   async classify(message: MailboxMessage): Promise<SecondPassClassification> {
@@ -127,7 +127,7 @@ export class OllamaCloudClassifier implements SecondPassClassifier {
       })
     });
 
-    const payload = await fetchJson(response, "Ollama response");
+    const payload = (await parseJsonBody(response, "Ollama response")) as ChatCompletionResponse & { error?: unknown };
     if (!response.ok) {
       const error = typeof payload?.error === "string" ? payload.error : `HTTP ${response.status}`;
       throw new Error(error);

@@ -21,15 +21,15 @@ test("buildRunMetrics computes precision from clean archive attempts and counts 
   const metrics = buildRunMetrics({
     evaluatedActions,
     exceptionQueue: [
-      { message_id: "protected-1", reasons: ["vip-sender"] },
-      { message_id: "protected-2", reasons: ["flagged"] }
+      { message_id: "protected-1", reasons: ["vip-sender"], unread: true },
+      { message_id: "protected-2", reasons: ["flagged"], unread: true }
     ]
   });
 
   // Clean archive attempts: clean-1 success + clean-2 failed = 1 success / 2 attempts.
   assert.equal(metrics.archive_precision_estimate, 0.5);
-  // Only protected-1 reached the adapter as a success archive attempt.
-  assert.equal(metrics.no_touch_miss_count, 1);
+  // Misses now include blocked archives plus protected archive attempts.
+  assert.equal(metrics.no_touch_miss_count, 2);
   assert.equal(metrics.category_totals["Bulk/Archive"].archive.blocked, 1);
   assert.equal(metrics.category_totals["Bulk/Archive"].archive.skipped, 1);
 });

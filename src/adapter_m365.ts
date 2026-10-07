@@ -1,5 +1,5 @@
-import type { MailboxAction, MailboxAdapter, MailboxMessage } from "./adapter.ts";
-import { fetchJson, type FetchFn } from "./http.ts";
+import type { MailboxAction, MailboxAdapter, MailboxMessage, MailboxMessageState } from "./adapter.ts";
+import { defaultFetch, parseJsonBody, type FetchFn } from "./http.ts";
 
 export type M365MailboxAdapterConfig = {
   tenantId: string;
@@ -13,6 +13,7 @@ type M365Message = {
   subject?: string;
   receivedDateTime?: string;
   isRead?: boolean;
+  unread?: boolean;
   categories?: unknown;
   flag?: {
     flagStatus?: string;
@@ -30,7 +31,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
 
   constructor(config: M365MailboxAdapterConfig, fetchFn?: FetchFn) {
     this.config = config;
-    this.fetchFn = fetchFn ?? ((input, init) => fetch(input, init));
+    this.fetchFn = fetchFn ?? defaultFetch;
   }
 
   private async getAccessToken(): Promise<string> {
@@ -51,7 +52,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
       body: body.toString()
     });
 
-    const payload = await fetchJson(response, "M365 response");
+    const payload = await parseJsonBody(response, "M365 response");
     if (!response.ok) {
       throw new Error(`M365 auth failed (${response.status}): ${payload.error_description ?? payload.error ?? "unknown error"}`);
     }
@@ -81,7 +82,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
 
     while (nextUrl && messages.length < limit) {
       const response = await this.fetchFn(nextUrl, { headers });
-      const payload = await fetchJson(response, "M365 response");
+      const payload = await parseJsonBody(response, "M365 response");
       if (!response.ok) {
         throw new Error(`M365 list inbox failed (${response.status})`);
       }
@@ -102,6 +103,39 @@ export class M365MailboxAdapter implements MailboxAdapter {
     }
 
     return messages.slice(0, limit);
+  }
+
+  async getMessage(messageId: string): Promise<MailboxMessageState> {
+    const token = await this.getAccessToken();
+    const encodedAccount = encodeURIComponent(this.config.account);
+    const encodedMessageId = encodeURIComponent(messageId);
+    const url = `https://graph.microsoft.com/v1.0/users/${encodedAccount}/messages/${encodedMessageId}?$select=subject,from,flag,unread`;
+
+    const response = await this.fetchFn(url, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        prefer: 'IdType="ImmutableId"'
+      }
+    });
+
+    const payload = await parseJsonBody(response, "M365 response");
+    if (!response.ok) {
+      const error = payload.error?.message ?? payload.error_description ?? `M365 get message failed (${response.status})`;
+      throw new Error(error);
+    }
+
+    const mapped = this.mapMessage(payload as M365Message);
+    if (!mapped) {
+      throw new Error("M365 get message failed: missing id");
+    }
+
+    return {
+      id: mapped.id,
+      from: mapped.from,
+      subject: mapped.subject,
+      flagged: mapped.flagged,
+      unread: mapped.unread
+    };
   }
 
   async apply(
@@ -132,7 +166,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
               prefer: 'IdType="ImmutableId"'
             }
           });
-          const categoriesPayload = await fetchJson(categoriesResponse, "M365 response");
+          const categoriesPayload = await parseJsonBody(categoriesResponse, "M365 response");
 
           if (!categoriesResponse.ok) {
             const readError =
@@ -168,7 +202,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
       return { ok: true };
     }
 
-    const payload = await fetchJson(response, "M365 response");
+    const payload = await parseJsonBody(response, "M365 response");
     const error = payload.error?.message ?? payload.error_description ?? `M365 apply failed (${response.status})`;
     return { ok: false, error };
   }
@@ -183,7 +217,7 @@ export class M365MailboxAdapter implements MailboxAdapter {
       from: item.from?.emailAddress?.address ?? "",
       subject: item.subject ?? "",
       date: item.receivedDateTime ?? "",
-      unread: item.isRead === false,
+      unread: item.unread === true || item.isRead === false,
       flagged: item.flag?.flagStatus === "flagged",
       categories: Array.isArray(item.categories) ? item.categories.filter((value): value is string => typeof value === "string") : []
     };

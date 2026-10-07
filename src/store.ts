@@ -2,19 +2,27 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { MailboxAction, MailboxMessage } from "./adapter.ts";
+import type { EmailCategory } from "./classify/categories.ts";
 import type { RationaleTrace } from "./classify/pipeline.ts";
 import type { ConfigSnapshot } from "./config.ts";
 
-export type PlannedAction = {
-  message_id: string;
-  action: MailboxAction;
-  category?: string;
-  rationale?: RationaleTrace;
-};
+export type PlannedAction =
+  | {
+      message_id: string;
+      action: Extract<MailboxAction, "classify">;
+      category: EmailCategory;
+      rationale?: RationaleTrace;
+    }
+  | {
+      message_id: string;
+      action: Extract<MailboxAction, "archive">;
+      rationale?: RationaleTrace;
+    };
 
 export type ExceptionQueueItem = {
   message_id: string;
   reasons: string[];
+  unread: boolean;
 };
 
 export type PersistDryRunInput = {
@@ -34,6 +42,18 @@ export type PersistDryRunOutput = {
   ingestPath: string;
 };
 
+export function runRecordPath(dataDir: string, runId: string): string {
+  return path.join(dataDir, "runs", `${runId}.json`);
+}
+
+export function ingestRecordPath(dataDir: string, runId: string): string {
+  return path.join(dataDir, "runs", `${runId}-ingest.json`);
+}
+
+export function signOffPathForRun(runPath: string): string {
+  return path.join(path.dirname(path.dirname(runPath)), "signoffs", `${path.basename(runPath, ".json")}.json`);
+}
+
 export async function persistDryRunArtifacts(dataDir: string, input: PersistDryRunInput): Promise<PersistDryRunOutput> {
   const plansDir = path.join(dataDir, "plans");
   const runsDir = path.join(dataDir, "runs");
@@ -42,8 +62,8 @@ export async function persistDryRunArtifacts(dataDir: string, input: PersistDryR
 
   const planId = `plan-${input.runId}`;
   const planPath = path.join(plansDir, `${planId}.json`);
-  const runPath = path.join(runsDir, `${input.runId}.json`);
-  const ingestPath = path.join(runsDir, `${input.runId}-ingest.json`);
+  const runPath = runRecordPath(dataDir, input.runId);
+  const ingestPath = ingestRecordPath(dataDir, input.runId);
 
   const planRecord = {
     plan_id: planId,

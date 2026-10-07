@@ -1,6 +1,7 @@
 import type { MailboxMessage } from "../adapter.ts";
-import { fetchJson, type FetchFn } from "../http.ts";
+import { defaultFetch, parseJsonBody, type FetchFn } from "../http.ts";
 import { isEmailCategory, type EmailCategory } from "./categories.ts";
+import { KEYWORD_RULES, findKeywordRuleMatch } from "./rules.ts";
 
 export type System1Classification = {
   category: EmailCategory;
@@ -21,11 +22,6 @@ export type JevSystem1ClassifierOptions = {
 
 const DEFAULT_BASE_URL = "https://api.typesafe.ai";
 const DEFAULT_MODEL = "jev-latest";
-
-function includesAny(value: string, keywords: string[]): string | undefined {
-  const lowered = value.toLowerCase();
-  return keywords.find((keyword) => lowered.includes(keyword));
-}
 
 function toClassificationRequest(message: MailboxMessage, model: string): Record<string, unknown> {
   return {
@@ -102,7 +98,7 @@ export class JevSystem1Classifier implements ClassifierSystem1 {
     this.endpoint = `${baseUrl.replace(/\/$/, "")}/v1/systemone`;
     this.apiKey = options.apiKey ?? process.env.TYPESAFE_API_KEY;
     this.model = options.model ?? DEFAULT_MODEL;
-    this.fetchFn = options.fetchFn ?? ((input, init) => fetch(input, init));
+    this.fetchFn = options.fetchFn ?? defaultFetch;
   }
 
   async classify(message: MailboxMessage): Promise<System1Classification> {
@@ -119,7 +115,7 @@ export class JevSystem1Classifier implements ClassifierSystem1 {
       body: JSON.stringify(toClassificationRequest(message, this.model))
     });
 
-    const payload = await fetchJson(response, "JEV System1 response");
+    const payload = await parseJsonBody(response, "JEV System1 response");
 
     if (!response.ok) {
       throw new Error(readSystem1Error(payload, response.status));
@@ -149,39 +145,12 @@ export class KeywordSystem1Fallback implements ClassifierSystem1 {
   async classify(message: MailboxMessage): Promise<System1Classification> {
     const subject = message.subject.trim();
 
-    const actionKeyword = includesAny(subject, ["action required", "urgent", "asap", "approval", "invoice", "payment", "contract"]);
-    if (actionKeyword) {
+    const match = findKeywordRuleMatch(subject, KEYWORD_RULES);
+    if (match) {
       return {
-        category: "Action Needed",
-        confidence: 0.92,
-        rationale: `keyword '${actionKeyword}'`
-      };
-    }
-
-    const waitingKeyword = includesAny(subject, ["follow-up", "follow up", "waiting", "pending", "check in", "reminder"]);
-    if (waitingKeyword) {
-      return {
-        category: "Waiting/Follow-up",
-        confidence: 0.84,
-        rationale: `keyword '${waitingKeyword}'`
-      };
-    }
-
-    const archiveKeyword = includesAny(subject, ["newsletter", "unsubscribe", "promo", "digest", "sale"]);
-    if (archiveKeyword) {
-      return {
-        category: "Bulk/Archive",
-        confidence: 0.88,
-        rationale: `keyword '${archiveKeyword}'`
-      };
-    }
-
-    const referenceKeyword = includesAny(subject, ["fyi", "reference", "minutes", "receipt", "summary", "update"]);
-    if (referenceKeyword) {
-      return {
-        category: "FYI/Reference",
-        confidence: 0.76,
-        rationale: `keyword '${referenceKeyword}'`
+        category: match.rule.category,
+        confidence: match.rule.fallbackConfidence,
+        rationale: `keyword '${match.keyword}'`
       };
     }
 

@@ -1,4 +1,4 @@
-import { isEmailCategory, type EmailCategory } from "./classify/categories.ts";
+import type { EmailCategory } from "./classify/categories.ts";
 import type { PlannedAction } from "./store.ts";
 
 export type CategoryApprovals = Partial<Record<EmailCategory, boolean>>;
@@ -9,10 +9,6 @@ export function collectPlannedCategories(actions: PlannedAction[]): EmailCategor
   for (const action of actions) {
     if (action.action !== "classify") {
       continue;
-    }
-
-    if (!action.category || !isEmailCategory(action.category)) {
-      throw new Error(`Invalid category in dry-run plan for message ${action.message_id}`);
     }
 
     categories.add(action.category);

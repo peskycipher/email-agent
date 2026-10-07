@@ -1,26 +1,19 @@
-import path from "node:path";
-
 import type { MailboxAdapter } from "./adapter.ts";
 import { classifyMessagesForDryRun } from "./classify/pipeline.ts";
 import { OllamaCloudClassifier, type SecondPassClassifier } from "./classify/ollama.ts";
 import { JevSystem1Classifier, type ClassifierSystem1 } from "./classify/system1.ts";
-import { buildConfigSnapshot } from "./config.ts";
-import { buildNoTouchDryRunPlan } from "./policy.ts";
+import type { ConfigSnapshot } from "./config.ts";
+import { buildNoTouchDryRunPlan, shouldArchiveCategory } from "./policy.ts";
 import { persistDryRunArtifacts, type PlannedAction } from "./store.ts";
 
 export type DryRunOptions = {
   adapter: MailboxAdapter;
-  account: string;
+  config: ConfigSnapshot;
   dataDir: string;
   limit: number;
   now?: () => Date;
-  vipSenders?: string[];
-  financeLegalKeywords?: string[];
-  recentDays?: number;
-  auditLogPath?: string;
   system1Classifier?: ClassifierSystem1;
   secondPassClassifier?: SecondPassClassifier;
-  confidenceThreshold?: number;
 };
 
 export type DryRunResult = {
@@ -39,19 +32,10 @@ export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
 
   const messages = await options.adapter.listRecentInbox(options.limit);
   const plan = buildNoTouchDryRunPlan(messages, {
-    vipSenders: options.vipSenders,
-    financeLegalKeywords: options.financeLegalKeywords,
-    recentDays: options.recentDays,
+    vipSenders: options.config.vipSenders,
+    financeLegalKeywords: options.config.financeLegalKeywords,
+    recentDays: options.config.recentDays,
     now
-  });
-
-  const config = buildConfigSnapshot({
-    account: options.account,
-    auditLogPath: options.auditLogPath ?? path.resolve("data", "audit.jsonl"),
-    recentDays: options.recentDays,
-    confidenceThreshold: options.confidenceThreshold,
-    vipSenders: options.vipSenders,
-    financeLegalKeywords: options.financeLegalKeywords
   });
 
   const system1Classifier = options.system1Classifier ?? new JevSystem1Classifier();
@@ -65,10 +49,9 @@ export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
   const classifications = await classifyMessagesForDryRun(messages, noTouchReasonsByMessageId, {
     system1: system1Classifier,
     secondPass: secondPassClassifier,
-    confidenceThreshold: options.confidenceThreshold
+    confidenceThreshold: options.config.confidenceThreshold
   });
 
-  const archiveMessageIds = new Set(plan.plannedActions.filter((action) => action.action === "archive").map((action) => action.message_id));
   const plannedActions: PlannedAction[] = [];
 
   for (const message of messages) {
@@ -84,7 +67,8 @@ export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
       rationale: classified.rationale
     });
 
-    if (archiveMessageIds.has(message.id)) {
+    const noTouchReasons = noTouchReasonsByMessageId.get(message.id) ?? [];
+    if (noTouchReasons.length === 0 && shouldArchiveCategory(classified.category)) {
       plannedActions.push({
         message_id: message.id,
         action: "archive"
@@ -94,12 +78,12 @@ export async function runDryRun(options: DryRunOptions): Promise<DryRunResult> {
 
   const persisted = await persistDryRunArtifacts(options.dataDir, {
     runId,
-    account: options.account,
+    account: options.config.account,
     createdAt: startedAt.toISOString(),
     messages,
     plannedActions,
     exceptionQueue: plan.exceptionQueue,
-    config
+    config: options.config
   });
 
   return {

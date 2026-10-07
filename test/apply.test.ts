@@ -5,12 +5,13 @@ import os from "node:os";
 import path from "node:path";
 
 import type { MailboxAdapter, MailboxMessage } from "../src/adapter.ts";
+import { buildConfigSnapshot } from "../src/config.ts";
 import type { PlannedAction } from "../src/store.ts";
 import { runLiveApply } from "../src/apply.ts";
 
 type PlanFileOptions = {
   actions?: PlannedAction[];
-  exceptionQueue?: Array<{ message_id: string; reasons: string[] }>;
+  exceptionQueue?: Array<{ message_id: string; reasons: string[]; unread: boolean }>;
 };
 
 async function writePlanFile(dir: string, options: PlanFileOptions = {}): Promise<string> {
@@ -71,7 +72,7 @@ async function writePlanFile(dir: string, options: PlanFileOptions = {}): Promis
         created_at: "2026-01-03T00:00:00.000Z",
         dry_run: true,
         actions,
-        exception_queue: options.exceptionQueue ?? [{ message_id: "msg-a", reasons: ["flagged"] }]
+        exception_queue: options.exceptionQueue ?? [{ message_id: "msg-a", reasons: ["flagged"], unread: true }]
       },
       null,
       2
@@ -120,6 +121,16 @@ async function writeSourceRunArtifacts(dir: string, messages: MailboxMessage[]):
   );
 }
 
+function toMessageState(message: MailboxMessage) {
+  return {
+    id: message.id,
+    from: message.from,
+    subject: message.subject,
+    flagged: message.flagged,
+    unread: message.unread
+  };
+}
+
 test("runLiveApply requires explicit approval decisions for every planned category", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
   const planPath = await writePlanFile(dataDir);
@@ -127,6 +138,9 @@ test("runLiveApply requires explicit approval decisions for every planned catego
   const adapter: MailboxAdapter = {
     async listRecentInbox() {
       return [];
+    },
+    async getMessage() {
+      return { id: "x", from: "", subject: "", flagged: false, unread: false };
     },
     async apply() {
       return { ok: true };
@@ -153,7 +167,7 @@ test("runLiveApply applies approved categories and persists run report + metrics
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
   const planPath = await writePlanFile(dataDir);
 
-  await writeSourceRunArtifacts(dataDir, [
+  const sourceMessages: MailboxMessage[] = [
     {
       id: "msg-a",
       from: "vip@example.com",
@@ -181,13 +195,21 @@ test("runLiveApply applies approved categories and persists run report + metrics
       flagged: false,
       categories: []
     }
-  ]);
+  ];
+  await writeSourceRunArtifacts(dataDir, sourceMessages);
 
   const applyCalls: Array<{ messageId: string; action: "classify" | "archive"; category?: string }> = [];
 
   const adapter: MailboxAdapter = {
     async listRecentInbox() {
       return [];
+    },
+    async getMessage(messageId) {
+      const message = sourceMessages.find((item) => item.id === messageId);
+      if (!message) {
+        throw new Error(`missing message ${messageId}`);
+      }
+      return toMessageState(message);
     },
     async apply(messageId, action, category) {
       applyCalls.push({ messageId, action, category });
@@ -250,13 +272,12 @@ test("runLiveApply applies approved categories and persists run report + metrics
   assert.equal(runRecord.report.summary.unread_delta, 1);
   assert.equal(runRecord.report.summary.category_action_totals["Action Needed"].classify.skipped, 1);
   assert.equal(runRecord.report.summary.category_action_totals["FYI/Reference"].archive.failed, 1);
-  assert.deepEqual(runRecord.report.exception_queue_snapshot, [{ message_id: "msg-a", reasons: ["flagged"] }]);
+  assert.deepEqual(runRecord.report.exception_queue_snapshot, [{ message_id: "msg-a", reasons: ["flagged"], unread: true }]);
   assert.equal(runRecord.report.trace_samples.length, 3);
 
   assert.equal(runRecord.metrics.processed_count, 3);
   assert.equal(runRecord.metrics.archive_precision_estimate, 0.5);
   assert.equal(runRecord.metrics.no_touch_miss_count, 0);
-  assert.equal(runRecord.metrics.expansion_sign_off.recorded, false);
   assert.equal(runRecord.metrics.category_totals["Action Needed"].classify.skipped, 1);
   assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.success, 1);
   assert.equal(runRecord.metrics.category_totals["FYI/Reference"].archive.failed, 1);
@@ -264,7 +285,6 @@ test("runLiveApply applies approved categories and persists run report + metrics
   assert.equal(result.appliedActions, 4);
   assert.equal(result.skippedActions, 1);
 });
-
 
 test("runLiveApply blocks protected archive actions and never calls the adapter for them", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
@@ -285,14 +305,19 @@ test("runLiveApply blocks protected archive actions and never calls the adapter 
         action: "archive"
       }
     ],
-    exceptionQueue: [{ message_id: "msg-protected", reasons: ["vip-sender"] }]
+    exceptionQueue: [{ message_id: "msg-protected", reasons: ["vip-sender"], unread: true }]
   });
 
   const applyCalls: Array<{ messageId: string; action: "classify" | "archive" }> = [];
+  let getMessageCalls = 0;
 
   const adapter: MailboxAdapter = {
     async listRecentInbox() {
       return [];
+    },
+    async getMessage() {
+      getMessageCalls += 1;
+      return { id: "msg-protected", from: "vip@example.com", subject: "hello", flagged: false, unread: true };
     },
     async apply(messageId, action) {
       applyCalls.push({ messageId, action });
@@ -314,10 +339,11 @@ test("runLiveApply blocks protected archive actions and never calls the adapter 
     now: () => new Date("2026-01-05T00:00:00.000Z")
   });
 
+  assert.equal(getMessageCalls, 0);
   assert.deepEqual(applyCalls, [{ messageId: "msg-protected", action: "classify" }]);
 
   const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
-  assert.equal(runRecord.metrics.no_touch_miss_count, 0);
+  assert.equal(runRecord.metrics.no_touch_miss_count, 1);
   assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.blocked, 1);
   assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.success, 0);
 
@@ -329,6 +355,216 @@ test("runLiveApply blocks protected archive actions and never calls the adapter 
   assert.ok(blockedArchive);
   assert.equal(blockedArchive.outcome, "blocked:no-touch");
   assert.equal(blockedArchive.category, "Bulk/Archive");
+});
+
+test("runLiveApply re-checks no-touch at apply-time and blocks flagged-since-dry-run archives", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
+  const planPath = await writePlanFile(dataDir, {
+    actions: [
+      {
+        message_id: "msg-1",
+        action: "classify",
+        category: "Bulk/Archive",
+        rationale: {
+          policy: [],
+          rule: ["bulk-rule"],
+          model: []
+        }
+      },
+      { message_id: "msg-1", action: "archive" }
+    ],
+    exceptionQueue: []
+  });
+
+  await writeSourceRunArtifacts(dataDir, [
+    {
+      id: "msg-1",
+      from: "news@example.com",
+      subject: "Digest",
+      date: "2025-12-20T00:00:00.000Z",
+      unread: true,
+      flagged: false,
+      categories: []
+    }
+  ]);
+
+  const applyCalls: Array<{ messageId: string; action: "classify" | "archive" }> = [];
+
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [];
+    },
+    async getMessage() {
+      return {
+        id: "msg-1",
+        from: "news@example.com",
+        subject: "Digest",
+        flagged: true,
+        unread: true
+      };
+    },
+    async apply(messageId, action) {
+      applyCalls.push({ messageId, action });
+      return { ok: true };
+    }
+  };
+
+  const result = await runLiveApply({
+    adapter,
+    account: "pilot@example.com",
+    dataDir,
+    planPath,
+    auditLogPath: path.join(dataDir, "audit.jsonl"),
+    approvals: {
+      "Bulk/Archive": true
+    },
+    now: () => new Date("2026-01-05T00:00:00.000Z")
+  });
+
+  assert.deepEqual(applyCalls, [{ messageId: "msg-1", action: "classify" }]);
+
+  const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
+  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.blocked, 1);
+  assert.equal(runRecord.metrics.no_touch_miss_count, 1);
+});
+
+test("runLiveApply still guards archives when the plan exception queue is edited empty", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
+  const planPath = await writePlanFile(dataDir, {
+    actions: [
+      {
+        message_id: "msg-1",
+        action: "classify",
+        category: "Bulk/Archive",
+        rationale: {
+          policy: [],
+          rule: ["bulk-rule"],
+          model: []
+        }
+      },
+      { message_id: "msg-1", action: "archive" }
+    ],
+    exceptionQueue: []
+  });
+
+  await writeSourceRunArtifacts(dataDir, [
+    {
+      id: "msg-1",
+      from: "vip@example.com",
+      subject: "Digest",
+      date: "2025-12-20T00:00:00.000Z",
+      unread: true,
+      flagged: false,
+      categories: []
+    }
+  ]);
+
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [];
+    },
+    async getMessage() {
+      return {
+        id: "msg-1",
+        from: "vip@example.com",
+        subject: "Digest",
+        flagged: false,
+        unread: true
+      };
+    },
+    async apply() {
+      return { ok: true };
+    }
+  };
+
+  const result = await runLiveApply({
+    adapter,
+    account: "pilot@example.com",
+    dataDir,
+    planPath,
+    auditLogPath: path.join(dataDir, "audit.jsonl"),
+    approvals: {
+      "Bulk/Archive": true
+    },
+    config: buildConfigSnapshot({
+      account: "pilot@example.com",
+      auditLogPath: path.join(dataDir, "audit.jsonl"),
+      vipSenders: ["vip@example.com"]
+    }),
+    now: () => new Date("2026-01-05T00:00:00.000Z")
+  });
+
+  const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
+  assert.equal(runRecord.metrics.category_totals["Bulk/Archive"].archive.blocked, 1);
+  assert.equal(runRecord.metrics.no_touch_miss_count, 1);
+});
+
+test("runLiveApply blocks archive when getMessage fails", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "live-apply-"));
+  const planPath = await writePlanFile(dataDir, {
+    actions: [
+      {
+        message_id: "msg-1",
+        action: "classify",
+        category: "Bulk/Archive",
+        rationale: {
+          policy: [],
+          rule: ["bulk-rule"],
+          model: []
+        }
+      },
+      { message_id: "msg-1", action: "archive" }
+    ],
+    exceptionQueue: []
+  });
+
+  await writeSourceRunArtifacts(dataDir, [
+    {
+      id: "msg-1",
+      from: "news@example.com",
+      subject: "Digest",
+      date: "2025-12-20T00:00:00.000Z",
+      unread: true,
+      flagged: false,
+      categories: []
+    }
+  ]);
+
+  const applyCalls: Array<{ messageId: string; action: "classify" | "archive" }> = [];
+
+  const adapter: MailboxAdapter = {
+    async listRecentInbox() {
+      return [];
+    },
+    async getMessage() {
+      throw new Error("read-failed");
+    },
+    async apply(messageId, action) {
+      applyCalls.push({ messageId, action });
+      return { ok: true };
+    }
+  };
+
+  const auditLogPath = path.join(dataDir, "audit.jsonl");
+
+  await runLiveApply({
+    adapter,
+    account: "pilot@example.com",
+    dataDir,
+    planPath,
+    auditLogPath,
+    approvals: {
+      "Bulk/Archive": true
+    },
+    now: () => new Date("2026-01-05T00:00:00.000Z")
+  });
+
+  assert.deepEqual(applyCalls, [{ messageId: "msg-1", action: "classify" }]);
+
+  const auditLines = (await fs.readFile(auditLogPath, "utf8")).trim().split("\n").map((line: string) => JSON.parse(line));
+  const archiveRecord = auditLines.find((record: { action: string }) => record.action === "archive");
+  assert.ok(archiveRecord);
+  assert.equal(archiveRecord.outcome, "blocked:no-touch-fetch-failed");
 });
 
 test("runLiveApply passes existing message categories to the adapter for classify actions", async () => {
@@ -365,6 +601,9 @@ test("runLiveApply passes existing message categories to the adapter for classif
   const adapter: MailboxAdapter = {
     async listRecentInbox() {
       return [];
+    },
+    async getMessage() {
+      return { id: "msg-1", from: "news@example.com", subject: "Digest", flagged: false, unread: true };
     },
     async apply(messageId, action, category, existingCategories) {
       if (action === "classify") {
@@ -414,6 +653,9 @@ test("runLiveApply passes undefined categories when source ingest snapshot is mi
     async listRecentInbox() {
       return [];
     },
+    async getMessage() {
+      return { id: "msg-1", from: "news@example.com", subject: "Digest", flagged: false, unread: true };
+    },
     async apply(messageId, action, category, existingCategories) {
       if (action === "classify") {
         classifyCalls.push({ messageId, category, existingCategories });
@@ -422,7 +664,7 @@ test("runLiveApply passes undefined categories when source ingest snapshot is mi
     }
   };
 
-  await runLiveApply({
+  const result = await runLiveApply({
     adapter,
     account: "pilot@example.com",
     dataDir,
@@ -435,4 +677,10 @@ test("runLiveApply passes undefined categories when source ingest snapshot is mi
   });
 
   assert.deepEqual(classifyCalls, [{ messageId: "msg-1", category: "Bulk/Archive", existingCategories: undefined }]);
+
+  const runRecord = JSON.parse(await fs.readFile(result.runPath, "utf8"));
+  assert.equal(runRecord.report.summary.unread_before, null);
+  assert.equal(runRecord.report.summary.unread_after, null);
+  assert.equal(runRecord.report.summary.unread_delta, null);
+  assert.equal(runRecord.report.summary.ingest_unavailable, true);
 });

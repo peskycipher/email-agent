@@ -75,6 +75,58 @@ test("M365MailboxAdapter authenticates and lists inbox mail with stable ids", as
   assert.deepEqual(messages[0].categories, ["Blue"]);
 });
 
+test("M365MailboxAdapter fetches one message by id for apply-time no-touch checks", async () => {
+  const calls: Array<{ input: unknown; init?: RequestInit }> = [];
+
+  const fetchFn = async (input: unknown, init?: RequestInit): Promise<Response> => {
+    calls.push({ input, init });
+    const url = String(input);
+
+    if (url.includes("login.microsoftonline.com")) {
+      return new Response(JSON.stringify({ access_token: "token-1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+
+    return new Response(
+      JSON.stringify({
+        id: "immutable-7",
+        subject: "Follow-up",
+        unread: true,
+        flag: { flagStatus: "flagged" },
+        from: { emailAddress: { address: "owner@example.com" } }
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      }
+    );
+  };
+
+  const adapter = new M365MailboxAdapter(
+    {
+      tenantId: "tenant-id",
+      clientId: "client-id",
+      clientSecret: "client-secret",
+      account: "pilot@example.com"
+    },
+    fetchFn
+  );
+
+  const message = await adapter.getMessage("immutable-7");
+
+  assert.equal(calls.length, 2);
+  assert.match(String(calls[1].input), /\/messages\/immutable-7\?\$select=subject,from,flag,unread$/);
+  const headers = new Headers(calls[1].init?.headers);
+  assert.equal(headers.get("prefer"), 'IdType="ImmutableId"');
+  assert.equal(message.id, "immutable-7");
+  assert.equal(message.from, "owner@example.com");
+  assert.equal(message.subject, "Follow-up");
+  assert.equal(message.flagged, true);
+  assert.equal(message.unread, true);
+});
+
 test("M365MailboxAdapter follows @odata.nextLink until exhausted", async () => {
   const graphUrls: string[] = [];
 

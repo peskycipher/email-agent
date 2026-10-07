@@ -94,6 +94,15 @@ test("cli dry-run writes persisted plan artifacts and performs zero mailbox muta
         }
       ];
     },
+    async getMessage() {
+      return {
+        id: "msg-7",
+        from: "sender@example.com",
+        subject: "Hello",
+        flagged: false,
+        unread: true
+      };
+    },
     async apply() {
       applyCalls += 1;
       return { ok: true };
@@ -186,10 +195,56 @@ test("cli live-apply applies only approved categories", async () => {
     "utf8"
   );
 
+  await fs.mkdir(path.join(dir, "runs"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "runs", "run-9-ingest.json"),
+    `${JSON.stringify(
+      {
+        run_id: "run-9",
+        account: "pilot@example.com",
+        messages: [
+          {
+            id: "msg-2",
+            from: "sender@example.com",
+            subject: "Digest",
+            date: "2025-12-01T00:00:00.000Z",
+            unread: true,
+            flagged: false,
+            categories: []
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  await fs.writeFile(
+    path.join(dir, "runs", "run-9.json"),
+    `${JSON.stringify(
+      {
+        run_id: "run-9",
+        ingest_path: path.join(dir, "runs", "run-9-ingest.json")
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
   const applyCalls: Array<{ messageId: string; action: "classify" | "archive"; category?: string }> = [];
   const adapter: MailboxAdapter = {
     async listRecentInbox() {
       return [];
+    },
+    async getMessage(messageId) {
+      return {
+        id: messageId,
+        from: "sender@example.com",
+        subject: "Digest",
+        flagged: false,
+        unread: true
+      };
     },
     async apply(messageId, action, category) {
       applyCalls.push({ messageId, action, category });
