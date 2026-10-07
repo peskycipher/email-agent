@@ -38,32 +38,18 @@ function startSpinner(write: (text: string) => void, label: string, enabled: boo
     return () => {};
   }
 
-  const spinner = cliSpinners.dots;
-  const startedAt = Date.now();
-  let frame = 0;
-  let lastLine = "";
+  // One line, written once. A terminal that renders each write as its own line (rather
+  // than repainting on a carriage return) would otherwise show every animation frame as
+  // the message repeating, so the status line does not animate: the elapsed time belongs
+  // in the summary, not on a spinning line.
+  write(`\r\u001b[K${cliSpinners.dots.frames[0]} ${label}`);
 
-  // One line, never a repeated message: erase before repainting, and skip a repaint when
-  // the rendered line would not change (so a terminal that ignores \r sees no duplicates).
-  const render = (): void => {
-    const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
-    const line = `${spinner.frames[frame % spinner.frames.length]} ${label}${elapsedSeconds > 0 ? ` ${elapsedSeconds}s` : ""}`;
-    frame += 1;
-
-    if (line === lastLine) {
+  let stopped = false;
+  return () => {
+    if (stopped) {
       return;
     }
-
-    lastLine = line;
-    write(`\r\u001b[K${line}`);
-  };
-
-  render();
-  const timer = setInterval(render, spinner.interval);
-  timer.unref?.();
-
-  return () => {
-    clearInterval(timer);
+    stopped = true;
     write("\r\u001b[K");
   };
 }

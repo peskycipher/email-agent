@@ -203,17 +203,17 @@ test("cli dry-run shows a spinner while the classifier runs when a TTY is availa
 
   assert.equal(code, 0);
   const spinnerOutput = stderr.join("");
-  // A spinner frame with the label, then a cleared line before the summary.
   assert.match(spinnerOutput, /dry-run: ingesting and classifying/);
-  assert.match(spinnerOutput, /\r/);
   assert.ok(spinnerOutput.endsWith("\r\u001b[K"), "spinner line must be cleared when it stops");
-  // Frames come from cli-spinners (dots) and every repaint is erased first.
+
   const statusWrites = stderr.filter((text) => text.includes("ingesting and classifying"));
-  assert.ok(statusWrites.length >= 1);
+  // Written once, never repeated: no frames to stack up in a terminal that ignores \r.
+  assert.equal(statusWrites.length, 1);
   assert.equal(statusWrites[0], `\r\u001b[K${cliSpinners.dots.frames[0]} dry-run: ingesting and classifying`);
-  assert.ok(statusWrites.every((text) => text.startsWith("\r\u001b[K")), "every repaint must erase the line first");
-  // No repaint repeats identical content within a single second.
-  assert.equal(new Set(statusWrites).size, statusWrites.length);
+  // No elapsed-seconds counter on the status line; the summary reports the total time.
+  assert.doesNotMatch(statusWrites[0], /\d+s\b/);
+  assert.ok(stdout.some((line) => /duration\s+\d/.test(line)), "the summary still reports the duration");
+
   // stdout stays clean: no spinner frames leak into the machine-readable output.
   assert.ok(!stdout.join("\n").includes(cliSpinners.dots.frames[0]));
   assert.ok(stdout.some((line) => line.includes("Summary")));
