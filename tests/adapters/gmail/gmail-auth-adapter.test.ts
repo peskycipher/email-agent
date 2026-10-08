@@ -522,3 +522,61 @@ test("forceRefresh refreshes even an unexpired cached token", async () => {
   expect(requests[0]?.params.get("grant_type")).toBe("refresh_token");
   expect(store.setCalls).toHaveLength(1);
 });
+
+test("an expired cached token without a refresh token falls through to consent", async () => {
+  const store = storePort({ accessToken: "stale-access", expiresAt: 1, scopes: [...GMAIL_SCOPES] });
+  const authorize = vi.fn(async () => "canned-code");
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 }),
+  ]);
+  const auth = adapter({ store, fetchFn, authorize, now: () => 5_000 });
+
+  const tokens = await auth.authenticate("personal");
+
+  expect(authorize).toHaveBeenCalledTimes(1);
+  expect(requests).toHaveLength(1);
+  expect(requests[0]?.params.get("grant_type")).toBe("authorization_code");
+  expect(tokens.refreshToken).toBe("new-refresh");
+});
+
+test("a CONSENT_UNAVAILABLE from the seam keeps its specific cause and names the account", async () => {
+  const store = storePort();
+  const { fetchFn } = scriptedFetch([]);
+  const auth = adapter({
+    store,
+    fetchFn,
+    authorize: async () => {
+      throw new GmailConsentError(
+        "CONSENT_UNAVAILABLE",
+        "The local sign-in callback could not listen on http://127.0.0.1:45967.",
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id=client-1",
+      );
+    },
+  });
+
+  const error = (await auth.authenticate("personal").catch((err: unknown) => err)) as GmailAuthError;
+
+  expect(error).toBeInstanceOf(GmailAuthError);
+  expect(error.code).toBe("CONSENT_UNAVAILABLE");
+  expect(error.message).toContain("could not listen on http://127.0.0.1:45967");
+  expect(error.message).toContain("personal");
+  expect(error.message).toContain("Retry");
+  expect(store.setCalls).toHaveLength(0);
+});
+
+test("a synchronous throw from the open hook settles the promise instead of escaping", async () => {
+  const redirectUri = `http://127.0.0.1:${await freePort()}`;
+  const authUrl = "https://accounts.google.com/o/oauth2/v2/auth?client_id=client-1";
+  const pending = authorizeWithLoopback(authUrl, redirectUri, {
+    open: () => {
+      throw new Error("no browser available");
+    },
+    timeoutMs: 60_000,
+  });
+
+  const error = await pending.catch((err: unknown) => err);
+
+  expect(error).toBeInstanceOf(GmailConsentError);
+  expect((error as GmailConsentError).code).toBe("CONSENT_UNAVAILABLE");
+  expect((error as GmailConsentError).consentUrl).toBe(authUrl);
+});

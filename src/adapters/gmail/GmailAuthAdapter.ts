@@ -5,7 +5,7 @@ import type { TokenSet } from "../../core/dto/TokenSet.js";
 import type { TokenPort } from "../../core/ports/TokenPort.js";
 import type { AccountSettingsReader } from "./accountSettings.js";
 
-/** The scopes Story 3.1 freezes: exactly these three, for both the request and the stored `TokenSet`. */
+/** The scopes Story 3.1 freezes: exactly these three, stored in `TokenSet`; the request sends `GMAIL_SCOPE_URIS`. */
 export const GMAIL_SCOPES = ["gmail.readonly", "gmail.labels", "gmail.modify"] as const;
 
 /**
@@ -212,6 +212,18 @@ export function authorizeWithLoopback(
       ),
     );
     server.listen(port, "127.0.0.1", () => {
+      // Armed before `open` so an opener that blocks cannot outlive the consent cap.
+      timer = setTimeout(
+        () =>
+          finish(
+            new GmailConsentError(
+              "CONSENT_TIMEOUT",
+              `Google consent was not completed within ${MAX_WAIT_SECONDS} seconds.`,
+              authUrl,
+            ),
+          ),
+        timeoutMs,
+      );
       try {
         open(authUrl);
       } catch {
@@ -225,19 +237,7 @@ export function authorizeWithLoopback(
             authUrl,
           ),
         );
-        return;
       }
-      timer = setTimeout(
-        () =>
-          finish(
-            new GmailConsentError(
-              "CONSENT_TIMEOUT",
-              `Google consent was not completed within ${MAX_WAIT_SECONDS} seconds.`,
-              authUrl,
-            ),
-          ),
-        timeoutMs,
-      );
     });
   });
 }

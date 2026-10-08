@@ -82,6 +82,31 @@ context:
 - Given `--auth gmail --account all`, when one account file is malformed, then the remaining accounts are still attempted and the exit code is 1.
 - Given any error in the matrix, when the CLI renders it, then the line names the account and no token, secret or raw payload appears.
 
+### Review Findings
+
+Code review of `bf6bf9ab..fdf8686` (2026-10-09, 14 files, +1930/−203). Four layers ran — blind-hunter, edge-case-hunter, verification-gap and acceptance-auditor (spec present). The acceptance auditor found **no** acceptance-criteria violation and confirmed all ten I/O-matrix rows are pinned by tests.
+
+**Decision needed:** _none — every surviving finding has an unambiguous fix._
+
+**Patch:**
+- [x] [Review][Patch] Two review-pass-1 patches ship untested, and the pass-1 triage log claims they are covered — the throwing-`open` branch and the `consentFailure` `CONSENT_UNAVAILABLE` branch have no test [src/adapters/gmail/GmailAuthAdapter.ts:215,389] [tests/adapters/gmail/gmail-auth-adapter.test.ts]
+- [x] [Review][Patch] The rewired m365 `--account all` path is untested — the only m365 `runAuth` test drives a single account and never reaches `authenticateAll`, so passing the gmail listing or prefix in the m365 branch would pass the suite [src/cli/commands/auth.ts:221-225]
+- [x] [Review][Patch] `GMAIL_SCOPES`'s doc comment still says "for both the request and the stored `TokenSet`", but the request now sends `GMAIL_SCOPE_URIS` [src/adapters/gmail/GmailAuthAdapter.ts:8]
+- [x] [Review][Patch] An expired cached token with no `refreshToken` falls through to re-consent, and that branch is untested [src/adapters/gmail/GmailAuthAdapter.ts:285]
+- [x] [Review][Patch] The 5-minute consent cap is armed only after `open()` returns, so an injected opener that blocks never times out and the flow hangs silently [src/adapters/gmail/GmailAuthAdapter.ts:215-230]
+
+**Deferred:**
+- [x] [Review][Defer] A non-ENOENT `readdir` failure rethrows a raw Node error past the typed boundary (`ENOTDIR: not a directory, scandir …`) [src/adapters/config/perAccountSettings.ts:169] — deferred: pre-existing, carried verbatim from Story 2.1 whose review deliberately chose the rethrow; wrapping it needs an error-shape decision this change does not settle.
+- [x] [Review][Defer] `--account all` silently skips account files whose stem fails `ACCOUNT_NAME_PATTERN` [src/adapters/config/perAccountSettings.ts:176] — deferred: carried from build review pass 1, already logged in `deferred-work.md`.
+- [x] [Review][Defer] The `reserveLoopbackPort` reserve→rebind race [src/adapters/gmail/GmailAuthAdapter.ts] — deferred: carried from build review pass 1, already logged in `deferred-work.md`.
+- [x] [Review][Defer] The architecture spine still says `GmailAuthAdapter.ts   # implements TokenPort (gmail)` [ARCHITECTURE-SPINE.md:199] — deferred: carried from build review pass 1; human-owned planning artifact.
+
+**Rejected:**
+- `false` — "The provider-agnostic runtime seam is coupled to the m365 `FetchLike`": `runAuth` hands that one `fetchFn` to `new GmailAuthAdapter({…})`, so a divergent gmail `FetchLike` fails `tsc` at the construction site — compiler-guarded, not a silent trap.
+- `false` — "The security-deferral ledger omits `state`/PKCE": rejected findings belong in this spec's Review Triage Log by design, and `deferred-work.md` is the deferred-only ledger; both items are recorded there as `reject (low)` with reasons.
+- `false` (intent-excluded) — "`consentFailure` drops the root cause for non-`GmailConsentError` failures": the frozen Always constraint forbids echoing arbitrary or untyped error text at the adapter boundary, and the seam already types every known loopback failure.
+- `low` — "`tokenStore.get`/`set` failures other than `TOKEN_NOT_FOUND` escape untyped": the message is already actionable and account-named by the CLI, and mapping it would add a public error code; identical to the reviewed M365 shape.
+
 ## Implementation Notes
 
 **Implementation pass (2026-10-09).** All tasks complete. `mise exec node@20 -- bun run build`, `bun run lint` and `bun run test` (72 tests) are green; `tests/adapters/m365/` is untouched.

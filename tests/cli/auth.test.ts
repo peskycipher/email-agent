@@ -227,3 +227,40 @@ test("runAuth still dispatches m365 and keeps the m365 prefix", async () => {
   expect(store.setCalls.map((call) => [call.provider, call.accountId])).toContainEqual(["m365", "work"]);
   expect(capturedLines(stdout).join("")).toContain("m365 work: authenticated");
 });
+
+test("--account all dispatches the m365 listing and prefix, not gmail's", async () => {
+  await mkdir(join(configDir, "accounts", "m365"), { recursive: true });
+  await writeFile(
+    join(configDir, "accounts", "m365", "a.yaml"),
+    "name: a\nenabled: true\ntenantId: tenant-1\nclientId: client-1\n",
+    "utf8",
+  );
+  await writeFile(join(configDir, "accounts", "m365", "b.yaml"), "name: [unclosed", "utf8");
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const store = memoryStore();
+
+  const code = await runAuth(
+    { provider: "m365", account: "all" },
+    {
+      tokenStore: store.port,
+      configDir,
+      fetchFn: scriptedFetch([
+        jsonResponse({
+          device_code: "dev-1",
+          user_code: "CODE-1",
+          verification_uri: "https://microsoft.com/devicelogin",
+          expires_in: 900,
+          interval: 1,
+        }),
+        jsonResponse({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 3600 }),
+      ]),
+    },
+  );
+
+  expect(code).toBe(1);
+  expect(store.setCalls.map((call) => [call.provider, call.accountId])).toContainEqual(["m365", "a"]);
+  expect(capturedLines(stdout).join("")).toContain("m365 a: authenticated");
+  expect(capturedLines(stderr).join("")).toContain("m365 b:");
+  expect(capturedLines(stderr).join("")).toContain("1 of 2 m365 account(s) failed.");
+});
