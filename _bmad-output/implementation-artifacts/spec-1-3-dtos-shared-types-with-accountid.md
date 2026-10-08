@@ -111,3 +111,19 @@ Loopback check: no `intent_gap` or `bad_spec` entry survived triage, so there is
 - `bun run test` — exit 0 (smoke + typecheck).
 - `bun run typecheck` — exit 0; the new DTO names resolve from `core/index.js`.
 - Negative: temporarily import `"zod"` in a `src/core/dto` file and run `bun run lint` — record whether AD-10 catches it; revert.
+
+### Review Findings
+
+Independent `bmad-code-review` pass (2026-10-08) — layers Blind Hunter, Edge Case Hunter, Verification Gap, Acceptance Auditor. Verification Gap and Acceptance Auditor found no gaps; the entries below are the Blind Hunter findings plus carried rows from the build's own review.
+
+- [x] [Review][Patch] The `account-name` test does not pin the pattern's empty-input and trailing-separator behaviour [tests/core/account-name.test.ts] — add `expect(ACCOUNT_NAME_PATTERN.test("")).toBe(false)` and acceptance for `"a-"`.
+- [x] [Review][Defer] (carried) No external-package guard for `src/core/**` — `.oxlintrc.json` bans only adapters/cli/orch, so a `zod` import in core passes `build` and `lint`.
+- [x] [Review][Defer] (carried) `JsonSchema.type` remains `string`, un-narrowed [src/core/ports/ModelPort.ts:5].
+- [x] [Review][Defer] `JsonSchema.additionalProperties` is typed `boolean`, excluding the JSON-Schema schema form (`boolean | JsonSchema`) [src/core/ports/ModelPort.ts:9].
+- [x] [Review][Defer] `epics.md:275`'s Config "full validated schema with `accountName` regex enforced" stays unreconciled with the human's type-only decision [epics.md:275].
+
+#### Rejected
+
+- `low` — `src/core/dto/accountName.ts` is camelCase against the kebab-case convention (carried); the approved spec's task names that exact path and the DTO directory already mixes PascalCase DTO files with this helper — cosmetic.
+- `low` — spec `status: 'done'` vs sprint `review` (carried); transient, reconciled by the build workflow's step-05.
+- `low` — `LabelSet`'s doc comment says labels are "validated against the taxonomy"; it documents the consumer contract rather than a guarantee of this file — cosmetic documentation.
