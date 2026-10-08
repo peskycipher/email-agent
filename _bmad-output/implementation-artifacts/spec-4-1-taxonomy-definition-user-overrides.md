@@ -81,6 +81,29 @@ context:
 - Given overrides that patch one default, add one label and drop one default, when loaded, then the merged result has exactly those three effects and no others.
 - Given overrides that would duplicate a name, break the name pattern, use a bad color, or cross the 1–50 bound, when loaded, then a typed `TaxonomyError` names the offending label or field and no taxonomy is returned.
 
+### Review Findings
+
+Code review of `2d1a9a6..8339833` (2026-10-09, 9 files, +1065/−3). Four layers ran — blind-hunter, edge-case-hunter, verification-gap and acceptance-auditor (spec present); none was skipped and none returned empty. The verification-gap layer found **no** verification gaps and confirmed every matrix row plus both prior patches are pinned; the acceptance auditor found no acceptance-criteria violation, only the coverage gap below.
+
+**Decision needed:** _none — every surviving finding has an unambiguous fix._
+
+**Patch:**
+- [x] [Review][Patch] A typo'd override key is stripped by the non-strict schema and silently *drops* that default — `{ name: "Invoices", gmailColour: "#123456" }` parses to a name-only entry, which the merge reads as "drop" [src/adapters/config/taxonomy.ts:49-54]
+- [x] [Review][Patch] AC 3's combined scenario is not pinned: patch, add and drop are each tested alone, never as one override set asserting exactly those three effects [tests/adapters/config/taxonomy.test.ts]
+- [x] [Review][Patch] Override edge cases are untested: an unknown/extra key, a `null` entry, an empty-string `name`, and an empty `taxonomyOverrides: []` [tests/adapters/config/taxonomy.test.ts]
+- [x] [Review][Patch] Error messages percent-encode a URL-typed `taxonomyPath` (`path.pathname` yields `my%20labels`); the string form is unaffected [src/adapters/config/taxonomy.ts:82-84]
+
+**Deferred:** _none — nothing in this pass is deferred._
+
+**Rejected:**
+- `false` — "the non-strict `labelSchema` silently ignores extra keys": for labels the four required fields turn a stripped key into a missing-field error, so nothing is silently accepted; the override schema (first patch above) is the case that actually bites.
+- `low` — "no length cap on `name`/`description` (Gmail caps at 225, M365 at 255)": the AC fixes the name rule as the character pattern only, and provider-side limits belong to the 4.2/4.3 sync stories, whose own AC makes per-account provider errors non-fatal.
+- `low` — "`readDefaultLabels` reports a *missing* required field as `invalid`": the message already names the field, and distinguishing missing from invalid needs presence checks for a cosmetic gain.
+- `low` (carried from build review pass 1) — "`CONFIG_UNREADABLE` is re-typed to `CONFIG_INVALID`": recorded in this spec's triage log #1 and Implementation Notes; the message stays actionable and a distinct code would widen the error surface. Re-flagged by the blind-hunter and verification-gap layers.
+- `low` (carried) — "`LABEL_NAME_PATTERN` accepts whitespace/separator-only names": frozen intent — the AC's exact regex — so any tightening is yours to approve. Re-flagged by the blind-hunter and edge-case-hunter layers.
+- `low` (carried) — "`isEnoent` and `DEFAULT_CONFIG_DIR` are duplicated into a third file": the deliberate self-contained-reader pattern that lets Epic 11 delete each one wholesale.
+- `low` (carried) — "`taxonomy.yaml` has no trailing newline": deliberate, so the repo copy stays byte-identical to the human-owned planning source.
+
 ## Implementation Notes
 
 **Implementation pass (2026-10-09).** All tasks complete. `build`, `lint` and `test` (101 tests) are green, and `taxonomy.yaml` is byte-identical to the human-owned planning source (`diff` clean).

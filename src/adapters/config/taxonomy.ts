@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { load } from "js-yaml";
 import { z } from "zod";
 import { LABEL_NAME_PATTERN } from "../../core/dto/LabelDef.js";
@@ -51,12 +52,16 @@ export class TaxonomyError extends Error {
  * One `taxonomyOverrides[]` entry: `name` keys the merge, the other three are the
  * fields it may patch. Mirrors `Config.taxonomyOverrides` (Story 11.1).
  */
-const overrideSchema = z.object({
-  name: z.string(),
-  description: z.string().optional(),
-  m365Color: z.string().optional(),
-  gmailColor: z.string().optional(),
-});
+const overrideSchema = z
+  .object({
+    name: z.string(),
+    description: z.string().optional(),
+    m365Color: z.string().optional(),
+    gmailColor: z.string().optional(),
+  })
+  // Strict on purpose: a mistyped field would otherwise be stripped into a name-only
+  // entry, which the merge reads as "drop that default" — a silent, data-affecting typo.
+  .strict();
 
 type TaxonomyOverride = z.infer<typeof overrideSchema>;
 
@@ -84,7 +89,8 @@ export async function loadTaxonomy(options: LoadTaxonomyOptions = {}): Promise<T
 }
 
 function sourceDisplayPath(path: string | URL): string {
-  return typeof path === "string" ? path : path.pathname;
+  // `fileURLToPath` decodes percent-escapes; `URL.pathname` would render `my labels` as `my%20labels`.
+  return typeof path === "string" ? path : fileURLToPath(path);
 }
 
 function isEnoent(error: unknown): boolean {
@@ -169,12 +175,18 @@ function mergeLabels(defaults: LabelDef[], rawOverrides: unknown[]): LabelDef[] 
 
 function readOverride(raw: unknown, index: number): TaxonomyOverride {
   const result = overrideSchema.safeParse(raw);
-  if (!result.success) {
-    const field = result.error.issues[0]?.path.join(".") ?? "";
-    const detail = field === "" ? 'expected a mapping with a "name"' : `field "${field}" is invalid`;
-    throw new TaxonomyError("OVERRIDE_MALFORMED", `taxonomyOverrides[${index}] is malformed — ${detail}.`);
+  if (result.success) return result.data;
+  const issue = result.error.issues[0];
+  if (issue !== undefined && "keys" in issue) {
+    const keys = (issue as { keys: string[] }).keys;
+    throw new TaxonomyError(
+      "OVERRIDE_MALFORMED",
+      `taxonomyOverrides[${index}] is malformed — unknown field "${keys.join('", "')}" (expected name, description, m365Color, gmailColor).`,
+    );
   }
-  return result.data;
+  const field = issue?.path.join(".") ?? "";
+  const detail = field === "" ? 'expected a mapping with a "name"' : `field "${field}" is invalid`;
+  throw new TaxonomyError("OVERRIDE_MALFORMED", `taxonomyOverrides[${index}] is malformed — ${detail}.`);
 }
 
 /** A matched entry with no other field drops the default (returns `undefined`). */

@@ -472,3 +472,64 @@ test("OVERRIDE_DROP: re-adding a dropped name without its fields fails loudly", 
   expect(error.code).toBe("OVERRIDE_INCOMPLETE");
   expect(error.message).toContain("Crypto");
 });
+
+test("AC3: one override set that patches, adds and drops has exactly those three effects", async () => {
+  await writeSource(defaultLabels());
+  await writeConfig([
+    { name: "Invoices", description: "Vendor invoices" },
+    { name: "Travel", description: "Bookings", m365Color: "preset11", gmailColor: "#123456" },
+    { name: "Crypto" },
+  ]);
+
+  const taxonomy = (await load()) as Label[];
+
+  expect(taxonomy).toHaveLength(11);
+  expect(taxonomy.map((label) => label.name)).toEqual([
+    ...DEFAULT_NAMES.filter((name) => name !== "Crypto"),
+    "Travel",
+  ]);
+  expect(taxonomy.find((label) => label.name === "Invoices")).toEqual({
+    ...defaultLabel("Invoices", 3),
+    description: "Vendor invoices",
+  });
+});
+
+test("OVERRIDE_MALFORMED: an unknown field fails loudly instead of dropping the label", async () => {
+  await writeSource(defaultLabels());
+  // A mistyped key must not be stripped into a name-only entry, which means "drop".
+  await writeConfig([{ name: "Invoices", gmailColour: "#123456" }]);
+
+  const error = await loadError();
+
+  expect(error.code).toBe("OVERRIDE_MALFORMED");
+  expect(error.message).toContain("gmailColour");
+  expect(error.message).toContain("taxonomyOverrides[0]");
+});
+
+test("OVERRIDE_MALFORMED: a null entry names its index", async () => {
+  await writeSource(defaultLabels());
+  await writeConfig([null]);
+
+  const error = await loadError();
+
+  expect(error.code).toBe("OVERRIDE_MALFORMED");
+  expect(error.message).toContain("taxonomyOverrides[0]");
+});
+
+test("BAD_NAME: an added label with an empty name is rejected", async () => {
+  await writeSource(defaultLabels());
+  await writeConfig([{ name: "", description: "x", m365Color: "preset11", gmailColor: "#123456" }]);
+
+  const error = await loadError();
+
+  expect(error.code).toBe("INVALID_LABEL_NAME");
+});
+
+test("CONFIG_ABSENT: an empty taxonomyOverrides list leaves the defaults unchanged", async () => {
+  await writeSource(defaultLabels());
+  await writeConfig([]);
+
+  const taxonomy = (await load()) as Label[];
+
+  expect(taxonomy.map((label) => label.name)).toEqual(DEFAULT_NAMES);
+});
