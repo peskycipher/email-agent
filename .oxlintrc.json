@@ -1,0 +1,43 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "overrides": [
+    {
+      "files": ["src/core/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/adapters/**", "**/cli/**", "**/orch/**"],
+                "message": "AD-10: core/ is dependency-free — it must not import adapters/, cli/ or orch/. Core depends on nothing; adapters and orch depend on core ports; cli wires everything."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["tests/adapters/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              { "name": "googleapis", "message": "Per-adapter tests use stdlib-only mocks — never import a real adapter SDK." },
+              { "name": "@microsoft/microsoft-graph-client", "message": "Per-adapter tests use stdlib-only mocks — never import a real adapter SDK." },
+              { "name": "@typesafe-ai/sdk", "message": "Per-adapter tests use stdlib-only mocks — never import a real adapter SDK." },
+              { "name": "openai", "message": "Per-adapter tests use stdlib-only mocks — never import a real adapter SDK." }
+            ],
+            "patterns": [
+              {
+                "group": ["googleapis/**", "@microsoft/microsoft-graph-client/**", "@typesafe-ai/sdk/**", "openai/**"],
+                "message": "Per-adapter tests use stdlib-only mocks — never import a real adapter SDK, not even a subpath of one."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import * as core from "../../src/core/index";
+import * as core from "../../src/core/index.js";
 
 test("core barrel loads and is empty", () => {
   expect(core).toBeDefined();

@@ -5,11 +5,12 @@
   "type": "module",
   "packageManager": "bun@1.4.2",
   "engines": {
-    "node": ">=20 <21"
+    "node": ">=20.19 <21"
   },
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
+    "lint": "oxlint",
     "test": "vitest run"
   },
   "dependencies": {
@@ -31,9 +32,7 @@
     "@types/js-yaml": "4.0.9",
     "@types/keytar": "4.4.2",
     "@types/node": "20.19.43",
-    "@typescript-eslint/eslint-plugin": "8.71.1",
-    "@typescript-eslint/parser": "8.71.1",
-    "eslint": "10.12.0",
+    "oxlint": "1.87.0",
     "typescript": "7.0.2",
     "vitest": "5.0.3"
   }
