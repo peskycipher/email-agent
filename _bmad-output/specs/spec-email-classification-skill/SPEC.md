@@ -64,7 +64,7 @@ sources:
 - **Local-first, zero-infra v1** — runs on user's machine via cron; no serverless, Docker, or always-on server. Cloudflare Worker / MCP = v2+.
 - **Hexagonal architecture** — Skill Core (classification) is pure function with zero I/O, zero deps; all I/O in adapters implementing ports (MailPort, ModelPort, TokenPort, IdempotencyPort, SchedulerPort, LogPort, ConfigPort).
 - **Single shared MessageDTO** — all adapters map to/from one canonical shape (`id`, `internetMessageId`, `subject`, `bodyPreview`, `sender`, `receivedDateTime`, `existingLabels`, `source`, `raw?`); prevents translation drift.
-- **Dependency direction enforced** — `core/` (zero deps) ← `adapters/` (depend on core ports) ← `cli/` (wires all). Enforced via tsconfig project references or eslint.
+- **Dependency direction enforced** — `core/` (zero deps) ← `adapters/` (depend on core ports) ← `cli/` (wires all). Enforced via tsconfig project references and the oxlint `no-restricted-imports` rule in `.oxlintrc.json` (run by `bun run lint`).
 - **Multi-label by default** — classification returns a set of labels from the 11-label taxonomy; empty set valid.
 - **Idempotency required** — backfill and cron must be safely re-runnable; key = sha256(internetMessageId + "|" + sorted(labels)).
 - **Never remove user-applied labels** — label write only adds missing taxonomy labels; preserves existing categories/labels.

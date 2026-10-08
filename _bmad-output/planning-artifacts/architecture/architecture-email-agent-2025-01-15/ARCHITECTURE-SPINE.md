@@ -121,7 +121,7 @@ companions: []
   adapters/ (m365, gmail, model, token, idempotency, scheduler, logger, config) → depend on core/ports only
   cli/ (commands, DI wiring)           → depends on core + adapters
   ```
-  Enforced via `tsconfig` project references or eslint `no-restricted-imports`.
+  Enforced via `tsconfig` project references and the oxlint `no-restricted-imports` rule in `.oxlintrc.json` (run by `bun run lint`).
 
 ## Consistency Conventions
 
@@ -136,17 +136,17 @@ companions: []
 | Name | Version |
 | --- | --- |
 | Node.js | 20 LTS |
-| TypeScript | 5.5.x |
+| TypeScript | 7.0.2 |
 | @typesafe-ai/sdk (Jev System1) | 0.6.0 |
 | @microsoft/microsoft-graph-client | 3.0.7 |
 | @microsoft/microsoft-graph-types | 2.43.x |
 | googleapis | 184.0.0 |
 | better-sqlite3 | 9.6.x |
-| zod | 3.23.x |
-| js-yaml | 4.1.x |
-| commander | 12.1.x |
-| pino | 9.2.x |
-| pino-roll | 1.11.x |
+| zod | 4.6.5 |
+| js-yaml | 5.4.3 |
+| commander | 15.0.0 |
+| pino | 10.4.0 |
+| pino-roll | 4.0.0 |
 | keytar | 7.9.x |
 | age-encryption | (for file fallback) |
 
@@ -159,7 +159,7 @@ email-classify/
 ├── tsconfig.core.json
 ├── tsconfig.adapters.json
 ├── tsconfig.cli.json
-├── .eslintrc.json
+├── .oxlintrc.json
 ├── .prettierrc
 ├── config.yaml.example
 ├── taxonomy.yaml
