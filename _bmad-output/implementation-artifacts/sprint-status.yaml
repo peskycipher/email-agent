@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-08-2026 10:25
-last_updated: 10-08-2026 19:30
+last_updated: 10-08-2026 19:37
 project: email-agent
 project_key: NOKEY
 tracking_system: file-system
@@ -39,7 +39,7 @@ development_status:
   1-1-project-initialization-dependencies: done
   1-2-port-interfaces-definition-per-account: done
   1-3-dtos-shared-types-with-accountid: done
-  epic-1-retrospective: optional
+  epic-1-retrospective: done
 
   epic-2: backlog
   2-1-m365-device-code-authentication-multi-account-accountname-va: backlog
@@ -96,3 +96,23 @@ development_status:
   11-3-cli-commands-help-multi-account: backlog
   11-4-dependency-injection-wiring-per-account: backlog
   epic-11-retrospective: optional
+action_items:
+  - id: "epic-1-retro-item-1-add-env-variants-to-gitignore-keep-any-e"
+    epic: 1
+    action: "Add .env.* variants to .gitignore (keep any .env.example unignored)"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-08.md"
+  - id: "epic-1-retro-item-2-reconcile-epics-md-71-nfr4-dependency-ar"
+    epic: 1
+    action: "Reconcile epics.md:71 NFR4 dependency arrow to include orch"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-08.md"
+  - id: "epic-1-retro-item-3-add-a-runnable-external-import-guard-for"
+    epic: 1
+    action: "Add a runnable external-import guard for src/core/** so a package import
+      fails bun run lint"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-08.md"
