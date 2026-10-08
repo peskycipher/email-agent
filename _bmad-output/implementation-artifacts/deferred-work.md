@@ -39,3 +39,8 @@
 - `ModelConfig.provider` ships `"anthropic" | "custom"` beyond the providers AD-3/epics name (`src/core/dto/ModelConfig.ts:2`); ratify or narrow the union in Story 1.3.
 - AD-2's single `sender` field vs Story 1.3's `senderEmail`/`senderName` remains an untracked planning inconsistency (`ARCHITECTURE-SPINE.md` AD-2); the code correctly follows Story 1.3 AC — reconcile the spine in a planning pass.
 - Non-`accountId` contract shapes are unpinned: a valid-TypeScript drift such as `SchedulerPort.runInterval` returning `Promise<void>`, or any `TokenPort`/`MailPort`/`ConfigPort` signature detail beyond parameter requirement, passes `build`/`lint`/`test` (`src/core/ports/SchedulerPort.ts:3`; `src/core/ports/ModelPort.ts:11`; `src/core/ports/ConfigPort.ts:4`). No consumers exist yet; Story 1.3 / Epic 5 compilation will exercise them — pin the shapes then.
+
+### Deferred from: review of spec-1-3-dtos-shared-types-with-accountid.md (2026-10-08)
+
+- **No external-package guard for `src/core/**`.** AD-10's zero-dependency rule is convention-only for external packages: `.oxlintrc.json` bans only `**/adapters/**`/`**/cli/**`/`**/orch/**`, so a `zod` (or any package) import in core passes both `bun run build` and `bun run lint` — demonstrated by a temporary probe in Story 1.3. Add a core external-import rule (or a dependency check) before core grows real logic.
+- **`JsonSchema.type` is still un-narrowed** (`src/core/ports/ModelPort.ts`). Story 1.3 added `additionalProperties?`/`enum?` but left `type: string`; the original deferred item named a narrowed `type` keyword as a third piece. Narrow it to the JSON-Schema type-keyword union when a model adapter first consumes the type.

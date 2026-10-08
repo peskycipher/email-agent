@@ -8,6 +8,8 @@ export type { ConfigPort } from "./ports/ConfigPort.js";
 
 export type { MessageDTO } from "./dto/MessageDTO.js";
 export type { LabelDef } from "./dto/LabelDef.js";
+export type { LabelSet } from "./dto/LabelSet.js";
+export type { Taxonomy } from "./dto/Taxonomy.js";
 export type { ModelConfig } from "./dto/ModelConfig.js";
 export type { TokenSet } from "./dto/TokenSet.js";
 export type { Config } from "./dto/Config.js";

@@ -6,6 +6,8 @@ export interface JsonSchema {
   properties?: Record<string, JsonSchema>;
   items?: JsonSchema;
   required?: string[];
+  additionalProperties?: boolean;
+  enum?: unknown[];
 }
 
 export interface ModelPort {

@@ -5,6 +5,7 @@ import type {
   IdempotencyPort,
   JsonSchema,
   LabelDef,
+  LabelSet,
   LogContext,
   LogPort,
   MailPort,
@@ -12,6 +13,7 @@ import type {
   ModelConfig,
   ModelPort,
   SchedulerPort,
+  Taxonomy,
   TokenPort,
   TokenSet,
 } from "../../src/core/index.js";
@@ -42,6 +44,15 @@ void mailPort.ensureCategories(undefined, []);
 const badOpts: FetchOpts = { source: "m365" };
 void badOpts;
 
+// Positive: the new taxonomy DTOs carry their declared shapes (Story 1.3
+// AC 2–3). A drift to a non-array `Taxonomy` or non-array `labels` fails here.
+declare const labelSet: LabelSet;
+declare const taxonomy: Taxonomy;
+const labels: string[] = labelSet.labels;
+void labels;
+const labelDefs: LabelDef[] = taxonomy;
+void labelDefs;
+
 // Positive: the core barrel re-exports every contract name (AC-4). If any
 // re-export is dropped, this alias fails with "has no exported member".
 type _BarrelContracts = [
@@ -50,11 +61,13 @@ type _BarrelContracts = [
   IdempotencyPort,
   JsonSchema,
   LabelDef,
+  LabelSet,
   LogContext,
   LogPort,
   MessageDTO,
   ModelConfig,
   ModelPort,
   SchedulerPort,
+  Taxonomy,
   TokenSet,
 ];
