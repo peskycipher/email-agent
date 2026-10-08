@@ -9,7 +9,8 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "clean": "tsc -b --clean"
+    "clean": "tsc -b --clean",
+    "test": "vitest run"
   },
   "dependencies": {
     "@microsoft/microsoft-graph-client": "3.0.7",
@@ -27,15 +28,13 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "9.6.0",
-    "@types/jest": "30.0.0",
     "@types/js-yaml": "4.0.9",
     "@types/keytar": "4.4.2",
     "@types/node": "20.19.43",
     "@typescript-eslint/eslint-plugin": "8.71.1",
     "@typescript-eslint/parser": "8.71.1",
     "eslint": "10.12.0",
-    "jest": "30.5.2",
-    "ts-jest": "29.4.14",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "vitest": "5.0.3"
   }
 }

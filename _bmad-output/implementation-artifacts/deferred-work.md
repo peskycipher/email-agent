@@ -1,6 +1,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-1-project-initialization-dependencies.md`
-  summary: Add the Jest + ts-jest test harness (jest.config.js plus a smoke test that proves the TS compile pipeline) to the scaffold.
-  evidence: Split out at the step-02 token gate — the spec exceeded the 1600-token target, and the test harness is separable from the toolchain scaffold (package.json, tsconfig project references, directory tree). Drops Story 1.1's test-runner configuration from the current spec; the dev dependencies stay declared in package.json.
+  summary: Add a vitest smoke-test harness and a boundary assertion instead of the deferred Jest + ts-jest setup.
+  evidence: The jest/ts-jest path was the original deferred harness, but it is the sole reason the dev tree carries `sprintf-js` (via `jest → @istanbuljs/load-nyc-config → js-yaml@3.15.2 → argparse@1.0.10`), and `sprintf-js` has no patched release. vitest 5 provides TypeScript-native testing with no jest/istanbul/argparse 1.x chain, removing the vulnerable dependency entirely. A minimal smoke test should prove the tsconfig wiring works and that a core→adapters import fails the build.
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-1-project-initialization-dependencies.md`
   summary: Add eslint no-restricted-imports enforcement for the core/adapters/cli dependency direction, including the tests/adapters/** adapter-SDK ban.
   evidence: Split out at the step-02 token gate for the same reason — it is configuration layered on top of the scaffold rather than part of it. Compile-time direction enforcement via tsconfig project references stays in the current spec; this entry restores the runtime/pattern guard and the per-adapter test-hygiene rule.
