@@ -92,6 +92,40 @@ context:
 - Given no authorization within 5 minutes, when the poll deadline passes, then it exits 1 with the verification URL and stores nothing.
 - Given `bun run build`, `bun run lint`, `bun run test`, all exit 0.
 
+### Review Findings
+
+Code review of commit `c3fae11` (2026-10-09, 15 files, +1808/−7).
+
+**Decision needed:**
+- [x] [Review][Decision] Malformed settings files silently dropped from `--account all` — `listEnabledAccounts` catches every `readAccountSettings` failure and `continue`s (`src/adapters/m365/accountSettings.ts`), so a broken `<name>.yaml` vanishes from the run with no result line, while the frozen I/O matrix row 8 asks that failures be summarised. Surfacing skipped files changes the function's return shape (`M365AccountSettings[]`), so the fix needs a call. Options: (a) surface skipped files as per-account failure lines (return `{ accounts, errors }`), (b) abort the run on a malformed file (pre-patch behavior), (c) keep the silent skip and document it.
+
+**Patch:**
+- [x] [Review][Patch] `refresh()` maps every non-OK token response to `AUTH_REQUIRED`, so a transient 5xx/429 is reported as a revoked token and re-prompts [src/adapters/m365/M365AuthAdapter.ts:322-345]
+- [x] [Review][Patch] `readAccountSettings` reports a non-ENOENT read failure (EACCES/EISDIR) as `SETTINGS_NOT_FOUND` with the wrong remediation [src/adapters/m365/accountSettings.ts:84-95]
+- [x] [Review][Patch] `getAccessToken({ forceRefresh: true })` branch is untested [src/adapters/m365/M365AuthAdapter.ts:157]
+- [x] [Review][Patch] Device-code poll `slow_down` / `expired_token` / `authorization_declined` / unexpected-error branches are untested [src/adapters/m365/M365AuthAdapter.ts:210-227,296-318]
+- [x] [Review][Patch] `authenticate`'s non-`AUTH_REQUIRED` refresh-failure branch is untested [src/adapters/m365/M365AuthAdapter.ts:141-147]
+- [x] [Review][Patch] `requestDeviceCode` rejection and missing-verification-URL paths are untested [src/adapters/m365/M365AuthAdapter.ts:258-277]
+- [x] [Review][Patch] `runAuth` unknown-provider path is untested [src/cli/commands/auth.ts:141-146]
+- [x] [Review][Patch] `listEnabledAccounts` non-ENOENT `readdir` re-throw is untested [src/adapters/m365/accountSettings.ts:135-138]
+- [x] [Review][Patch] Token-store read-failure paths (wrong passphrase, corrupt JSON) are untested [src/adapters/token/KeychainTokenStore.ts:198-235]
+
+**Deferred:**
+- [x] [Review][Defer] "Silent refresh on 401" (epics.md / epic-2-context) is not implemented — refresh is expiry-only [src/adapters/m365/M365AuthAdapter.ts:152-163] — deferred: the 401→refresh hook belongs to the fetch consumer (Epic 5); the frozen Story 2.1 matrix is expiry-based, so the planning docs are reconciled separately.
+- [x] [Review][Defer] `KeychainTokenStore.delete` silently no-ops on a keychain failure and has no caller or test [src/adapters/token/KeychainTokenStore.ts:126-147] — deferred: no consumer yet (Epic 7/11), so the delete contract is settled when it is first used.
+
+**Rejected:**
+- `readKeychain` swallows keychain read errors — low: falling through to the fallback file / `TOKEN_NOT_FOUND` is the intended degradation; distinguishing adds guards.
+- Keychain and fallback are not mirrored — low: the frozen design is fallback-only, not dual-write.
+- Spec Code Map / Implementation Notes say `tsconfig.base.json` gained the node types and "20 tests" — rejected: the fix edits the spec under review.
+- Per-request timeout decoupled from the total deadline — low: needs a hung TCP connection; the polling loop already caps the wait.
+- Ctrl-C during the passphrase prompt does not abort — false: `undefined` passphrase → `PASSPHRASE_UNAVAILABLE` → CLI exits 1; the run does not proceed into device code.
+- Single- vs multi-account failure line formats diverge — low: cosmetic refactor.
+- `parseTokenSet` casts unvalidated JSON — low: corrupt-store edge; the fix adds guards.
+- `mkdir` 0700 leaves pre-existing parents broad — low: the token file is 0600, so contents stay protected.
+- Store's default `promptPassphrase` returns undefined — low: the CLI injects the TTY prompt; the AC holds.
+- `authenticateAll` zero-account / `authenticateOne` single-account untested — low: smoke-covered; injecting would add public surface.
+
 ## Implementation Notes
 
 **Implementation pass (2026-10-09).** All tasks complete; `mise exec node@20 -- bun run build`, `bun run lint`, `bun run test` (20 tests) and the four CLI smoke paths are green.

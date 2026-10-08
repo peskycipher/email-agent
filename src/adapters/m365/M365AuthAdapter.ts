@@ -332,10 +332,17 @@ export class M365AuthAdapter {
     const payload = await readJsonObject(response);
     if (!response.ok || typeof payload?.access_token !== "string") {
       const errorCode = typeof payload?.error === "string" ? payload.error : "unknown_error";
+      if (errorCode === "invalid_grant" || errorCode === "invalid_refresh_token") {
+        throw new M365AuthError(
+          "AUTH_REQUIRED",
+          accountName,
+          `Sign-in for account "${accountName}" can no longer be refreshed (${errorCode}) — run \`--auth m365 --account ${accountName}\` to sign in again.`,
+        );
+      }
       throw new M365AuthError(
-        "AUTH_REQUIRED",
+        "TOKEN_REQUEST_FAILED",
         accountName,
-        `Sign-in for account "${accountName}" can no longer be refreshed (${errorCode}) — run \`--auth m365 --account ${accountName}\` to sign in again.`,
+        `Refreshing the token for account "${accountName}" failed (${errorCode}) — try again.`,
       );
     }
     const tokens = this.tokenSetFromResponse(payload, refreshToken);

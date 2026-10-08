@@ -341,3 +341,151 @@ test("a rejected refresh token re-prompts with device code", async () => {
   expect(requests[0]?.params.get("grant_type")).toBe("refresh_token");
   expect(requests[1]?.url).toContain("/devicecode");
 });
+
+test("forceRefresh refreshes even an unexpired cached token", async () => {
+  const cached: TokenSet = {
+    accessToken: "cached-access",
+    refreshToken: "cached-refresh",
+    expiresAt: 9_999_999,
+    scopes: [...M365_SCOPES],
+  };
+  const store = storePort(cached);
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ access_token: "rotated-access", refresh_token: "rotated-refresh", expires_in: 3600 }),
+  ]);
+  const adapter = new M365AuthAdapter({
+    fetchFn,
+    tokenStore: store.port,
+    accountSettings: { read: settingsReader() },
+    now: () => 5_000,
+  });
+
+  const token = await adapter.getAccessToken("work", { forceRefresh: true });
+
+  expect(token.accessToken).toBe("rotated-access");
+  expect(requests).toHaveLength(1);
+  expect(requests[0]?.params.get("grant_type")).toBe("refresh_token");
+});
+
+test("a transient refresh failure surfaces instead of re-prompting", async () => {
+  const store = storePort({
+    accessToken: "old-access",
+    refreshToken: "old-refresh",
+    expiresAt: 1,
+    scopes: [...M365_SCOPES],
+  });
+  const onDeviceCode = vi.fn();
+  const { fetchFn } = scriptedFetch([jsonResponse({ error: "temporarily_unavailable" }, false, 503)]);
+  const adapter = new M365AuthAdapter({
+    fetchFn,
+    tokenStore: store.port,
+    accountSettings: { read: settingsReader() },
+    now: () => 5_000,
+    onDeviceCode,
+  });
+
+  const error = (await adapter.authenticate("work").catch((err: unknown) => err)) as M365AuthError;
+
+  expect(error.code).toBe("TOKEN_REQUEST_FAILED");
+  expect(onDeviceCode).not.toHaveBeenCalled();
+});
+
+test("slow_down increases the poll interval", async () => {
+  const slept: number[] = [];
+  const { fetchFn } = scriptedFetch([
+    jsonResponse(DEVICE_CODE),
+    jsonResponse({ error: "slow_down" }, false, 400),
+    jsonResponse({ access_token: "access-1", expires_in: 3600 }),
+  ]);
+  const adapter = new M365AuthAdapter({
+    fetchFn,
+    tokenStore: storePort().port,
+    accountSettings: { read: settingsReader() },
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+  });
+
+  await adapter.authenticate("work");
+
+  expect(slept).toEqual([5_000, 10_000]);
+});
+
+test("an expired_token poll response produces a device-code timeout", async () => {
+  const { fetchFn } = scriptedFetch([
+    jsonResponse(DEVICE_CODE),
+    jsonResponse({ error: "expired_token" }, false, 400),
+  ]);
+  const adapter = new M365AuthAdapter({
+    fetchFn,
+    tokenStore: storePort().port,
+    accountSettings: { read: settingsReader() },
+    sleep: async () => {},
+  });
+
+  const error = (await adapter.authenticate("work").catch((err: unknown) => err)) as M365AuthError;
+
+  expect(error.code).toBe("DEVICE_CODE_TIMEOUT");
+});
+
+test("a declined sign-in produces DEVICE_CODE_DENIED", async () => {
+  const { fetchFn } = scriptedFetch([
+    jsonResponse(DEVICE_CODE),
+    jsonResponse({ error: "authorization_declined" }, false, 400),
+  ]);
+  const adapter = new M365AuthAdapter({
+    fetchFn,
+    tokenStore: storePort().port,
+    accountSettings: { read: settingsReader() },
+    sleep: async () => {},
+  });
+
+  const error = (await adapter.authenticate("work").catch((err: unknown) => err)) as M365AuthError;
+
+  expect(error.code).toBe("DEVICE_CODE_DENIED");
+});
+
+test("an unexpected poll error produces TOKEN_REQUEST_FAILED", async () => {
+  const { fetchFn } = scriptedFetch([
+    jsonResponse(DEVICE_CODE),
+    jsonResponse({ error: "server_error" }, false, 500),
+  ]);
+  const adapter = new M365AuthAdapter({
+    fetchFn,
+    tokenStore: storePort().port,
+    accountSettings: { read: settingsReader() },
+    sleep: async () => {},
+  });
+
+  const error = (await adapter.authenticate("work").catch((err: unknown) => err)) as M365AuthError;
+
+  expect(error.code).toBe("TOKEN_REQUEST_FAILED");
+});
+
+test("a rejected device-code request produces DEVICE_CODE_REQUEST_FAILED", async () => {
+  const { fetchFn } = scriptedFetch([jsonResponse({ error: "invalid_client" }, false, 400)]);
+  const adapter = new M365AuthAdapter({
+    fetchFn,
+    tokenStore: storePort().port,
+    accountSettings: { read: settingsReader() },
+  });
+
+  const error = (await adapter.authenticate("work").catch((err: unknown) => err)) as M365AuthError;
+
+  expect(error.code).toBe("DEVICE_CODE_REQUEST_FAILED");
+});
+
+test("a device-code response without a verification URL is rejected", async () => {
+  const { fetchFn } = scriptedFetch([
+    jsonResponse({ device_code: "device-code-1", user_code: "USER-CODE", expires_in: 900, interval: 5 }),
+  ]);
+  const adapter = new M365AuthAdapter({
+    fetchFn,
+    tokenStore: storePort().port,
+    accountSettings: { read: settingsReader() },
+  });
+
+  const error = (await adapter.authenticate("work").catch((err: unknown) => err)) as M365AuthError;
+
+  expect(error.code).toBe("DEVICE_CODE_REQUEST_FAILED");
+});

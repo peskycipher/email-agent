@@ -49,3 +49,8 @@
 
 - `JsonSchema.additionalProperties` is typed `boolean`, so the JSON-Schema schema form (`additionalProperties: { type: "string" }`) would not type-check (`src/core/ports/ModelPort.ts:9`). Widen to `boolean | JsonSchema` alongside the already-deferred `type`-keyword narrowing.
 - `epics.md:275` still requires `Config` to carry a "full validated schema with `accountName` regex enforced", while the human decision of 2026-10-08 keeps core type-only and leaves validation to Story 11.1. Reconcile the planning AC in a planning pass.
+
+## Deferred from: code review of spec-2-1-m365-device-code-authentication-multi-account-accountname-validated.md (2026-10-09)
+
+- **"Silent refresh on 401" is not implemented.** `epics.md:301` and `epic-2-context.md` promise "automatic silent refresh on 401", but `M365AuthAdapter` refreshes only on expiry (`src/adapters/m365/M365AuthAdapter.ts:152-163`); there is no 401-driven path. The 401→refresh hook belongs to the fetch consumer (Epic 5), and the planning docs should be reconciled with the frozen expiry-based Story 2.1 matrix.
+- **`KeychainTokenStore.delete` silently no-ops on a keychain failure.** It swallows `deletePassword` failures and then tolerates a missing fallback file, so a failed keychain delete returns success while the token remains (`src/adapters/token/KeychainTokenStore.ts:126-147`). It has no caller in this story; settle the delete contract when Epic 7/11 first calls it.

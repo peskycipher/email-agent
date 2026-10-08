@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Encrypter } from "age-encryption";
 import {
   KeychainTokenStore,
   TokenStoreError,
@@ -130,4 +131,48 @@ test("keeps two independently authenticated accounts in separate fallback files"
   expect(await store.get("m365", "work")).toEqual(TOKENS);
   await stat(join(configDir, "accounts", "m365", "personal", "tokens.json.age"));
   await stat(fallbackFile());
+});
+
+test("a wrong passphrase surfaces TOKEN_READ_FAILED, not TOKEN_NOT_FOUND", async () => {
+  const writer = new KeychainTokenStore({
+    keychain: unavailableKeychain(),
+    env: { [PASSPHRASE_ENV]: "right passphrase" },
+    scryptWorkFactor: 12,
+    configDir,
+  });
+  await writer.set("m365", "work", TOKENS);
+
+  const reader = new KeychainTokenStore({
+    keychain: unavailableKeychain(),
+    env: { [PASSPHRASE_ENV]: "wrong passphrase" },
+    scryptWorkFactor: 12,
+    configDir,
+  });
+
+  const error = await reader.get("m365", "work").catch((err: unknown) => err);
+
+  expect(error).toBeInstanceOf(TokenStoreError);
+  expect((error as TokenStoreError).code).toBe("TOKEN_READ_FAILED");
+});
+
+test("corrupt token JSON surfaces TOKEN_READ_FAILED", async () => {
+  const accountDir = join(configDir, "accounts", "m365", "work");
+  await mkdir(accountDir, { recursive: true, mode: 0o700 });
+  const encrypter = new Encrypter();
+  encrypter.setScryptWorkFactor(12);
+  encrypter.setPassphrase("pw");
+  const ciphertext = await encrypter.encrypt("not json");
+  await writeFile(join(accountDir, "tokens.json.age"), ciphertext);
+
+  const store = new KeychainTokenStore({
+    keychain: unavailableKeychain(),
+    env: { [PASSPHRASE_ENV]: "pw" },
+    scryptWorkFactor: 12,
+    configDir,
+  });
+
+  const error = await store.get("m365", "work").catch((err: unknown) => err);
+
+  expect(error).toBeInstanceOf(TokenStoreError);
+  expect((error as TokenStoreError).code).toBe("TOKEN_READ_FAILED");
 });

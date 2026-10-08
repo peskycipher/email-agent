@@ -2,6 +2,7 @@ import {
   listEnabledAccounts,
   readAccountSettings,
   accountsDirDisplayPath,
+  type M365AccountsListing,
 } from "../../adapters/m365/accountSettings.js";
 import { M365AuthAdapter, type FetchLike } from "../../adapters/m365/M365AuthAdapter.js";
 import { KeychainTokenStore } from "../../adapters/token/KeychainTokenStore.js";
@@ -109,16 +110,22 @@ export async function authenticateAccounts(
 }
 
 async function authenticateAll(adapter: M365AuthAdapter): Promise<number> {
-  let accounts;
+  let listing: M365AccountsListing;
   try {
-    accounts = await listEnabledAccounts();
+    listing = await listEnabledAccounts();
   } catch (error) {
     process.stderr.write(`m365: ${errorLine(error)}\n`);
     return 1;
   }
+  const { accounts, errors } = listing;
+  for (const error of errors) {
+    process.stderr.write(`m365 ${error.accountName}: ${error.message}\n`);
+  }
   if (accounts.length === 0) {
     process.stderr.write(
-      `No enabled m365 accounts found — add ${accountsDirDisplayPath()}/<name>.yaml with "enabled: true".\n`,
+      errors.length > 0
+        ? `${errors.length} m365 account(s) have invalid settings — fix or remove them, then re-run.\n`
+        : `No enabled m365 accounts found — add ${accountsDirDisplayPath()}/<name>.yaml with "enabled: true".\n`,
     );
     return 1;
   }
@@ -131,8 +138,9 @@ async function authenticateAll(adapter: M365AuthAdapter): Promise<number> {
       else process.stderr.write(`${outcome.line}\n`);
     },
   );
-  if (failures > 0) {
-    process.stderr.write(`${failures} of ${accounts.length} m365 account(s) failed.\n`);
+  const totalFailureCount = failures + errors.length;
+  if (totalFailureCount > 0) {
+    process.stderr.write(`${totalFailureCount} of ${accounts.length + errors.length} m365 account(s) failed.\n`);
     return 1;
   }
   return 0;

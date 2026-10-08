@@ -16,4 +16,5 @@ export type {
   AccountSettingsOptions,
   AccountSettingsReader,
   M365AccountSettings,
+  M365AccountsListing,
 } from "./m365/accountSettings.js";

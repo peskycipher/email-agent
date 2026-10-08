@@ -83,19 +83,27 @@ test("rejects an invalid account name before any filesystem lookup", async () =>
   expect((error as AccountSettingsError).code).toBe("INVALID_ACCOUNT_NAME");
 });
 
-test("listEnabledAccounts keeps only enabled, valid entries", async () => {
+test("listEnabledAccounts keeps only enabled, valid entries and reports the invalid one", async () => {
   await writeAccount("a", yamlFor("a"));
   await writeAccount("b", yamlFor("b", false));
   await writeAccount("c", "name: [unclosed");
   await writeFile(join(dir(), "notes.txt"), "ignore me", "utf8");
 
-  const enabled = await listEnabledAccounts({ configDir });
+  const { accounts, errors } = await listEnabledAccounts({ configDir });
 
-  expect(enabled.map((account) => account.name)).toEqual(["a"]);
+  expect(accounts.map((account) => account.name)).toEqual(["a"]);
+  expect(errors.map((error) => error.accountName)).toEqual(["c"]);
 });
 
 test("listEnabledAccounts returns empty when the directory is missing", async () => {
   await rm(dir(), { recursive: true, force: true });
 
-  expect(await listEnabledAccounts({ configDir })).toEqual([]);
+  expect(await listEnabledAccounts({ configDir })).toEqual({ accounts: [], errors: [] });
+});
+
+test("listEnabledAccounts propagates a non-ENOENT readdir failure", async () => {
+  await rm(dir(), { recursive: true, force: true });
+  await writeFile(dir(), "not a directory", "utf8");
+
+  await expect(listEnabledAccounts({ configDir })).rejects.toBeInstanceOf(Error);
 });

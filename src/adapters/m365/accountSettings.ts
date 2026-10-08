@@ -85,11 +85,18 @@ export async function readAccountSettings(
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
-  } catch {
+  } catch (error) {
+    if (isEnoent(error)) {
+      throw new AccountSettingsError(
+        "SETTINGS_NOT_FOUND",
+        accountName,
+        `No settings for account "${accountName}" — create ${accountSettingsDisplayPath(accountName)}.`,
+      );
+    }
     throw new AccountSettingsError(
-      "SETTINGS_NOT_FOUND",
+      "SETTINGS_INVALID",
       accountName,
-      `No settings for account "${accountName}" — create ${accountSettingsDisplayPath(accountName)}.`,
+      `Settings for account "${accountName}" could not be read (${accountSettingsDisplayPath(accountName)}).`,
     );
   }
   let parsed: unknown;
@@ -121,34 +128,48 @@ export async function readAccountSettings(
   return result.data;
 }
 
+export interface M365AccountsListing {
+  accounts: M365AccountSettings[];
+  errors: AccountSettingsError[];
+}
+
 /**
  * The only implementable `--account all` source until `Config.m365.accounts[]`
  * lands (Epic 11): enumerate `accounts/m365/*.yaml`, skip names that fail the
- * account-name rule, and keep `enabled: true` entries.
+ * account-name rule, keep `enabled: true` entries, and report — not swallow —
+ * any file whose settings cannot be read or validated (I/O matrix row 8).
  */
 export async function listEnabledAccounts(
   options: AccountSettingsOptions = {},
-): Promise<M365AccountSettings[]> {
+): Promise<M365AccountsListing> {
   let entries: string[];
   try {
     entries = await readdir(accountsDir(options));
   } catch (error) {
     // A missing directory means "no accounts yet"; anything else is a real failure.
-    if (isEnoent(error)) return [];
+    if (isEnoent(error)) return { accounts: [], errors: [] };
     throw error;
   }
-  const enabled: M365AccountSettings[] = [];
+  const accounts: M365AccountSettings[] = [];
+  const errors: AccountSettingsError[] = [];
   for (const entry of entries.sort()) {
     if (!entry.endsWith(".yaml")) continue;
     const accountName = entry.slice(0, -".yaml".length);
     if (!ACCOUNT_NAME_PATTERN.test(accountName)) continue;
     try {
       const settings = await readAccountSettings(accountName, options);
-      if (settings.enabled) enabled.push(settings);
-    } catch {
-      // A malformed settings file must not abort the whole `--account all` run (I/O matrix row 8).
-      continue;
+      if (settings.enabled) accounts.push(settings);
+    } catch (error) {
+      errors.push(
+        error instanceof AccountSettingsError
+          ? error
+          : new AccountSettingsError(
+              "SETTINGS_INVALID",
+              accountName,
+              `Settings for account "${accountName}" could not be read.`,
+            ),
+      );
     }
   }
-  return enabled;
+  return { accounts, errors };
 }

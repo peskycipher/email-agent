@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { authenticateAccounts, type AccountAuthOutcome } from "../../src/cli/commands/auth.js";
+import { authenticateAccounts, runAuth, type AccountAuthOutcome } from "../../src/cli/commands/auth.js";
 
 test("a failing account does not abort a multi-account run (I/O matrix row 8)", async () => {
   const attempted: string[] = [];
@@ -23,4 +23,9 @@ test("a failing account does not abort a multi-account run (I/O matrix row 8)", 
     ["c", true],
   ]);
   expect(outcomes[1]?.line).toContain("FAILED");
+});
+
+test("runAuth rejects an unknown provider", async () => {
+  const code = await runAuth({ provider: "gmail", account: "work" });
+  expect(code).toBe(1);
 });
