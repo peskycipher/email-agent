@@ -49,11 +49,11 @@ export interface AuthCommandRuntime {
 }
 
 /** Prints one actionable line — never a stack trace or raw payload (AD-4). */
-function errorLine(error: unknown): string {
+export function errorLine(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function createPassphrasePrompt(): () => Promise<string | undefined> {
+export function createPassphrasePrompt(): () => Promise<string | undefined> {
   let cached: string | undefined;
   return async () => {
     if (cached) return cached;

@@ -10,6 +10,9 @@ export type {
   M365AuthErrorCode,
 } from "./m365/M365AuthAdapter.js";
 
+export { M365Adapter, M365AdapterError } from "./m365/M365Adapter.js";
+export type { M365AdapterDeps, M365AdapterErrorCode } from "./m365/M365Adapter.js";
+
 export { accountSettingsDisplayPath, accountsDir, accountsDirDisplayPath, listEnabledAccounts, readAccountSettings, AccountSettingsError } from "./m365/accountSettings.js";
 export type {
   AccountSettingsErrorCode,
