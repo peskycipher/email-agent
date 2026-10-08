@@ -86,6 +86,7 @@ context:
 - 2026-10-08 — AC 6 clarified: `src/core/skill/.gitkeep` is retained because Story 1.2 creates no skill files (Epic 6 owns that directory); only `src/core/{ports,dto}/.gitkeep` were removed.
 - 2026-10-08 — Judgment calls where the AC is silent (flagged for Story 1.3 / review): `ModelConfig.provider` is the inline union `"jev" | "openai" | "anthropic" | "custom"`; `MessageDTO.receivedDateTime: string` (ISO 8601) and `TokenSet.expiresAt: number` (epoch ms) follow the architecture diagrams, while `FetchOpts.since?: Date` is AC-verbatim `Date`; `Config.taxonomyOverrides?: Partial<LabelDef>[]` (the AC left the element shape open); `JsonSchema` is minimal (`type`/`properties`/`items`/`required`).
 - 2026-10-08 — Review round 1 patches applied by the parent (the step-03 run was not resumable): (BH-1/VG-1/BH-6) the AC-3 type test was orphaned — vitest's default include missed `.type-test.ts` and no tsconfig includes `tests/` — so a `typecheck` script was added to `package.json` and folded into `test` (`vitest run && bun run typecheck`), and `ports.type-test.ts` now covers `TokenPort.get/set/delete`, `MailPort.writeLabels/ensureCategories` and `FetchOpts.accountId`; verified by a regression control (optional `accountId` → typecheck fails). (BH-2) `Config.taxonomyOverrides` element type tightened from `Partial<LabelDef>` to `Pick<LabelDef, "name"> & Partial<Omit<LabelDef, "name">>` so the merge key is required.
+- 2026-10-08 — Independent `bmad-code-review` pass (4 layers) applied both patches: `ports.type-test.ts` now passes `undefined` where `accountId` is omitted (so each `@ts-expect-error` isolates that parameter) and imports every contract name from `core/index.js`; both regression controls fail the typecheck as intended.
 
 ## Spec Change Log
 
@@ -124,3 +125,20 @@ Loopback check: no `intent_gap` or `bad_spec` entry survived triage, so there is
 - `git ls-files src/core` — seven `ports/*.ts`, referenced `dto/*.ts`, barrel; no `.gitkeep`.
 - Negative: drop `accountId` from a port method and run `bun run build` — expect a failure, then revert.
 - `bun run typecheck` (also run by `bun run test`) — exit 0; its `@ts-expect-error` cases prove every account-touching member rejects a missing `accountId`. Regression control: making `accountId` optional makes typecheck fail with `Unused '@ts-expect-error' directive`.
+
+### Review Findings
+
+Code review of `e54d23b..58c120a` (2026-10-08), layers: Blind Hunter, Edge Case Hunter, Verification Gap, Acceptance Auditor.
+
+- [x] [Review][Patch] AC-3 type test overclaims its coverage — `set` / `writeLabels` / `ensureCategories` cases do not isolate `accountId` [tests/core/ports.type-test.ts:18,22,24] — verified: widening `writeLabels(accountId: string)` to `string | undefined` leaves `bun run typecheck` green, because those calls supply a valid `accountId` and fail on a different missing/mistyped argument. Fix: supply the remaining args and pass `undefined` as the omitted `accountId` (add a `declare const tokens: TokenSet` fixture) so the only error is `undefined` not assignable to `string`.
+- [x] [Review][Patch] Barrel type re-exports are unverified [src/core/index.ts:1-14] — no test imports any contract name from `core/index.js`, so dropping a re-export (AC-4) ships with `build`/`lint`/`test` all green. Fix: import the contract names from `../../src/core/index.js` in `ports.type-test.ts` and `void`-use each.
+- [x] [Review][Defer] `TokenSet.expiresAt` (epoch ms) is a third point-in-time representation the deferred item does not name [src/core/dto/TokenSet.ts:6] — deferred: documentation completeness; settle it with the existing `receivedDateTime`/`since` convention item.
+- [x] [Review][Defer] `ModelConfig.provider` ships `"anthropic" | "custom"` beyond the providers AD-3/epics name, with no deferred anchor [src/core/dto/ModelConfig.ts:2] — deferred: ratify or narrow the union in Story 1.3 (the analogous `JsonSchema` judgment is already deferred).
+- [x] [Review][Defer] AD-2's single `sender` field vs Story 1.3's `senderEmail`/`senderName` stays an untracked planning inconsistency [ARCHITECTURE-SPINE.md AD-2] — deferred: pre-existing planning-artifact drift; reconcile in a planning pass (the code correctly follows Story 1.3 AC).
+- [x] [Review][Defer] Non-`accountId` contract shapes have no pin — a still-valid-TypeScript drift (e.g. `SchedulerPort.runInterval` returning `Promise<void>`) passes every check [src/core/ports/SchedulerPort.ts:3; src/core/ports/ModelPort.ts:11; src/core/ports/ConfigPort.ts:4] — deferred: no consumers exist yet; Story 1.3 / Epic 5 compilation will exercise these signatures.
+
+#### Rejected
+
+- `low` — spec frontmatter `status: 'done'` vs `sprint-status.yaml` `review` disagree [spec-1-2-…md:6] — the build workflow's step-05 prescribes exactly this pairing, and this review's final step reconciles it; not worth a change.
+- `low` — `LogPort` renames the AC/AD-7 first parameter `info` to `message` [src/core/ports/LogPort.ts:6-9] — the rename is already recorded as an approved judgment call in this spec's Implementation Notes and is type-compatible; its only fix edits the spec under review.
+- `low` — `typecheck` hardcodes flags that also live in `tsconfig.base.json` [package.json:15] — drift is speculative, and the fix is a new `tsconfig.test.json`, more surface than a direct correction.

@@ -32,3 +32,10 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-2-port-interfaces-definition-per-account.md`
   summary: Entry 5's remainder still stands — the new `bun run typecheck` script type-checks one fixture, not all of `tests/`, and no tsconfig covers `tests/`.
   evidence: Story 1.2 added `"typecheck": "tsc --noEmit ... --ignoreConfig tests/core/ports.type-test.ts"` and folded it into `test`, which closes the AC-3 guard only. `tests/core/scaffold.test.ts` and the `tsc` project-reference graph remain unasserted; widening `tsconfig.core.json`'s `rootDir` would still pass `build`/`lint`/`test`.
+
+## Deferred from: code review of spec-1-2-port-interfaces-definition-per-account.md (2026-10-08, independent pass)
+
+- `TokenSet.expiresAt` (epoch ms) is a third point-in-time representation the point-in-time convention item above does not name (`src/core/dto/TokenSet.ts:6`); settle or document it alongside `receivedDateTime`/`since` before Epic 5's mappers land.
+- `ModelConfig.provider` ships `"anthropic" | "custom"` beyond the providers AD-3/epics name (`src/core/dto/ModelConfig.ts:2`); ratify or narrow the union in Story 1.3.
+- AD-2's single `sender` field vs Story 1.3's `senderEmail`/`senderName` remains an untracked planning inconsistency (`ARCHITECTURE-SPINE.md` AD-2); the code correctly follows Story 1.3 AC — reconcile the spine in a planning pass.
+- Non-`accountId` contract shapes are unpinned: a valid-TypeScript drift such as `SchedulerPort.runInterval` returning `Promise<void>`, or any `TokenPort`/`MailPort`/`ConfigPort` signature detail beyond parameter requirement, passes `build`/`lint`/`test` (`src/core/ports/SchedulerPort.ts:3`; `src/core/ports/ModelPort.ts:11`; `src/core/ports/ConfigPort.ts:4`). No consumers exist yet; Story 1.3 / Epic 5 compilation will exercise them — pin the shapes then.
