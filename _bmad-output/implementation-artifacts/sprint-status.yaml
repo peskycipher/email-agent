@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-08-2026 10:25
-last_updated: 10-09-2026 10:10
+last_updated: 10-09-2026 10:24
 project: email-agent
 project_key: NOKEY
 tracking_system: file-system
@@ -53,7 +53,7 @@ development_status:
   4-1-taxonomy-definition-user-overrides: done
   4-2-m365-master-category-sync-multi-account: done
   4-3-gmail-label-sync-multi-account: done
-  epic-4-retrospective: optional
+  epic-4-retrospective: done
 
   epic-5: backlog
   5-1-m365-backfill-message-fetch-multi-account: backlog
@@ -116,3 +116,63 @@ action_items:
     owner: "Loki"
     status: open
     ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-08.md"
+  - id: "epic-4-retro-item-4-guard-a-mistyped-top-level-config-yaml-k"
+    epic: 4
+    action: "Guard a mistyped top-level config.yaml key so it errors with a typed
+      diagnostic instead of silently ignoring every taxonomy override"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-09.md"
+  - id: "epic-4-retro-item-5-gate-the-account-all-no-accounts-hint-on"
+    epic: 4
+    action: "Gate the --account all no-accounts hint on failures === 0 to mirror the
+      named-account path, and emit a per-provider summary line when a listing fails"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-09.md"
+  - id: "epic-4-retro-item-6-pin-the-named-account-provider-listing-t"
+    epic: 4
+    action: "Pin the named-account provider-listing-throw branch in tests/cli/sync-categories.test.ts
+      with a test mirroring the existing --account all one"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-09.md"
+  - id: "epic-4-retro-item-7-document-and-pin-the-gmail-label-cache-f"
+    epic: 4
+    action: "Document and pin the Gmail label-cache full-taxonomy precondition, or
+      merge the snapshot into any prior one, so a partial ensureCategories call cannot
+      silently shrink the name-to-id map"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-09.md"
+  - id: "epic-4-retro-item-8-align-the-two-temporary-reader-diagnosti"
+    epic: 4
+    action: "Align the two temporary-reader diagnostics: report a scalar config.yaml
+      as not a mapping, and derive the no-accounts hint path from the resolved configDir"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-09.md"
+  - id: "epic-4-retro-item-9-reconcile-spec-4-3-frozen-boundaries-cla"
+    epic: 4
+    action: "Reconcile spec-4-3 frozen Boundaries clause (ensureCategories also returns
+      the name-to-id map) with the ruling that MailPort Promise of void wins and labelIdsFor
+      is the access path"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-09.md"
+  - id: "epic-4-retro-item-10-process-lesson-a-story-that-generalizes"
+    epic: 4
+    action: "Process lesson: a story that generalizes a seam from N to N plus 1 providers
+      must re-run the existing provider paths through the generalized code in its
+      IO matrix (the parity row)"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-09.md"
+  - id: "epic-4-retro-item-11-process-lesson-epic-context-compilation"
+    epic: 4
+    action: "Process lesson: epic-context compilation should name the reusable helper
+      at file:line when it records cross-story reuse, so the next story reuses instead
+      of re-deriving it"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-09.md"
