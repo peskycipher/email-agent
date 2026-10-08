@@ -9,30 +9,31 @@ import {
 } from "../config/perAccountSettings.js";
 
 /**
- * Temporary per-account reader (Story 2.1 decision 1): Epic 11 replaces it with
- * `ConfigLoader`/DI over `Config.m365.accounts[]`. The reader machine now lives in
- * `adapters/config/perAccountSettings.ts` (Story 3.1), shared with Gmail.
+ * Temporary per-account reader for `--account all` (Story 2.1 decision 1, applied to
+ * Gmail in Story 3.1): Epic 11 replaces it with `ConfigLoader`/DI over
+ * `Config.gmail.accounts[]`. Validates only the four auth keys; the Epic-5 keys
+ * (`labels`, `batchSize`) live in the same file and are tolerated.
  */
 const accountSettingsSchema = z.object({
   name: z.string().regex(ACCOUNT_NAME_PATTERN),
   enabled: z.boolean(),
-  tenantId: z.string().min(1),
   clientId: z.string().min(1),
+  clientSecretEnvVar: z.string().min(1),
 });
 
-export type M365AccountSettings = z.infer<typeof accountSettingsSchema>;
+export type GmailAccountSettings = z.infer<typeof accountSettingsSchema>;
 
-export type AccountSettingsReader = PerAccountSettingsReader<M365AccountSettings>;
+export type AccountSettingsReader = PerAccountSettingsReader<GmailAccountSettings>;
 export type AccountSettingsOptions = PerAccountSettingsOptions;
-export type M365AccountsListing = PerAccountSettingsListing<M365AccountSettings>;
+export type GmailAccountsListing = PerAccountSettingsListing<GmailAccountSettings>;
 
 export { AccountSettingsError } from "../config/perAccountSettings.js";
 export type { AccountSettingsErrorCode };
 
 const settings = createPerAccountSettings({
-  provider: "m365",
+  provider: "gmail",
   schema: accountSettingsSchema,
-  displayDir: "~/.config/email-classify/accounts/m365",
+  displayDir: "~/.config/email-classify/accounts/gmail",
 });
 
 export const {

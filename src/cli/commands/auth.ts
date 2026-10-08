@@ -1,15 +1,51 @@
 import {
-  listEnabledAccounts,
-  readAccountSettings,
-  accountsDirDisplayPath,
-  type M365AccountsListing,
+  listEnabledAccounts as listM365Accounts,
+  readAccountSettings as readM365AccountSettings,
+  accountsDirDisplayPath as m365AccountsDirDisplayPath,
 } from "../../adapters/m365/accountSettings.js";
 import { M365AuthAdapter, type FetchLike } from "../../adapters/m365/M365AuthAdapter.js";
+import {
+  listEnabledAccounts as listGmailAccounts,
+  readAccountSettings as readGmailAccountSettings,
+  accountsDirDisplayPath as gmailAccountsDirDisplayPath,
+} from "../../adapters/gmail/accountSettings.js";
+import {
+  authorizeWithLoopback,
+  GmailAuthAdapter,
+  type AuthorizeFn,
+} from "../../adapters/gmail/GmailAuthAdapter.js";
 import { KeychainTokenStore } from "../../adapters/token/KeychainTokenStore.js";
+import type { TokenPort } from "../../core/ports/TokenPort.js";
+
+export type AuthProvider = "m365" | "gmail";
 
 export interface AuthCommandOptions {
   provider: string;
   account: string;
+}
+
+/** The provider-specific method the `authenticate*` helpers need; both auth adapters implement it. */
+export interface Authenticator {
+  authenticate(accountName: string): Promise<{ scopes: string[] }>;
+}
+
+/** The `--account all` source shape, narrowed to what the command renders. */
+export interface AccountsListingLike {
+  accounts: Array<{ name: string }>;
+  errors: Array<{ accountName: string; message: string }>;
+}
+
+/**
+ * Test seam: lets a harness drive `runAuth` with a mocked network, a canned
+ * authorization code and an in-memory token store. Production passes nothing.
+ */
+export interface AuthCommandRuntime {
+  fetchFn?: FetchLike;
+  authorize?: AuthorizeFn;
+  tokenStore?: TokenPort;
+  env?: Record<string, string | undefined>;
+  /** Root of `~/.config/email-classify` for the temporary per-account readers. */
+  configDir?: string;
 }
 
 /** Prints one actionable line — never a stack trace or raw payload (AD-4). */
@@ -70,13 +106,13 @@ function readHiddenLine(prompt: string): Promise<string | undefined> {
   });
 }
 
-async function authenticateOne(adapter: M365AuthAdapter, accountName: string): Promise<number> {
+async function authenticateOne(adapter: Authenticator, provider: AuthProvider, accountName: string): Promise<number> {
   try {
     const tokens = await adapter.authenticate(accountName);
-    process.stdout.write(`m365 ${accountName}: authenticated (scopes: ${tokens.scopes.join(", ")})\n`);
+    process.stdout.write(`${provider} ${accountName}: authenticated (scopes: ${tokens.scopes.join(", ")})\n`);
     return 0;
   } catch (error) {
-    process.stderr.write(`m365 ${accountName}: ${errorLine(error)}\n`);
+    process.stderr.write(`${provider} ${accountName}: ${errorLine(error)}\n`);
     return 1;
   }
 }
@@ -92,7 +128,8 @@ export interface AccountAuthOutcome {
  * (I/O matrix row 8). Returns the failure count so the CLI can aggregate.
  */
 export async function authenticateAccounts(
-  adapter: { authenticate(accountName: string): Promise<{ scopes: string[] }> },
+  adapter: Authenticator,
+  provider: AuthProvider,
   accountNames: string[],
   report: (outcome: AccountAuthOutcome) => void,
 ): Promise<number> {
@@ -100,38 +137,44 @@ export async function authenticateAccounts(
   for (const account of accountNames) {
     try {
       const tokens = await adapter.authenticate(account);
-      report({ account, ok: true, line: `m365 ${account}: authenticated (scopes: ${tokens.scopes.join(", ")})` });
+      report({ account, ok: true, line: `${provider} ${account}: authenticated (scopes: ${tokens.scopes.join(", ")})` });
     } catch (error) {
       failures += 1;
-      report({ account, ok: false, line: `m365 ${account}: FAILED — ${errorLine(error)}` });
+      report({ account, ok: false, line: `${provider} ${account}: FAILED — ${errorLine(error)}` });
     }
   }
   return failures;
 }
 
-async function authenticateAll(adapter: M365AuthAdapter): Promise<number> {
-  let listing: M365AccountsListing;
+async function authenticateAll(
+  adapter: Authenticator,
+  provider: AuthProvider,
+  listEnabledAccounts: () => Promise<AccountsListingLike>,
+  accountsDirDisplayPath: string,
+): Promise<number> {
+  let listing: AccountsListingLike;
   try {
     listing = await listEnabledAccounts();
   } catch (error) {
-    process.stderr.write(`m365: ${errorLine(error)}\n`);
+    process.stderr.write(`${provider}: ${errorLine(error)}\n`);
     return 1;
   }
   const { accounts, errors } = listing;
   for (const error of errors) {
-    process.stderr.write(`m365 ${error.accountName}: ${error.message}\n`);
+    process.stderr.write(`${provider} ${error.accountName}: ${error.message}\n`);
   }
   if (accounts.length === 0) {
     process.stderr.write(
       errors.length > 0
-        ? `${errors.length} m365 account(s) have invalid settings — fix or remove them, then re-run.\n`
-        : `No enabled m365 accounts found — add ${accountsDirDisplayPath()}/<name>.yaml with "enabled: true".\n`,
+        ? `${errors.length} ${provider} account(s) have invalid settings — fix or remove them, then re-run.\n`
+        : `No enabled ${provider} accounts found — add ${accountsDirDisplayPath}/<name>.yaml with "enabled: true".\n`,
     );
     return 1;
   }
 
   const failures = await authenticateAccounts(
     adapter,
+    provider,
     accounts.map((account) => account.name),
     (outcome) => {
       if (outcome.ok) process.stdout.write(`${outcome.line}\n`);
@@ -140,31 +183,49 @@ async function authenticateAll(adapter: M365AuthAdapter): Promise<number> {
   );
   const totalFailureCount = failures + errors.length;
   if (totalFailureCount > 0) {
-    process.stderr.write(`${totalFailureCount} of ${accounts.length + errors.length} m365 account(s) failed.\n`);
+    process.stderr.write(`${totalFailureCount} of ${accounts.length + errors.length} ${provider} account(s) failed.\n`);
     return 1;
   }
   return 0;
 }
 
-export async function runAuth(options: AuthCommandOptions): Promise<number> {
-  if (options.provider !== "m365") {
-    process.stderr.write(`Unknown auth provider "${options.provider}" — only "m365" is supported.\n`);
+export async function runAuth(options: AuthCommandOptions, runtime: AuthCommandRuntime = {}): Promise<number> {
+  if (options.provider !== "m365" && options.provider !== "gmail") {
+    process.stderr.write(
+      `Unknown auth provider "${options.provider}" — supported providers are "m365" and "gmail".\n`,
+    );
     return 1;
   }
+  const provider = options.provider;
+  const configDir = runtime.configDir === undefined ? {} : { configDir: runtime.configDir };
+  const fetchFn = runtime.fetchFn ?? (globalThis as unknown as { fetch: FetchLike }).fetch;
+  const tokenStore =
+    runtime.tokenStore ?? new KeychainTokenStore({ promptPassphrase: createPassphrasePrompt(), ...configDir });
 
-  const fetchFn = (globalThis as unknown as { fetch: FetchLike }).fetch;
-  const tokenStore = new KeychainTokenStore({ promptPassphrase: createPassphrasePrompt() });
-  const adapter = new M365AuthAdapter({
-    fetchFn,
-    tokenStore,
-    accountSettings: { read: (accountName) => readAccountSettings(accountName) },
-    onDeviceCode: ({ accountName, userCode, verificationUri }) => {
-      process.stdout.write(
-        `Sign in to m365 account "${accountName}" at ${verificationUri} with code ${userCode}\n`,
-      );
-    },
-  });
+  const adapter =
+    provider === "gmail"
+      ? new GmailAuthAdapter({
+          fetchFn,
+          tokenStore,
+          accountSettings: { read: (accountName) => readGmailAccountSettings(accountName, configDir) },
+          authorize: runtime.authorize ?? authorizeWithLoopback,
+          env: runtime.env ?? process.env,
+        })
+      : new M365AuthAdapter({
+          fetchFn,
+          tokenStore,
+          accountSettings: { read: (accountName) => readM365AccountSettings(accountName, configDir) },
+          onDeviceCode: ({ accountName, userCode, verificationUri }) => {
+            process.stdout.write(
+              `Sign in to m365 account "${accountName}" at ${verificationUri} with code ${userCode}\n`,
+            );
+          },
+        });
 
-  if (options.account === "all") return authenticateAll(adapter);
-  return authenticateOne(adapter, options.account);
+  if (options.account === "all") {
+    return provider === "gmail"
+      ? authenticateAll(adapter, "gmail", () => listGmailAccounts(configDir), gmailAccountsDirDisplayPath())
+      : authenticateAll(adapter, "m365", () => listM365Accounts(configDir), m365AccountsDirDisplayPath());
+  }
+  return authenticateOne(adapter, provider, options.account);
 }

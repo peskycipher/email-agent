@@ -18,3 +18,15 @@ export type {
   M365AccountSettings,
   M365AccountsListing,
 } from "./m365/accountSettings.js";
+
+export { GmailAuthAdapter, GmailAuthError, GmailConsentError, GMAIL_SCOPES, authorizeWithLoopback } from "./gmail/GmailAuthAdapter.js";
+export type {
+  AuthorizeFn,
+  GmailAuthAdapterDeps,
+  GmailAuthErrorCode,
+  GmailConsentErrorCode,
+  LoopbackAuthorizeOptions,
+} from "./gmail/GmailAuthAdapter.js";
+
+export * as gmailAccountSettings from "./gmail/accountSettings.js";
+export type { GmailAccountSettings, GmailAccountsListing } from "./gmail/accountSettings.js";
