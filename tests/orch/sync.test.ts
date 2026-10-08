@@ -55,7 +55,27 @@ test("syncs every account with the taxonomy and returns 0 when all succeed", asy
     ["info", "work"],
     ["info", "home"],
   ]);
-  expect(log.entries[0]?.message).toContain("2");
+  expect(log.entries[0]?.message).toBe("Ensured 2 categories.");
+});
+
+test("a provider noun names what was ensured, without changing the default", async () => {
+  const mailPort: CategorySyncTarget = {
+    async ensureCategories() {},
+  };
+  const log = recordingLogPort();
+
+  const failures = await syncCategories({
+    accounts: ["personal"],
+    labels: LABELS,
+    mailPort,
+    logPort: log.logPort,
+    noun: "labels",
+  });
+
+  expect(failures).toBe(0);
+  expect(log.entries).toEqual([
+    { level: "info", message: "Ensured 2 labels.", context: { accountId: "personal" } },
+  ]);
 });
 
 test("a failing account is logged with its accountId and never aborts the rest (ISOLATION)", async () => {

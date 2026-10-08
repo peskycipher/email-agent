@@ -168,7 +168,11 @@ export class M365Adapter {
     code: M365AdapterErrorCode,
   ): Promise<FetchResponseLike> {
     try {
-      return await this.fetchFn(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      return await this.fetchFn(url, {
+        ...init,
+        // Never override a caller-supplied signal; bound the request only when there is none.
+        signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
     } catch {
       // The thrown value can carry a stack and a raw cause; the typed error carries neither.
       throw new M365AdapterError(

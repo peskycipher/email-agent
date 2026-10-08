@@ -12,6 +12,8 @@ export interface SyncCategoriesOptions {
   labels: LabelDef[];
   mailPort: CategorySyncTarget;
   logPort: LogPort;
+  /** What this provider calls the things it ensures; defaults to M365's "categories" (Story 4.3 passes "labels"). */
+  noun?: string;
 }
 
 /** Renders one actionable line — never a stack trace or a raw payload (AD-4). */
@@ -26,12 +28,12 @@ function errorLine(error: unknown): string {
  * Story 4.3 reuses this loop for Gmail labels.
  */
 export async function syncCategories(options: SyncCategoriesOptions): Promise<number> {
-  const { accounts, labels, mailPort, logPort } = options;
+  const { accounts, labels, mailPort, logPort, noun = "categories" } = options;
   let failures = 0;
   for (const accountId of accounts) {
     try {
       await mailPort.ensureCategories(accountId, labels);
-      logPort.info(`Ensured ${labels.length} categories.`, { accountId });
+      logPort.info(`Ensured ${labels.length} ${noun}.`, { accountId });
     } catch (error) {
       failures += 1;
       logPort.error(errorLine(error), { accountId });

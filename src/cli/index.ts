@@ -13,7 +13,7 @@ program
     "--account <name|all>",
     "account to act on (a per-account settings name, or 'all' for every enabled account; defaults to 'all' for --sync-categories)",
   )
-  .option("--sync-categories", "ensure the taxonomy's labels exist as M365 master categories")
+  .option("--sync-categories", "ensure the taxonomy's labels exist as M365 master categories and Gmail labels")
   .addHelpText(
     "after",
     "\nExamples:\n  $ email-classify --auth m365 --account work\n  $ email-classify --auth m365 --account all\n  $ email-classify --auth gmail --account personal\n  $ email-classify --auth gmail --account all\n  $ email-classify --sync-categories --account all\n",
