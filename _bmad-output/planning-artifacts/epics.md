@@ -68,7 +68,7 @@ NFR2: Hexagonal architecture - Skill Core (classification) is pure function with
 
 NFR3: Single shared MessageDTO - All adapters map to/from one canonical shape (carries `accountId`); prevents translation drift.
 
-NFR4: Dependency direction enforced - core/ (zero deps) ← adapters/ (depend on core ports) ← cli/ (wires all). Enforced via tsconfig project references or eslint.
+NFR4: Dependency direction enforced - core/ (zero deps) ← adapters/ (depend on core ports) ← cli/ (wires all). Enforced via tsconfig project references and the `no-restricted-imports` rule in `.oxlintrc.json` (`bun run lint`).
 
 NFR5: Multi-label by default - Classification returns a set of labels from the (possibly user-edited) taxonomy; empty set valid.
 
@@ -97,7 +97,7 @@ NFR16: User-configurable taxonomy - The 11-label taxonomy is the default but use
 ### Additional Requirements
 
 - Hexagonal (Ports & Adapters) paradigm with Skill Core as pure function and adapters for M365, Gmail, Model (Jev/OpenAI), Tokens, Idempotency, Scheduling, Logging, Config
-- Stack: Node.js 20 LTS, TypeScript 5.5.x, @typesafe-ai/sdk 0.6.0, @microsoft/microsoft-graph-client 3.0.7, googleapis 184.0.0, better-sqlite3 9.6.x, zod 3.23.x, pino 9.2.x, keytar 7.9.x
+- Stack: Node.js 20 LTS, TypeScript 7.x, @typesafe-ai/sdk 0.6.0, @microsoft/microsoft-graph-client 3.0.7, googleapis 184.0.0, better-sqlite3 9.6.x, zod 4.6.5, pino 10.4.0, keytar 7.9.x
 - Dependency direction: core/ (zero deps) ← adapters/ (depend on core ports) ← cli/ (wires all)
 - 10 Architecture Decisions (AD-1 through AD-10) covering: pure core function, shared MessageDTO (with `accountId`), ModelPort, TokenPort (with `accountId`), IdempotencyPort (key prefix `accountId`), SchedulerPort, LogPort, MailPort (with `accountId`), frozen Config, dependency direction
 - Source tree structure: core/ports, core/dto, core/skill, adapters/m365, adapters/gmail, adapters/model, adapters/token, adapters/idempotency, adapters/scheduler, adapters/logger, adapters/config, cli/commands, cli/di, orch/
@@ -229,12 +229,12 @@ So that **the codebase has a solid foundation with dependency direction enforced
 
 **Given** the project is created
 **When** the project is initialized
-**Then** it uses Node.js 20 LTS and TypeScript 5.5.x
+**Then** it uses Node.js 20 LTS and TypeScript 7.x
 **And** dependencies installed: @typesafe-ai/sdk, @microsoft/microsoft-graph-client, @microsoft/microsoft-graph-types, googleapis, better-sqlite3, zod, js-yaml, commander, pino, pino-roll, keytar, age
-**And** dev dependencies: typescript, @types/node, @types/better-sqlite3, @types/js-yaml, @types/keytar, jest, ts-jest, @types/jest, eslint, @typescript-eslint/eslint-plugin, @typescript-eslint/parser
+**And** dev dependencies: typescript, @types/node, @types/better-sqlite3, @types/js-yaml, @types/keytar, vitest, oxlint
 **And** directory structure created: core/ports, core/dto, core/skill, adapters/m365, adapters/gmail, adapters/model, adapters/token, adapters/idempotency, adapters/scheduler, adapters/logger, adapters/config, cli/commands, cli/di, orch/, tests/{core,adapters,orch}
 **And** tsconfig.json with project references enforcing: core (zero deps) ← adapters (depend on core) ← cli (depends on all)
-**And** eslint rule `no-restricted-imports` prevents core from importing adapters or cli, and additionally prevents files under `tests/adapters/**` from importing real adapter SDKs (`@microsoft/microsoft-graph-client`, `googleapis`, `@typesafe-ai/sdk`, `openai`) so per-adapter tests use stdlib-only mocks
+**And** lint rule `no-restricted-imports` (`oxlint`, configured in `.oxlintrc.json`, run by `bun run lint`) prevents core from importing adapters, cli or orch, and additionally prevents files under `tests/adapters/**` from importing real adapter SDKs (`@microsoft/microsoft-graph-client`, `googleapis`, `@typesafe-ai/sdk`, `openai`) so per-adapter tests use stdlib-only mocks
 
 ### Story 1.2: Port Interfaces Definition (per-account)
 

@@ -16,12 +16,12 @@ Stand up the whole repo skeleton and the contract layer that every later epic bu
 
 - Local-first, zero-infra: v1 runs on the user's machine; no serverless, Docker, or always-on server. Foundation must not introduce cloud dependencies.
 - Single canonical message shape across all adapters (prevents translation drift); every account-scoped DTO and port method carries `accountId`.
-- Dependency direction is a hard rule: `core/` has zero external/library dependencies; `adapters/` depend only on `core/ports`; `cli/` depends on core + adapters. Enforce via TypeScript project references and/or eslint `no-restricted-imports`.
+- Dependency direction is a hard rule: `core/` has zero external/library dependencies; `adapters/` depend only on `core/ports`; `cli/` depends on core + adapters. Enforce via TypeScript project references and the `no-restricted-imports` rule in `.oxlintrc.json`, run by `bun run lint`.
 - The classification core must remain a pure function: no I/O, no side effects, no external imports.
 - All DTOs get explicit TypeScript types; all runtime validation uses Zod schemas.
 - Backfill/cron idempotency and multi-account operation are first-class from the start: the idempotency key format and per-account `accountId` threading are established here, since retconning them later is costly.
 - Token storage relies on OS keychain with an age-encrypted file fallback; no separate secrets manager is introduced.
-- Package/tooling baseline: Node.js 20 LTS, TypeScript 5.5.x, Jest + ts-jest, eslint with `@typescript-eslint`. `tests/` mirrors `core/`, `adapters/`, `orch/`, and per-adapter tests must not import real adapter SDKs (stdlib-only mocks).
+- Package/tooling baseline: Node.js 20 LTS (mise-pinned, resolved 20.20.2), TypeScript 7.0.2, vitest, oxlint (`.oxlintrc.json`, run by `bun run lint`). `eslint` and `@typescript-eslint/*` were removed on 2026-10-08 — no published `@typescript-eslint` accepts TypeScript 7 — so `oxlint` (which parses TypeScript itself and needs no TS API) is the linter. `tests/` mirrors `core/`, `adapters/`, `orch/`, and per-adapter tests must not import real adapter SDKs (stdlib-only mocks, enforced by `.oxlintrc.json`).
 
 ## Technical Decisions
 
@@ -31,9 +31,9 @@ Stand up the whole repo skeleton and the contract layer that every later epic bu
 - **DTOs (core/dto):** `MessageDTO` (`id`, `internetMessageId`, `subject`, `bodyPreview`, `senderEmail`, `senderName`, `receivedDateTime`, `existingLabels`, `source: "m365"|"gmail"`, `accountId`, `raw?`), plus `LabelSet`, `Taxonomy`, `LabelDef`, `ModelConfig`, `TokenSet`, `FetchOpts`, `Config`. `FetchOpts` carries `source`, `accountId`, `since?`, `batchSize?`, `folder?`.
 - **Config contract (established here, implemented in Epic 11):** `Config` exposes `m365.accounts`, `gmail.accounts`, `taxonomyOverrides`, `tokenFallback.passphraseEnvVar`, and a validated `accountName` regex `/^[a-z0-9][a-z0-9_-]{0,31}$/`. Config is loaded once at startup, Zod-validated, frozen, and passed via DI.
 - **DI wiring:** one adapter instantiated per enabled account (`MailPort`, `TokenPort`); shared singletons for `ModelPort`, `IdempotencyPort`, `SchedulerPort`, `LogPort`, `ConfigPort`.
-- **Stack pins:** `@typesafe-ai/sdk` 0.6.0, `@microsoft/microsoft-graph-client` 3.0.7, `@microsoft/microsoft-graph-types` 2.43.x, `googleapis` 184.0.0, `better-sqlite3` 9.6.x, `zod` 3.23.x, `js-yaml` 4.1.x, `commander` 12.1.x, `pino` 9.2.x, `pino-roll` 1.11.x, `keytar` 7.9.x, `age-encryption` for fallback.
+- **Stack pins:** `@typesafe-ai/sdk` 0.6.0, `@microsoft/microsoft-graph-client` 3.0.7, `@microsoft/microsoft-graph-types` 2.43.1, `googleapis` 184.0.0, `better-sqlite3` 9.6.0 (held — 12.x/13.x require `node-gyp`), `zod` 4.6.5, `js-yaml` 5.4.3, `commander` 15.0.0, `pino` 10.4.0, `pino-roll` 4.0.0, `keytar` 7.9.0, `age-encryption` 0.3.1 for fallback.
 - **Conventions:** `PascalCase` types/interfaces, `camelCase` functions/variables, `kebab-case` files/dirs, `UPPER_SNAKE` env vars. Ports end in `Port`, adapters in `Adapter`, DTOs in `DTO`. IDs are strings (`internetMessageId` RFC 5322); dates are ISO 8601 UTC. Errors use `{ code, message, context? }`. No global mutable state; state flows through DI. Auth tokens are never logged.
-- **Source tree seed** (names only, authoritative for directory creation): `src/core/{ports,dto,skill}`, `src/adapters/{m365,gmail,model,token,idempotency,scheduler,logger,config}`, `src/cli/{commands,di}`, `src/orch/`, `tests/{core,adapters,orch}`, plus `tsconfig{,.core,.adapters,.cli}.json`, `.eslintrc.json`, `config.yaml.example`, `taxonomy.yaml`.
+- **Source tree seed** (names only, authoritative for directory creation): `src/core/{ports,dto,skill}`, `src/adapters/{m365,gmail,model,token,idempotency,scheduler,logger,config}`, `src/cli/{commands,di}`, `src/orch/`, `tests/{core,adapters,orch}`, plus `tsconfig{,.core,.adapters,.cli}.json`. (The eslint config this line once promised was superseded by `.oxlintrc.json`, story 1.1's lint config — eslint cannot run on TypeScript 7 and no published `@typescript-eslint` accepts it. `config.yaml.example` is owned by Epic 11 story 11.1 and `taxonomy.yaml` by Epic 4 story 4.1; none are Epic 1 deliverables.)
 
 ## Cross-Story Dependencies
 
