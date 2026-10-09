@@ -145,6 +145,14 @@ function batchBoundary(contentType: string | null | undefined): string | undefin
 }
 
 /** Splits a `multipart/mixed` body into its part texts; the closing delimiter's chunk is dropped. */
+/** The batch-local index named by a response part's `Content-ID: <message-N>` header, or `undefined`. */
+function contentIdIndexOf(chunk: string): number | undefined {
+  const match = /Content-ID:\s*<message-(\d+)>/i.exec(chunk);
+  if (match === null) return undefined;
+  const index = Number(match[1]) - 1;
+  return Number.isInteger(index) && index >= 0 ? index : undefined;
+}
+
 function splitBatchParts(body: string, boundary: string): string[] {
   const parts: string[] = [];
   for (const chunk of body.split(`--${boundary}`).slice(1)) {
@@ -357,6 +365,8 @@ export class GmailAdapter {
     const messages: MessageDTO[] = [];
     // A message can appear on two pages while mail arrives during a long backfill; each id is hydrated once.
     const seenIds = new Set<string>();
+    // A repeated page token would page forever; each token is followed once.
+    const seenTokens = new Set<string>();
     let pageToken: string | undefined;
     do {
       const response = await this.send(
@@ -404,6 +414,16 @@ export class GmailAdapter {
         messages.push(...(await this.fetchBatch(opts.accountId, token, ids.slice(start, start + batchSize))));
       }
       pageToken = readString(body, "nextPageToken");
+      if (pageToken !== undefined) {
+        if (seenTokens.has(pageToken)) {
+          throw new GmailAdapterError(
+            "LIST_MESSAGES_FAILED",
+            opts.accountId,
+            `Gmail repeated a page token for account "${opts.accountId}".`,
+          );
+        }
+        seenTokens.add(pageToken);
+      }
     } while (pageToken !== undefined);
     return messages;
   }
@@ -438,8 +458,8 @@ export class GmailAdapter {
       // Without one parseable part per id, some message's details would be silently dropped.
       throw unreadableBatchError(accountId);
     }
-    const messages: MessageDTO[] = [];
-    for (const part of parts) {
+    const messages: Array<MessageDTO | undefined> = Array.from({ length: ids.length }, () => undefined);
+    parts.forEach((part, position) => {
       const parsed = parseBatchPart(part);
       if (parsed === undefined) throw unreadableBatchError(accountId);
       if (parsed.status < 200 || parsed.status >= 300) {
@@ -450,8 +470,15 @@ export class GmailAdapter {
           parsed.status,
         );
       }
-      messages.push(mapGmailMessage(parsed.body, accountId));
-    }
-    return messages;
+      // The request names each part; prefer that Content-ID so a reordered response cannot swap ids.
+      const index = contentIdIndexOf(part) ?? position;
+      if (index >= ids.length || messages[index] !== undefined) throw unreadableBatchError(accountId);
+      const message = mapGmailMessage(parsed.body, accountId);
+      // A part that is not a message yields an empty id; counting it would lose the message silently.
+      if (message.id.length === 0) throw unreadableBatchError(accountId);
+      messages[index] = message;
+    });
+    if (messages.some((message) => message === undefined)) throw unreadableBatchError(accountId);
+    return messages as MessageDTO[];
   }
 }

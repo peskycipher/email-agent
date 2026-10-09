@@ -499,6 +499,61 @@ test("percent-encodes the configured label and the page token (LABEL)", async ()
   expect(listGets[1]?.url).toBe(`${MESSAGES_URL}?labelIds=Family%2FFriends&maxResults=50&pageToken=A%20B%2F2`);
 });
 
+test("a repeated page token is a typed error, never unbounded paging (MALFORMED)", async () => {
+  const { fetchFn } = scriptedFetch([messageListPage([], "PAGE_2"), messageListPage([], "PAGE_2")]);
+  const adapter = new GmailAdapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+  const error = (await adapter
+    .fetchMessages({ source: "gmail", accountId: "personal" })
+    .catch((err: unknown) => err)) as GmailAdapterError;
+
+  expect(error).toBeInstanceOf(GmailAdapterError);
+  expect(error.code).toBe("LIST_MESSAGES_FAILED");
+});
+
+test("a 2xx batch part without a message id is a typed error, never an empty DTO (BATCH_MALFORMED)", async () => {
+  const { fetchFn } = scriptedFetch([
+    messageListPage(["m1"]),
+    batchResponse([{ body: { snippet: "no id here" } }], "batch_1"),
+  ]);
+  const adapter = new GmailAdapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+  const error = (await adapter
+    .fetchMessages({ source: "gmail", accountId: "personal" })
+    .catch((err: unknown) => err)) as GmailAdapterError;
+
+  expect(error).toBeInstanceOf(GmailAdapterError);
+  expect(error.code).toBe("BATCH_GET_MESSAGES_FAILED");
+});
+
+test("correlates response parts by Content-ID, so a reordered batch cannot swap ids (BATCH_GET)", async () => {
+  const boundary = "batch_abc";
+  const part = (n: number, body: unknown): string =>
+    `--${boundary}\r\n` +
+    `Content-Type: application/http\r\n` +
+    `Content-ID: <message-${n}>\r\n` +
+    `\r\n` +
+    `HTTP/1.1 200 OK\r\n` +
+    `Content-Type: application/json\r\n` +
+    `\r\n` +
+    `${JSON.stringify(body)}\r\n\r\n`;
+  const text = `${part(2, gmailDetail("m2"))}${part(1, gmailDetail("m1"))}--${boundary}--\r\n`;
+  const response: MultipartTestResponse = {
+    ok: true,
+    status: 200,
+    headers: { get: () => `multipart/mixed; boundary="${boundary}"` },
+    json: async () => ({}),
+    text: async () => text,
+  };
+  const { fetchFn } = scriptedFetch([messageListPage(["m1", "m2"]), response]);
+  const adapter = new GmailAdapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+  const messages = await adapter.fetchMessages({ source: "gmail", accountId: "personal" });
+
+  // The parts arrive reversed; the Content-ID still maps each DTO to its own id.
+  expect(messages.map((message) => message.id)).toEqual(["m1", "m2"]);
+});
+
 const batchSizeCases: Array<[number, string]> = [
   [100, "100"],
   [250, "100"],
