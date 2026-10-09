@@ -17,7 +17,7 @@ Let a user connect one or more Microsoft 365 mailboxes to the CLI via Microsoft 
 - **Scopes:** request `Mail.ReadWrite` and `MailboxSettings.ReadWrite` per account.
 - **Device code flow:** display the user code and verification URL, poll until authorized, and time out after 5 minutes with an actionable error.
 - **Independent accounts:** each account authenticates, caches, and refreshes separately; a failure on one must not abort an `--account all` run.
-- **Silent reuse and refresh:** later runs reuse the cached token until expiry and refresh silently on 401 using that account's refresh token. Re-prompt only when the refresh token is revoked or invalid.
+- **Silent reuse and refresh:** later runs reuse the cached token until expiry and refresh silently on expiry using that account's refresh token; the fetch consumer (Epic 5) additionally force-refreshes once and retries on a Graph 401. Re-prompt only when the refresh token is revoked or invalid.
 - **Token storage:** OS keychain is primary, one entry per account under service `email-classify-m365-<accountName>`; fallback is an encrypted file at `~/.config/email-classify/accounts/m365/<accountName>/tokens.json.age`. No separate secrets manager.
 - **Fallback passphrase chain:** when the keychain is unavailable, resolve the age passphrase in order — env var named by config (`tokenFallback.passphraseEnvVar`, default `EMAIL_CLASSIFY_TOKEN_FALLBACK_PASSPHRASE`), then a one-time TTY prompt, then exit 1 with an error naming the env var when stdin is not a TTY.
 - **Local-first:** no server, hosted OAuth callback, or cloud dependency for v1.

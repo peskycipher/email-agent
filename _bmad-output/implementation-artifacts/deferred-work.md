@@ -42,12 +42,12 @@
 
 ### Deferred from: review of spec-1-3-dtos-shared-types-with-accountid.md (2026-10-08)
 
-- **No external-package guard for `src/core/**`.** AD-10's zero-dependency rule is convention-only for external packages: `.oxlintrc.json` bans only `**/adapters/**`/`**/cli/**`/`**/orch/**`, so a `zod` (or any package) import in core passes both `bun run build` and `bun run lint` — demonstrated by a temporary probe in Story 1.3. Add a core external-import rule (or a dependency check) before core grows real logic.
-- **`JsonSchema.type` is still un-narrowed** (`src/core/ports/ModelPort.ts`). Story 1.3 added `additionalProperties?`/`enum?` but left `type: string`; the original deferred item named a narrowed `type` keyword as a third piece. Narrow it to the JSON-Schema type-keyword union when a model adapter first consumes the type.
+- **No external-package guard for `src/core/**`.** AD-10's zero-dependency rule is convention-only for external packages: `.oxlintrc.json` bans only `**/adapters/**`/`**/cli/**`/`**/orch/**`, so a `zod` (or any package) import in core passes both `bun run build` and `bun run lint` — demonstrated by a temporary probe in Story 1.3. Add a core external-import rule (or a dependency check) before core grows real logic. **APPLIED 2026-10-09 revisit**: `scripts/check-core-external-imports.mjs` (folded into `bun run lint`) walks `src/core/**` and fails on any non-relative, non-`node:` import specifier — a `zod` probe fails with exit 1.
+- **`JsonSchema.type` is still un-narrowed** (`src/core/ports/ModelPort.ts`). Story 1.3 added `additionalProperties?`/`enum?` but left `type: string`; the original deferred item named a narrowed `type` keyword as a third piece. Narrow it to the JSON-Schema type-keyword union when a model adapter first consumes the type. **APPLIED 2026-10-09 revisit**: `JsonSchema.type` is now the draft-2020-12 keyword union (`null|boolean|object|array|number|string|integer`), pinned in `tests/core/ports.type-test.ts`.
 
 ### Deferred from: code review of spec-1-3-dtos-shared-types-with-accountid.md (2026-10-08, independent pass)
 
-- `JsonSchema.additionalProperties` is typed `boolean`, so the JSON-Schema schema form (`additionalProperties: { type: "string" }`) would not type-check (`src/core/ports/ModelPort.ts:9`). Widen to `boolean | JsonSchema` alongside the already-deferred `type`-keyword narrowing.
+- `JsonSchema.additionalProperties` is typed `boolean`, so the JSON-Schema schema form (`additionalProperties: { type: "string" }`) would not type-check (`src/core/ports/ModelPort.ts:9`). Widen to `boolean | JsonSchema` alongside the already-deferred `type`-keyword narrowing. **APPLIED 2026-10-09 revisit**: `JsonSchema.additionalProperties` is now `boolean | JsonSchema`, pinned in `tests/core/ports.type-test.ts`.
 - `epics.md:275` still requires `Config` to carry a "full validated schema with `accountName` regex enforced", while the human decision of 2026-10-08 keeps core type-only and leaves validation to Story 11.1. Reconcile the planning AC in a planning pass.
 
 ## Deferred from: code review of spec-2-1-m365-device-code-authentication-multi-account-accountname-validated.md (2026-10-09)

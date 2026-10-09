@@ -297,7 +297,7 @@ So that **I can access all my M365 mailboxes with read/write permissions**.
 **And** tokens stored in OS keychain (keytar) with service `email-classify-m365-<accountId>`
 **And** fallback to encrypted file (`~/.config/email-classify/accounts/m365/<accountId>/tokens.json.age`) if keychain unavailable
 **And** when the OS keychain is unavailable, the age passphrase is resolved in this order: env var `Config.tokenFallback.passphraseEnvVar`, then a one-time TTY prompt, then exit 1 with an actionable error if stdin is not a TTY
-**And** subsequent runs reuse cached token until expiry with automatic silent refresh on 401
+**And** subsequent runs reuse the cached token until expiry, refreshing silently on expiry with that account's refresh token; a Graph 401 is handled by Epic 5's fetch consumer, which force-refreshes once and retries
 **And** multiple accounts can be authenticated independently with different `accountId`s
 
 ---

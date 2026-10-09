@@ -71,3 +71,18 @@ type _BarrelContracts = [
   Taxonomy,
   TokenSet,
 ];
+
+// Positive: JsonSchema.type is the JSON-Schema keyword union and
+// `additionalProperties` accepts the boolean-or-schema form (Story 1.3 follow-up).
+const _narrowedSchema: JsonSchema = {
+  type: "object",
+  properties: { name: { type: "string", enum: ["a", "b"] } },
+  additionalProperties: { type: "string" },
+};
+void _narrowedSchema;
+// @ts-expect-error `type` is narrowed to the keyword union, not any string
+const _badType: JsonSchema = { type: "stringly" };
+void _badType;
+// @ts-expect-error `additionalProperties` must be a boolean or a schema, not a number
+const _badAddl: JsonSchema = { type: "object", additionalProperties: 42 };
+void _badAddl;
