@@ -49,6 +49,8 @@ context:
 | AUTH | the token seam throws for one account | that account is reported and skipped; the others still sync | logged with `accountId`; counted as a failure |
 | API_ERROR | the GET or a POST returns non-2xx | the account is reported and skipped | typed error naming the account and status; never the raw body |
 | THROTTLED | a 429 | reported for that account | typed error; no retry (Epic 9) |
+| UNAUTHORIZED | any Graph call returns 401 | forceRefresh once via `getAccessToken(accountId, { forceRefresh: true })` and retry the whole sync; if it still 401s, `LIST_CATEGORIES_FAILED`/`CREATE_CATEGORY_FAILED` | typed error after the single replay |
+| UNAUTHORIZED | a 401 on the category list or a create | forceRefresh once via `getAccessToken(accountId, { forceRefresh: true })` and retry the whole sync; if it still 401s, `LIST_CATEGORIES_FAILED`/`CREATE_CATEGORY_FAILED` | typed error after the single replay; the sync is idempotent, so re-running after a partial create is safe |
 | ISOLATION | two accounts, the first fails | the second is synced in full; the run reports one failure | exit code reflects the failure count |
 | CLI_ALL | `--sync-categories --account all` with two enabled accounts | both are synced, one line each, exit 0 | — non-zero exit and a counted failure line when an account fails |
 
@@ -141,6 +143,10 @@ Code review of `667ba46..` working tree (2026-10-09, 12 files, +1139/−7). Thre
   name, and a `signal` assertion on every recorded request. 145 tests green.
 
 ## Spec Change Log
+
+- 2026-10-09 (revisit pass, human-approved): The deferred 401→silent-refresh hook from Story 2.1 was extended to `M365Adapter.ensureCategories`. If any Graph call (category list or create) returns 401, the adapter force-refreshes the token once and retries the whole sync from the start; the operation is idempotent, so a partial create before the 401 is harmless. If the replay still 401s, the normal `LIST_CATEGORIES_FAILED`/`CREATE_CATEGORY_FAILED` error is thrown. Added three unit tests covering 401 on the list, 401 on a create, and persistent-401 failure. Known-bad state avoided: a transient token revocation between acquisition and use turning a `--sync-categories` run into a permanent failure. KEEP: 429 and other non-401 errors still get no retry (Epic 9); `fetchMessages` has its own first-page-only 401 hook per the Epic 5 revisit.
+
+- 2026-10-09 (revisit pass, human-approved): The deferred 401→silent-refresh hook from Story 2.1 was extended to `M365Adapter.ensureCategories`. When Graph returns 401 on the category list or on a create POST, the adapter force-refreshes the token once and retries the whole sync; if it still 401s, the original typed error is surfaced. Added three unit tests covering 401 on the list, 401 on a create, and persistent 401 after refresh. Known-bad state avoided: a transient token revocation during category sync aborting the account or requiring a manual re-run. KEEP: the sync remains idempotent, so retrying after a partial create cannot duplicate categories; 429 remains a typed failure with no retry (Epic 9).
 
 ## Review Triage Log
 

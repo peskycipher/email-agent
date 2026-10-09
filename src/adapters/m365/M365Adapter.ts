@@ -132,13 +132,30 @@ export class M365Adapter {
    * the labels whose `name` is absent — an exact, case-sensitive match on `displayName`,
    * each created with the taxonomy's `presetN` colour. A category that already exists is
    * left exactly as it is; nothing is ever renamed, re-coloured or deleted.
+   *
+   * If any Graph call returns 401, the token is force-refreshed once via Story 2.1's seam
+   * and the whole operation is retried; this absorbs the common race where the provider
+   * revokes the token between acquisition and use.
    */
   async ensureCategories(accountId: string, labels: LabelDef[]): Promise<void> {
-    const token = (await this.getAccessToken(accountId)).accessToken;
-    const existing = await this.listCategoryNames(accountId, token);
+    try {
+      await this.runEnsureCategories(accountId, labels);
+    } catch (error) {
+      if (error instanceof M365AdapterError && error.status === 401) {
+        const refreshed = (await this.getAccessToken(accountId, { forceRefresh: true })).accessToken;
+        await this.runEnsureCategories(accountId, labels, refreshed);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private async runEnsureCategories(accountId: string, labels: LabelDef[], token?: string): Promise<void> {
+    const effectiveToken = token ?? (await this.getAccessToken(accountId)).accessToken;
+    const existing = await this.listCategoryNames(accountId, effectiveToken);
     for (const label of labels) {
       if (existing.has(label.name)) continue;
-      await this.createCategory(accountId, token, label);
+      await this.createCategory(accountId, effectiveToken, label);
       // A caller can pass the same name twice; remembering the create stops the second
       // one from being POSTed into a duplicate (or a 409).
       existing.add(label.name);

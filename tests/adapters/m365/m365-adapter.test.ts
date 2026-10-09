@@ -331,6 +331,82 @@ test("a non-2xx on a later page fails the list before anything is created (PAGED
   expect(requests.every((request) => request.method === "GET")).toBe(true);
 });
 
+test("a 401 on the category list refreshes the token once and retries (UNAUTHORIZED)", async () => {
+  const calls: { accountId: string; forceRefresh?: boolean }[] = [];
+  const getAccessToken = async (accountId: string, options?: { forceRefresh?: boolean }) => {
+    calls.push({ accountId, forceRefresh: options?.forceRefresh });
+    return {
+      accessToken: calls.length === 1 ? "access-1" : "access-2",
+      expiresAt: 9_999_999_999,
+      scopes: ["Mail.ReadWrite"],
+    };
+  };
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
+    jsonResponse({ value: [{ id: "c1", displayName: "Action Needed" }] }),
+    jsonResponse({ id: "created" }, true, 201),
+    jsonResponse({ id: "created" }, true, 201),
+    jsonResponse({ id: "created" }, true, 201),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, getAccessToken });
+
+  await adapter.ensureCategories("work", LABELS);
+
+  expect(calls).toEqual([{ accountId: "work" }, { accountId: "work", forceRefresh: true }]);
+  // First attempt: 1 GET (401). Second attempt: 1 GET + 2 POSTs (one label already exists).
+  expect(requests).toHaveLength(4);
+  expect(requests[0]?.headers.authorization).toBe("Bearer access-1");
+  expect(requests[1]?.headers.authorization).toBe("Bearer access-2");
+});
+
+test("a 401 on a category create refreshes the token once and retries the whole sync (UNAUTHORIZED_CREATE)", async () => {
+  const calls: { accountId: string; forceRefresh?: boolean }[] = [];
+  const getAccessToken = async (accountId: string, options?: { forceRefresh?: boolean }) => {
+    calls.push({ accountId, forceRefresh: options?.forceRefresh });
+    return {
+      accessToken: calls.length === 1 ? "access-1" : "access-2",
+      expiresAt: 9_999_999_999,
+      scopes: ["Mail.ReadWrite"],
+    };
+  };
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ value: [{ id: "c1", displayName: "Action Needed" }] }),
+    jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
+    jsonResponse({ value: [] }),
+    jsonResponse({ id: "created" }, true, 201),
+    jsonResponse({ id: "created" }, true, 201),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, getAccessToken });
+
+  await adapter.ensureCategories("work", LABELS.slice(0, 2));
+
+  expect(calls).toEqual([{ accountId: "work" }, { accountId: "work", forceRefresh: true }]);
+  // First attempt: 1 GET + 1 POST (401). Second attempt: 1 GET + 2 POSTs.
+  expect(requests).toHaveLength(5);
+  expect(requests.filter((r) => r.method === "POST")).toHaveLength(3);
+});
+
+test("a 401 that persists after forceRefresh is a typed failure (UNAUTHORIZED_RETRY_FAILS)", async () => {
+  const calls: { accountId: string; forceRefresh?: boolean }[] = [];
+  const getAccessToken = async (accountId: string, options?: { forceRefresh?: boolean }) => {
+    calls.push({ accountId, forceRefresh: options?.forceRefresh });
+    return { accessToken: "access-2", expiresAt: 9_999_999_999, scopes: ["Mail.ReadWrite"] };
+  };
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
+    jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, getAccessToken });
+
+  const error = (await adapter.ensureCategories("work", LABELS).catch((err: unknown) => err)) as M365AdapterError;
+
+  expect(error).toBeInstanceOf(M365AdapterError);
+  expect(error.code).toBe("LIST_CATEGORIES_FAILED");
+  expect(error.status).toBe(401);
+  expect(calls).toHaveLength(2);
+  expect(requests).toHaveLength(2);
+});
+
 test("the same name given twice is created only once", async () => {
   const label = LABELS[0] as LabelDef;
   const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] }), jsonResponse({}, true, 201)]);
