@@ -1,4 +1,5 @@
 import { afterEach, expect, test, vi } from "vitest";
+import { fileURLToPath } from "node:url";
 import { createProgram, defaultHandlers, runCli, type CliHandlers } from "../../src/cli/main.js";
 import { runAuth } from "../../src/cli/commands/auth.js";
 import { runBackfill } from "../../src/cli/commands/backfill.js";
@@ -175,4 +176,25 @@ test("--auth combined with --sync-categories reports on stderr, exits 1 and runs
   expect(code).toBe(1);
   expect(calls).toHaveLength(0);
   expect(capturedLines(stderr)[0]).toContain("--auth and --sync-categories");
+});
+
+/** The entry file as it exists on disk, so the main-guard's argv[1] comparison has something real. */
+const INDEX_FILE = fileURLToPath(new URL("../../src/cli/index.ts", import.meta.url));
+
+test("the shipped entry hands the real process.argv to the real handlers (ENTRY WIRING)", async () => {
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const savedArgv = process.argv;
+  process.argv = ["node", INDEX_FILE, "--backfill", "--source", "all"];
+  vi.resetModules();
+
+  try {
+    await import("../../src/cli/index.js");
+  } finally {
+    process.argv = savedArgv;
+  }
+
+  // Only the real argv reaching the real resolver produces this message; a sliced argv parses no
+  // flag and would report the missing-flags error instead.
+  expect(process.exitCode).toBe(1);
+  expect(capturedLines(stderr)[0]).toContain("--source all is not supported");
 });

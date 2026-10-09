@@ -83,9 +83,9 @@ export function createProgram(handlers: CliHandlers): Command {
  * shipped executable passes `process.argv` and `defaultHandlers` and assigns the result to
  * `process.exitCode`; no argv is parsed and nothing runs until this is called.
  *
- * Only routes that reach the action body return a code. Commander's own `--help`, `--version` and
- * unknown-option/missing-argument paths call `process.exit` from inside `parseAsync` (there is no
- * `exitOverride`), so they terminate the process instead of returning — the same behaviour the
+ * Only routes that reach the action body return a code. Commander's own `--help` and its
+ * unknown-option and missing-argument paths call `process.exit` from inside `parseAsync` (there is
+ * no `exitOverride`), so they terminate the process instead of returning — the same behaviour the
  * executable had before this seam existed.
  */
 export async function runCli(argv: readonly string[], handlers: CliHandlers): Promise<number> {

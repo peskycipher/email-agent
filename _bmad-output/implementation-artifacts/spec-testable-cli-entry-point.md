@@ -62,6 +62,23 @@ context:
 - Given `bun run build`, when `node dist/cli/index.js --help` runs, then its output is byte-identical to the pre-change capture.
 - Given `bun run lint`, when it runs, then it exits 0 with no new rules or overrides.
 
+### Review Findings
+
+_Adversarial code review of `667eda1`, 2026-10-09. Layers: blind-hunter, verification-gap, acceptance-auditor ran; edge-case-hunter returned no output and is recorded as a failed layer, so this review may be incomplete._
+
+- [x] [Review][Patch] The shipped entry's own hand-off is unverified — add a realpath-normalised main-guard so `index.ts` is importable, plus a test that exercises the real wiring [src/cli/index.ts:3] — `process.exitCode = await runCli(process.argv, defaultHandlers)` is the only place the real argv and the real handlers reach the parser, and no test imports `index.ts`: the suite calls `runCli` with a synthetic argv and only identity-pins `defaultHandlers`. The verification-gap layer demonstrated that rewriting the line to `runCli(process.argv.slice(2), defaultHandlers)` type-checks and leaves `bun run build|lint|test` green, after which commander misreads the first flag as the script path and nothing routes. **Human decision (2026-10-09): option (a) — add the guard.** Requirements: normalise both sides to realpaths (e.g. `realpathSync`) so a symlinked entry still fires, because the `bin` shim Epic 11.3 adds is a symlink and `import.meta.main` does not exist on the pinned Node 20; the new test must fail if the line is changed to `process.argv.slice(2)`; and the shipped `dist/cli/index.js` must keep working (`--help` byte-identical, `--nope` exit 1).
+- [x] [Review][Patch] `runCli`'s doc comment names a `--version` path that cannot occur [src/cli/main.ts:86] — `createProgram` never calls `.version()`, and commander only auto-registers `-V, --version` from that method (`node_modules/commander/lib/command.js:2197-2199`), so `--version` is an unknown option (exit 1), not a help-like exit-0 path. Fix: drop `--version` from the comment.
+
+**Rejected**
+
+- `false` — "The seam does not pin the other `resolveCliCommand` error branches" (blind-hunter): every branch it names is pinned in `tests/cli/dispatch.test.ts` (24 tests — stray `--source` at `:86`, missing flags at `:30`/`:37`, unknown source at `:79`/`:142`, every conflict combination), so the described silent regression already fails `bun run test`; the seam's contract is the hand-off, not a second copy of the resolver's matrix.
+- `false` — "Descriptions and the examples block are duplicated across two files with no shared constant" (blind-hunter): the test's copy *is* the expected value — exporting it from `main.ts` would make the assertion compare a value with itself and stop catching a typo. A divergence cannot ship silently: mutating one word of one description fails the suite (verified 2026-10-09).
+- `false` — "CRON's `--source` default (`m365`) is not seam-tested" (blind-hunter): pinned at the authority by `tests/cli/dispatch.test.ts:107`; the seam passes the resolver's value through unchanged.
+- `low` — "`runCli` resets `process.exitCode` and never restores it" (blind-hunter): harmless for the only caller, which assigns the returned value regardless; closing it means restructuring `createProgram`/`runCli` to carry the code in a closure instead of the process global — added complexity for a caller that does not exist.
+- `low` — "the `typeof` fallback in `runCli` is dead code that could mask a string exit code" (blind-hunter): unreachable — the entry sets `0` and every later write is `1` or a `Promise<number>` result; removing it needs a cast or coercion, i.e. new complexity guarding a state never demonstrated.
+- `low` — "`runCli`'s documented `process.exit` behaviour has no automated test" (blind-hunter): the only closure is a child-process (spawn) assertion, which the approved Boundaries exclude, and the manual acceptance check covers `--help` and `--nope`.
+- `low` — "`review_loop_iteration: 0` sits beside a populated Review Triage Log" (blind-hunter): the field counts spec-change-log loopbacks, of which there were none, so it is accurate; the only fix is a note in the spec under review.
+
 ## Implementation Notes
 
 - 2026-10-09 (planning): human approved keeping the full spec at 2153 tokens (cl100k_base), above the 900–1600 guidance. One indivisible goal, so no split was available; the excess is implementer grounding, not padding. Approved with the risk accepted.
