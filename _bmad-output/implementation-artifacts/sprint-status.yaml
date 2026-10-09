@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-08-2026 10:25
-last_updated: 10-09-2026 18:01
+last_updated: 10-09-2026 18:09
 project: email-agent
 project_key: NOKEY
 tracking_system: file-system
@@ -60,7 +60,7 @@ development_status:
   5-2-m365-incremental-message-fetch-cron-multi-account: done
   5-3-gmail-backfill-message-fetch-multi-account: done
   5-4-gmail-incremental-message-fetch-cron-multi-account-with-hist: done
-  epic-5-retrospective: optional
+  epic-5-retrospective: done
 
   epic-6: backlog
   6-1-classification-prompt-template: backlog
@@ -176,3 +176,46 @@ action_items:
     owner: "Loki"
     status: open
     ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-09.md"
+  - id: "epic-5-retro-item-12-split-gmailadapter-along-its-four-concer"
+    epic: 5
+    action: "Split GmailAdapter along its four concerns (labels / list walk / batch
+      hydration / history) and split tests/adapters/gmail/gmail-adapter.test.ts with
+      it, before Epic 7 adds write-back"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-5-retro-2026-10-09.md"
+  - id: "epic-5-retro-item-13-reconcile-epics-md-epic-5-text-to-as-bui"
+    epic: 5
+    action: "Reconcile epics.md epic-5 text to as-built: cursor file state/<provider>-<name>.json,
+      Gmail writing both keys, legacy read-back (m365 only), INBOX-only window"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-5-retro-2026-10-09.md"
+  - id: "epic-5-retro-item-14-fold-the-cli-provider-plumbing-quadrupli"
+    epic: 5
+    action: "Fold the CLI provider-plumbing quadruplication (backfill/cron/sync-categories/auth
+      listing types and hint strings) into Epic 11 planning"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-5-retro-2026-10-09.md"
+  - id: "epic-5-retro-item-15-settle-nfr3-progress-contract-declare-th"
+    epic: 5
+    action: "Settle NFR3 progress contract: declare the per-account line as v1 progress,
+      or plan the per-100 tick into Epic 8"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-5-retro-2026-10-09.md"
+  - id: "epic-5-retro-item-16-process-lesson-approval-checkpoints-re-r"
+    epic: 5
+    action: "Process lesson: approval checkpoints re-read the whole frozen block,
+      not just amended sections"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-5-retro-2026-10-09.md"
+  - id: "epic-5-retro-item-17-process-lesson-size-the-implementation-d"
+    epic: 5
+    action: "Process lesson: size the implementation dispatch deadline at launch (60
+      min for multi-file work)"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-5-retro-2026-10-09.md"
