@@ -1,5 +1,6 @@
 {
   "extends": "./tsconfig.base.json",
+  "//": "AD-10: `types` is intentionally omitted so a `node:` builtin in core is a TS2591 type error. scripts/check-core-external-imports.mjs is the second line of defense; a future PR must not add `\"types\": [\"node\"]` here.",
   "compilerOptions": {
     "rootDir": "src/core",
     "outDir": "dist/core"
