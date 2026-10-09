@@ -521,6 +521,68 @@ test("the token seam's rejection fails the fetch with no Graph call (AUTH)", asy
   expect(requests).toHaveLength(0);
 });
 
+test("a 401 on the first page refreshes the token once and retries (UNAUTHORIZED)", async () => {
+  const calls: { accountId: string; forceRefresh?: boolean }[] = [];
+  const getAccessToken = async (accountId: string, options?: { forceRefresh?: boolean }) => {
+    calls.push({ accountId, forceRefresh: options?.forceRefresh });
+    return {
+      accessToken: calls.length === 1 ? "access-1" : "access-2",
+      expiresAt: 9_999_999_999,
+      scopes: ["Mail.ReadWrite"],
+    };
+  };
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
+    jsonResponse({ value: [graphMessage("m1")] }),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, getAccessToken });
+
+  const messages = await adapter.fetchMessages({ source: "m365", accountId: "work" });
+
+  expect(messages).toHaveLength(1);
+  expect(calls).toEqual([{ accountId: "work" }, { accountId: "work", forceRefresh: true }]);
+  expect(requests).toHaveLength(2);
+  expect(requests[0]?.headers.authorization).toBe("Bearer access-1");
+  expect(requests[1]?.headers.authorization).toBe("Bearer access-2");
+});
+
+test("a 401 that persists after forceRefresh is a typed failure (UNAUTHORIZED_RETRY_FAILS)", async () => {
+  const calls: { accountId: string; forceRefresh?: boolean }[] = [];
+  const getAccessToken = async (accountId: string, options?: { forceRefresh?: boolean }) => {
+    calls.push({ accountId, forceRefresh: options?.forceRefresh });
+    return { accessToken: "access-2", expiresAt: 9_999_999_999, scopes: ["Mail.ReadWrite"] };
+  };
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
+    jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, getAccessToken });
+
+  const error = (await adapter.fetchMessages({ source: "m365", accountId: "work" }).catch((err: unknown) => err)) as M365AdapterError;
+
+  expect(error).toBeInstanceOf(M365AdapterError);
+  expect(error.code).toBe("LIST_MESSAGES_FAILED");
+  expect(error.status).toBe(401);
+  expect(calls).toHaveLength(2);
+  expect(requests).toHaveLength(2);
+});
+
+test("a 401 on a later page is not retried; nextLink URLs are not safe to replay (UNAUTHORIZED_LATER_PAGE)", async () => {
+  const page2 = `${MESSAGES_URL}?$skiptoken=page-2`;
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ value: [graphMessage("m1")], "@odata.nextLink": page2 }),
+    jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+  const error = (await adapter.fetchMessages({ source: "m365", accountId: "work" }).catch((err: unknown) => err)) as M365AdapterError;
+
+  expect(error).toBeInstanceOf(M365AdapterError);
+  expect(error.code).toBe("LIST_MESSAGES_FAILED");
+  expect(error.status).toBe(401);
+  expect(requests).toHaveLength(2);
+});
+
 test("a 403 on the first page is a typed error naming account and status (API_ERROR)", async () => {
   const { fetchFn, requests } = scriptedFetch([
     jsonResponse({ error: { code: "Forbidden", message: "SECRET-PAYLOAD" } }, false, 403),

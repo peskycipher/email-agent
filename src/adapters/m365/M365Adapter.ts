@@ -155,6 +155,7 @@ export class M365Adapter {
     const token = (await this.getAccessToken(opts.accountId)).accessToken;
     const messages: MessageDTO[] = [];
     let url: string | undefined = messagesUrl(opts);
+    let isFirstPage = true;
     while (url !== undefined) {
       const response = await this.send(
         url,
@@ -163,6 +164,35 @@ export class M365Adapter {
         "LIST_MESSAGES_FAILED",
       );
       if (!response.ok) {
+        // Story 2.1 exposes forceRefresh for exactly this case: a 401 on the first page
+        // may mean the token was revoked at the provider between acquisition and use.
+        // Refresh once and replay. A 401 on a later page is treated as a normal failure
+        // (nextLink URLs are signed; replaying them after a token change is unsafe).
+        if (response.status === 401 && isFirstPage) {
+          const refreshed = (await this.getAccessToken(opts.accountId, { forceRefresh: true })).accessToken;
+          const retry = await this.send(
+            url,
+            getRequest(authorizationHeader(refreshed)),
+            opts.accountId,
+            "LIST_MESSAGES_FAILED",
+          );
+          if (retry.ok) {
+            const body = await readJsonObject(retry);
+            const page = body?.value;
+            if (!Array.isArray(page)) {
+              throw new M365AdapterError(
+                "LIST_MESSAGES_FAILED",
+                opts.accountId,
+                `Microsoft Graph returned no message list for account "${opts.accountId}".`,
+                retry.status,
+              );
+            }
+            for (const entry of page) messages.push(mapGraphMessage(entry, opts.accountId));
+            url = readNextLink(body);
+            isFirstPage = false;
+            continue;
+          }
+        }
         throw new M365AdapterError(
           "LIST_MESSAGES_FAILED",
           opts.accountId,
@@ -184,6 +214,7 @@ export class M365Adapter {
       }
       for (const entry of page) messages.push(mapGraphMessage(entry, opts.accountId));
       url = readNextLink(body);
+      isFirstPage = false;
     }
     return messages;
   }
@@ -241,6 +272,15 @@ export class M365Adapter {
         response.status,
       );
     }
+  }
+
+  private async sendGraphRequest(
+    url: string,
+    init: FetchInit,
+    accountId: string,
+    code: M365AdapterErrorCode,
+  ): Promise<FetchResponseLike> {
+    return this.send(url, init, accountId, code);
   }
 
   private async send(

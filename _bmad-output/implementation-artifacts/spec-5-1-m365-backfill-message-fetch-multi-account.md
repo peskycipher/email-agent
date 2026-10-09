@@ -60,6 +60,7 @@ context:
 | MID_PAGE_ERROR | page 1 succeeds, page 2 answers 500 | no partial array reaches the orchestrator | typed error; the account counts as failed |
 | MALFORMED | 200 whose body has no `value` array | no messages | typed error, never an empty result |
 | THROTTLED | 429 on a page | that account fails | typed error; no retry (Epic 9) |
+| UNAUTHORIZED | 401 on the first page | forceRefresh once via `getAccessToken(accountId, { forceRefresh: true })` and replay the request; if it still 401s, `LIST_MESSAGES_FAILED` | typed error after the single replay; 401 on later pages is not retried because nextLink URLs are not safe to replay |
 | MULTI_ACCOUNT | two accounts, the first fails | the second is fetched in full; the run reports one failure | counted failure line naming the account; exit code reflects it |
 | MULTI_FOLDER | one account configured with `[Inbox, Archive]` | two sequential fetches for that account; totals summed | a failure in one folder does not stop the other folders or accounts |
 | NO_ACCOUNTS | `--account all` with no enabled m365 account | setup hint | exit 1 |
@@ -136,6 +137,8 @@ context:
 - Known and deliberate: `opts.folder` is interpolated into the request path unencoded (fine for Graph's well-known names such as `Inbox`/`Archive`, but a folder display name containing a space or `#` would need encoding); `fetchAllMessages` counts failures per account, so an account whose second folder fails counts once; and `noAccountsHint` prints the static `~/.config/email-classify` path even under an injected `configDir`, matching the sibling `--sync-categories` command and already carried as an open epic-4 retrospective action item.
 
 ## Spec Change Log
+
+- 2026-10-09 (revisit pass, human-approved): The deferred 401→silent-refresh hook from Story 2.1 was implemented in `M365Adapter.fetchMessages`. When Graph returns 401 on the first page, the adapter calls `getAccessToken(accountId, { forceRefresh: true })` once and replays the request. If the replay still 401s, or if a 401 arrives on a later `@odata.nextLink` page, the adapter returns `LIST_MESSAGES_FAILED` as before — nextLink URLs are temporary/signed and unsafe to replay after a token change. Added three unit tests covering the happy-forceRefresh path, the persistent-401 path, and the later-page no-retry path. Known-bad state avoided: a transient token revocation between acquisition and use turning into a permanent per-account failure. KEEP: `ensureCategories` does not force-refresh on 401; `fetchMessages` does one refresh only; rate-limit/backoff for 429 remains Epic 9's scope.
 
 ## Review Triage Log
 
