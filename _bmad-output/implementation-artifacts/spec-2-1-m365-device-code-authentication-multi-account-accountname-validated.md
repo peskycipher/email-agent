@@ -144,6 +144,8 @@ Residual risks:
 
 ## Spec Change Log
 
+- 2026-10-09 (revisit pass, human-approved): `KeychainTokenStore.delete` silently no-oped when the keychain `deletePassword` call failed and the age fallback file was missing, allowing a caller to be told "deleted" while the token likely remained in the keychain. Amended: the method now throws `TOKEN_DELETE_FAILED` when the keychain is inaccessible and no fallback file exists. If the keychain fails but the fallback file exists and is removed, delete still succeeds (fallback-first degradation). Added 3 unit tests covering keychain-only deletion, fallback-only deletion, and the new failure path. Known-bad state avoided: a successful `delete` return while a token may still be stored. KEEP: the store's fallback-first design; keychain errors still fall through to the file delete rather than aborting early. The 401→refresh hook remains outside this story's scope (deferred to Epic 5's fetch consumer).
+
 ## Review Triage Log
 
 **Loop iteration 0 (2026-10-09).** Three layers ran (blind-hunter, edge-case-hunter, verification-gap). All three runs were later flagged `model_verification_failed` (launched `ollama-cloud/deepseek-v4.1-flash`, child reported `deepseek-v4-pro:0813`) — the harness mismatch is noted; every finding was independently re-verified against the source before triage.

@@ -119,13 +119,17 @@ export class KeychainTokenStore implements TokenPort {
   }
 
   async delete(provider: "m365" | "gmail", accountId: string): Promise<void> {
+    let keychainFailed = false;
     try {
       await this.keychain.deletePassword(this.serviceName(provider, accountId), accountId);
     } catch {
-      // Keychain unavailable — the file delete below is still attempted.
+      keychainFailed = true;
     }
+
+    let fileExisted = false;
     try {
       await unlink(this.fallbackPath(provider, accountId));
+      fileExisted = true;
     } catch (error) {
       if (!isEnoent(error)) {
         throw new TokenStoreError(
@@ -134,6 +138,16 @@ export class KeychainTokenStore implements TokenPort {
           `Could not delete the stored token for account "${accountId}".`,
         );
       }
+    }
+
+    // If the keychain was inaccessible and the fallback file was already absent,
+    // we cannot confirm the token is gone — the token may still live in the keychain.
+    if (keychainFailed && !fileExisted) {
+      throw new TokenStoreError(
+        "TOKEN_DELETE_FAILED",
+        accountId,
+        `Could not delete the stored token for account "${accountId}".`,
+      );
     }
   }
 

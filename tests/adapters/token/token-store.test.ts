@@ -176,3 +176,37 @@ test("corrupt token JSON surfaces TOKEN_READ_FAILED", async () => {
   expect(error).toBeInstanceOf(TokenStoreError);
   expect((error as TokenStoreError).code).toBe("TOKEN_READ_FAILED");
 });
+
+test("delete removes the token from the keychain and leaves no fallback file", async () => {
+  const keychain = memoryKeychain();
+  const store = new KeychainTokenStore({ keychain, configDir });
+
+  await store.set("m365", "work", TOKENS);
+  await store.delete("m365", "work");
+
+  expect(keychain.entries.size).toBe(0);
+  await expect(stat(fallbackFile())).rejects.toThrow();
+});
+
+test("delete removes the age fallback file when the keychain is unavailable", async () => {
+  const store = new KeychainTokenStore({
+    keychain: unavailableKeychain(),
+    env: { [PASSPHRASE_ENV]: "correct horse battery staple" },
+    scryptWorkFactor: 12,
+    configDir,
+  });
+
+  await store.set("m365", "work", TOKENS);
+  await store.delete("m365", "work");
+
+  await expect(stat(fallbackFile())).rejects.toThrow();
+});
+
+test("delete fails when the keychain errors and no fallback file exists", async () => {
+  const store = new KeychainTokenStore({ keychain: unavailableKeychain(), configDir });
+
+  const error = await store.delete("m365", "work").catch((err: unknown) => err);
+
+  expect(error).toBeInstanceOf(TokenStoreError);
+  expect((error as TokenStoreError).code).toBe("TOKEN_DELETE_FAILED");
+});
