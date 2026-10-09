@@ -113,6 +113,8 @@ baseline_commit: '9273aca'
 
 ## Spec Change Log
 
+- 2026-10-09 — second review pass (ECH4): the frozen Intent named `state/<accountName>.json` while the same frozen block's EC2/2-A decision says `state/<provider>-<name>.json`; the human's explicit 2-A decision left exactly one reading, so the Intent's stale path reference was aligned to it. Known-bad state avoided: a reader following the Intent to `state/<name>.json` would miss Gmail's cursor file entirely.
+
 ## Review Triage Log
 
 <!-- 2026-10-09 — Story 5.4's first review pass: Blind Hunter (17 findings), Edge Case Hunter (3), Verification Gap (none). One verdict per finding, rendered before grouping. Patches were mooted by the loopback; they are recorded so the re-derivation honors them. -->
