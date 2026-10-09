@@ -270,7 +270,7 @@ test("LATE RECOVERY accepts a valid reply on the third and final attempt", async
   expect(log.entries).toEqual([]);
 });
 
-test("PROVIDER ERROR is caught, retried, and falls back to an empty set with one error log", async () => {
+test("PROVIDER ERROR re-throws to the caller instead of returning an empty set", async () => {
   const providerError = new Error("provider refused");
   const calls: ModelCall[] = [];
   const model: ModelPort = {
@@ -281,24 +281,22 @@ test("PROVIDER ERROR is caught, retried, and falls back to an empty set with one
   };
   const log = recordingLogPort();
 
-  const labels = await completeWithRetry({
-    model,
-    prompt: PROMPT,
-    schema: SCHEMA,
-    config: CONFIG,
-    taxonomy: TAXONOMY,
-    log: log.logPort,
-    context: CONTEXT,
-  });
+  const attempt = async () =>
+    completeWithRetry({
+      model,
+      prompt: PROMPT,
+      schema: SCHEMA,
+      config: CONFIG,
+      taxonomy: TAXONOMY,
+      log: log.logPort,
+      context: CONTEXT,
+    });
 
-  expect(calls).toHaveLength(3);
-  expect(labels).toEqual({ labels: [] });
-  expect(log.entries).toHaveLength(1);
-  const [entry] = log.entries;
-  expect(entry.level).toBe("error");
-  expect(entry.context?.reason).toBe("provider refused");
-  expect(entry.context?.raw).toBe(providerError);
-  expect(entry.context?.accountId).toBe("personal");
+  // PRD FR-1: a Jev/API transient error must reach the orchestrator, which retries
+  // with backoff and re-queues the message — no retries here, no empty-set fallback.
+  await expect(attempt()).rejects.toBe(providerError);
+  expect(calls).toHaveLength(1);
+  expect(log.entries).toEqual([]);
 });
 
 test("every attempt carries the unchanged prompt, schema and configured temperature", async () => {

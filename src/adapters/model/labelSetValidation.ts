@@ -89,9 +89,9 @@ export interface CompleteWithRetryOptions {
  * configured temperature. When the attempts are exhausted the last reply is logged once
  * through `LogPort.error` — with the raw response and the rejection reason — and an empty,
  * valid label set is returned, so an unclassifiable message degrades to no labels instead
- * of aborting the batch. A rejected `model.complete` is caught, its message recorded as
- * the attempt's reason, and the loop continues; the exhausted path still logs and returns
- * `{ labels: [] }`, so the unit never throws out of the per-message path.
+ * of aborting the batch. A rejecting `model.complete` (transport error) is *not* absorbed:
+ * it re-throws to the orchestrator, which owns retry-with-backoff and re-queues the message
+ * for the next cycle (PRD FR-1) — an outage must not read as a valid empty classification.
  */
 export async function completeWithRetry(options: CompleteWithRetryOptions): Promise<LabelSet> {
   const { model, prompt, schema, config, taxonomy, log, context } = options;
@@ -99,13 +99,7 @@ export async function completeWithRetry(options: CompleteWithRetryOptions): Prom
   let reason = "the model returned no response";
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    try {
-      raw = await model.complete(prompt, schema, config);
-    } catch (error) {
-      raw = error;
-      reason = error instanceof Error ? error.message : String(error);
-      continue;
-    }
+    raw = await model.complete(prompt, schema, config);
     const verdict = validateLabelSet(raw, taxonomy);
     if (verdict.ok) {
       return { labels: verdict.labels };

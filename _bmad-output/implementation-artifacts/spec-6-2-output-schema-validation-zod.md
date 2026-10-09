@@ -30,7 +30,7 @@ context:
 **Always:**
 - The accepted shape is exactly `{ labels: string[] }`: every entry must be a string present in the active taxonomy; an empty array is valid; unknown top-level keys are rejected (strict — matches `adapters/config/taxonomy.ts`'s `.strict()` precedent).
 - The retry reuses the same `ModelConfig` unchanged (no per-retry model/temperature mutation) and makes at most 3 calls (initial + 2 retries).
-- After the attempts are exhausted the unit yields `{ labels: [] }` and logs exactly one structured error carrying the raw response and the rejection reason; it never throws out of the per-message path.
+- After the attempts are exhausted on **validation** failure the unit yields `{ labels: [] }` and logs exactly one structured error carrying the raw response and the rejection reason. It never throws on validation failure; a failed model **call** (transport error) re-throws to the orchestrator, which owns retry-with-backoff and re-queues the message (PRD FR-1) — the two outcomes stay distinguishable.
 - The request is 6.1's `buildPrompt` output — no prompt changes, no re-derived format.
 - The unit is provider-agnostic and testable against a stub `ModelPort` with no real SDK.
 
@@ -50,6 +50,7 @@ context:
 | MALFORMED | raw is a string / `null` / `{}` / `{ labels: "Invoices" }` / a non-string entry / an extra key | rejected with a reason; retried | exhausted → `{ labels: [] }` + one error log (raw, reason) |
 | LABEL NOT IN TAXONOMY | raw `{ labels: ["Nope"] }` | rejected (membership) | as MALFORMED |
 | LATE RECOVERY | attempt 1 invalid, attempt 2 valid | accepted on attempt 2; no error log | n/a |
+| TRANSPORT FAILURE | `model.complete` rejects (provider/network error) | the error re-throws with no retries and no empty-set fallback | caller (orchestrator) logs and re-queues the message (PRD FR-1) |
 | DETERMINISM | same raw + taxonomy, twice | identical verdict; no argument mutated | n/a |
 
 </frozen-after-approval>
@@ -86,9 +87,11 @@ context:
 - 2026-10-09 (implementation): new `src/adapters/model/labelSetValidation.ts` (110 lines) exports `labelSetSchema(taxonomy)` (strict, membership-bound), `validateLabelSet(raw, taxonomy)`, and `completeWithRetry(options)`; new `tests/adapters/model/label-set-validation.test.ts` (264 lines, 11 tests) covers every I/O-matrix row plus retry budget, temperature/prompt/schema passthrough, and log context against a stub `ModelPort`; `src/adapters/index.ts` exports the module and its types. `MAX_ATTEMPTS = 3`. Core untouched — no `zod` in `core/`, `ModelPort` unchanged.
 - Signature deviation (human-confirmed 2026-10-09): the planning shorthand `completeWithRetry(model, prompt, schema, config, taxonomy, log)` became `completeWithRetry(options: CompleteWithRetryOptions)` to carry a `context: LogContext` (accountId, message id) into the exhausted-path log, matching the repo's options-object idiom.
 - Verified 2026-10-09 by the orchestrator: `bun run test` 25 files / 414 tests green + `tsc --noEmit`; `bun run lint` exit 0; `bun run build` exit 0. (One full-suite run flaked on the unrelated `tests/adapters/token/token-store.test.ts` 5s timeout under 25-worker load; it passed alone and the suite re-ran green.) Mutation checks by the implementer: removing `.strict()` fails MALFORMED; removing the membership refine fails 3 tests; `MAX_ATTEMPTS = 2` fails 3 tests — all reverted byte-identical.
+- 2026-10-09 (revisit pass, human-approved): transport failures no longer absorbed — see the Spec Change Log entry. Re-verified with the full suite after the change.
 - 2026-10-09 (review loop): step-04 triage ran with all four layers (verification-gap found none). Four `low`/`medium` patches applied by re-engaging the implementation subagent: provider rejections are now caught inside `completeWithRetry` and treated as a failed attempt; duplicate labels are rejected by the schema; `labelSetSchema` returns the inferred strict type instead of `z.ZodType<LabelSet>`; and the third-attempt recovery, duplicate, and provider-error tests were added. Re-verified: `bun run test` 25 files / 417 tests green + `tsc --noEmit`; `bun run lint` exit 0; `bun run build` exit 0. `review_loop_iteration` remains 0 — no spec re-derivation.
 ## Spec Change Log
 
+- 2026-10-09 (revisit pass, human-approved): Review-triage row 1's catch was wrong for transport failures. PRD FR-1 (`prd.md:47`) says Jev API transient errors retry with backoff and re-queue the message for the next cycle, so `completeWithRetry` must not absorb a rejecting `model.complete`. Amended: the catch removed (a transport error re-throws immediately, no retry, no fallback); the frozen "never throws" boundary narrowed to validation failure; the PROVIDER ERROR test now asserts propagation instead of an empty-set fallback. Known-bad state avoided: a transient outage silently becoming a valid-looking empty classification that idempotency (AD-5) marks as final. KEEP: validation exhaustion keeps the 3-attempt budget, the `{ labels: [] }` fallback and the single structured error — unchanged and correct.
 ## Review Triage Log
 
 Adversarial review of `5419c00`, 2026-10-09. All four layers reported (blind hunter, edge case hunter, verification gap, acceptance auditor): the verification-gap layer found no gaps; the others filed the rows below. No `intent_gap` or `bad_spec` entries — `review_loop_iteration` stays `0`.
