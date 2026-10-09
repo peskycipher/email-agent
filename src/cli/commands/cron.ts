@@ -117,7 +117,11 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
         ...(entry.folders === undefined ? {} : { folders: entry.folders }),
         ...(entry.batchSize === undefined ? {} : { batchSize: entry.batchSize }),
       }),
-      port: new M365Adapter({ fetchFn, getAccessToken: (accountName) => m365Auth.getAccessToken(accountName) }),
+      port: new M365Adapter({
+        fetchFn,
+        getAccessToken: (accountName) => m365Auth.getAccessToken(accountName),
+        logPort,
+      }),
     },
     gmail: {
       provider: "gmail",

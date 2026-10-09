@@ -137,12 +137,17 @@ export async function runSyncCategories(
     tokenStore,
     accountSettings: { read: (accountName) => readGmailAccountSettings(accountName, configDir) },
   });
+  const logPort = runtime.logPort ?? createConsoleLogPort();
   const providers: ProviderPlan[] = [
     {
       provider: "m365",
       noun: "categories",
       listEnabledAccounts: () => listM365Accounts(configDir),
-      port: new M365Adapter({ fetchFn, getAccessToken: (accountName) => m365Auth.getAccessToken(accountName) }),
+      port: new M365Adapter({
+        fetchFn,
+        getAccessToken: (accountName) => m365Auth.getAccessToken(accountName),
+        logPort,
+      }),
     },
     {
       provider: "gmail",
@@ -151,7 +156,6 @@ export async function runSyncCategories(
       port: new GmailAdapter({ fetchFn, getAccessToken: (accountName) => gmailAuth.getAccessToken(accountName) }),
     },
   ];
-  const logPort = runtime.logPort ?? createConsoleLogPort();
 
   if (options.account === "all") {
     let failures = 0;

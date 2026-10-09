@@ -22,7 +22,7 @@ function readSender(entry: unknown): { email: string; name: string } {
 }
 
 /** A missing or non-array `categories` degrades to `[]`; a non-string member is dropped. */
-function readCategories(entry: unknown): string[] {
+export function readCategories(entry: unknown): string[] {
   if (typeof entry !== "object" || entry === null) return [];
   const categories = (entry as Record<string, unknown>).categories;
   if (!Array.isArray(categories)) return [];
