@@ -55,7 +55,7 @@ development_status:
   4-3-gmail-label-sync-multi-account: done
   epic-4-retrospective: done
 
-  epic-5: in-progress
+  epic-5: done
   5-1-m365-backfill-message-fetch-multi-account: done
   5-2-m365-incremental-message-fetch-cron-multi-account: done
   5-3-gmail-backfill-message-fetch-multi-account: done
