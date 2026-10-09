@@ -358,6 +358,60 @@ test("CONFIG_BAD: unparseable config.yaml names the file", async () => {
   expect(error.message).toContain("config.yaml");
 });
 
+test("CONFIG_TYPO: a key reaching for the overrides key is a typed error, never silently stripped (CONFIG_KEY)", async () => {
+  await writeSource(defaultLabels());
+  // The guard folds case and separators and matches truncated spellings; an interior typo
+  // ("taxonmy") stays outside its reach — accepted on a reader Epic 11 replaces (the guard's comment).
+  for (const config of ["TaxonomyOverrides: []\n", "taxonomy_overrides: []\n", "taxonomyOverride: []\n"]) {
+    await writeRawConfig(config);
+    const error = await loadError();
+    expect(error.code).toBe("CONFIG_INVALID");
+    expect(error.message).toContain("rename it");
+  }
+});
+
+test("CONFIG_TYPO: several near-miss keys are diagnosed in one message, not one per rerun (CONFIG_KEY)", async () => {
+  await writeSource(defaultLabels());
+  await writeRawConfig("TaxonomyOverrides: []\ntaxonomyOverride: []\n");
+
+  const error = await loadError();
+
+  expect(error.message).toContain('"TaxonomyOverrides"');
+  expect(error.message).toContain('"taxonomyOverride"');
+});
+
+test("CONFIG_TOLERANT: a legitimate taxonomy* key that is not the override key is left for Epic 11 (CONFIG_KEY)", async () => {
+  await writeSource(defaultLabels());
+  await writeRawConfig("taxonomyFile: custom.yaml\n");
+
+  const labels = (await load()) as Label[];
+
+  expect(labels.map((label) => label.name)).toEqual(DEFAULT_NAMES);
+});
+
+test("CONFIG_NOT_A_MAPPING: a scalar config.yaml is told what a config must be, not blamed on taxonomyOverrides", async () => {
+  await writeSource(defaultLabels());
+  await writeRawConfig("just a scalar value\n");
+
+  const error = await loadError();
+
+  expect(error.code).toBe("CONFIG_INVALID");
+  expect(error.message).toContain("must be a YAML mapping");
+  expect(error.message).toContain("a scalar value");
+  expect(error.message).not.toContain('"taxonomyOverrides" must be a list');
+});
+
+test("CONFIG_NOT_A_MAPPING: a list config.yaml gets the same diagnosis (CONFIG_KEY)", async () => {
+  await writeSource(defaultLabels());
+  await writeRawConfig("- one\n- two\n");
+
+  const error = await loadError();
+
+  expect(error.code).toBe("CONFIG_INVALID");
+  expect(error.message).toContain("must be a YAML mapping");
+  expect(error.message).toContain("a list");
+});
+
 test("CONFIG_BAD: a non-list taxonomyOverrides names the file and the key", async () => {
   await writeSource(defaultLabels());
   await writeRawConfig("taxonomyOverrides: nope\n");

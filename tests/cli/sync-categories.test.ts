@@ -223,8 +223,10 @@ test("--account all with no enabled accounts exits 1 with a hint naming both pro
   expect(capturedLines(stdout)).toHaveLength(0);
   const errors = capturedLines(stderr).join("");
   expect(errors).toContain("No enabled m365 or gmail accounts found");
-  expect(errors).toContain("~/.config/email-classify/accounts/m365/<name>.yaml");
-  expect(errors).toContain("~/.config/email-classify/accounts/gmail/<name>.yaml");
+  // An injected configDir is named correctly in the hint (Epic-4 retro item 5b) — not the ~ display form.
+  expect(errors).toContain(join(configDir, "accounts/m365/<name>.yaml"));
+  expect(errors).toContain(join(configDir, "accounts/gmail/<name>.yaml"));
+  expect(errors).not.toContain("~/.config/email-classify/accounts");
 });
 
 test("--account <name> routes to the provider that has it and logs through the injected LogPort", async () => {
@@ -298,7 +300,13 @@ test("--account <name> in neither provider's listing exits 1 with the setup hint
   expect(requests).toHaveLength(0);
   const errors = capturedLines(stderr).join("");
   expect(errors).toContain('No enabled m365 or gmail account named "ghost" found');
+  // The named hint names the injected configDir's real paths too (Epic-4 retro item 5b).
+  expect(errors).toContain(join(configDir, "accounts/m365/ghost.yaml"));
+  expect(errors).not.toContain("~/.config/email-classify/accounts");
   expect(errors).toContain("accounts/m365/ghost.yaml");
+  // An injected configDir is named correctly in the named hint too (Epic-4 retro item 5b).
+  expect(errors).toContain(join(configDir, "accounts/m365/ghost.yaml"));
+  expect(errors).not.toContain("~/.config/email-classify/accounts");
   expect(errors).toContain("accounts/gmail/ghost.yaml");
 });
 
@@ -356,6 +364,64 @@ test("--account all still syncs the other provider when one listing throws", asy
   expect(capturedLines(stdout).join("")).toContain("personal: Ensured 11 labels.");
   expect(requests).toHaveLength(12);
   expect(requests[0]?.url).toBe(GMAIL_LABELS_URL);
+});
+
+test("--account <name> syncs the healthy provider when the other's listing throws (NAMED_LISTING_THROW)", async () => {
+  // A file where the gmail accounts directory belongs makes its listing throw ENOTDIR.
+  await rm(join(configDir, "accounts", "gmail"), { recursive: true, force: true });
+  await writeFile(join(configDir, "accounts", "gmail"), "not a directory", "utf8");
+  await writeAccount("m365", "work");
+  const { fetchFn, requests } = recordingFetch([jsonResponse({ value: [] }), ...created(11)]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runSyncCategories(
+    { account: "work" },
+    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("m365", "work") }), configDir },
+  );
+
+  expect(code).toBe(1);
+  expect(capturedLines(stderr).join("")).toContain("gmail:");
+  expect(capturedLines(stdout).join("")).toContain("work: Ensured 11");
+  expect(requests).toHaveLength(12);
+  expect(requests[0]?.url).toBe(M365_LISTS_URL);
+});
+
+test("--account all: a listing failure gets the counted line and suppresses the setup hint (HINT_GATE)", async () => {
+  // No account files at all, and one listing throws.
+  await rm(join(configDir, "accounts", "m365"), { recursive: true, force: true });
+  await writeFile(join(configDir, "accounts", "m365"), "not a directory", "utf8");
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runSyncCategories({ account: "all" }, { fetchFn, configDir });
+
+  expect(code).toBe(1);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("m365:");
+  // The counted line the account-failure paths already print.
+  expect(errors).toContain("1 of 2 provider listing(s) failed.");
+  // The setup hint would contradict the failure lines — it is suppressed, as the named path's gate already does.
+  expect(errors).not.toContain("No enabled m365 or gmail accounts found");
+  expect(capturedLines(stdout)).toHaveLength(0);
+  expect(requests).toHaveLength(0);
+});
+
+test("--account all with neither provider listing reports the injected configDir's real paths, not the ~ display form (HINT_GATE)", async () => {
+  const realDir = configDir;
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  await runSyncCategories({ account: "all" }, { fetchFn, configDir: realDir });
+
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain(join(realDir, "accounts/m365"));
+  expect(errors).toContain(join(realDir, "accounts/gmail"));
+  expect(errors).not.toContain("~/.config/email-classify/accounts");
+  expect(capturedLines(stdout)).toHaveLength(0);
+  expect(requests).toHaveLength(0);
 });
 
 test("--account <name> syncs the healthy provider when the other reports a settings error", async () => {

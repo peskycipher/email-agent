@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { loadTaxonomy } from "../../adapters/config/taxonomy.js";
 import {
   accountsDirDisplayPath as gmailAccountsDirDisplayPath,
@@ -43,7 +44,7 @@ interface EnabledAccountsListing {
 
 /** One provider's half of the command: its listing, its adapter, and what it calls the labels. */
 interface ProviderPlan {
-  provider: string;
+  provider: "m365" | "gmail";
   /** The orchestrator's log noun — M365 ensures categories, Gmail ensures labels. */
   noun: string;
   port: CategorySyncTarget;
@@ -76,13 +77,27 @@ export function createConsoleLogPort(): LogPort {
 }
 
 /** Both providers' setups in one line, for when neither has an account to act on. */
-function noAccountsHint(account?: string): string {
-  const file = account === undefined ? "<name>.yaml" : `${account}.yaml`;
+function noAccountsHint(account: string | undefined, configDir: string | undefined): string {  const file = account === undefined ? "<name>.yaml" : `${account}.yaml`;
+  // An injected configDir (tests, a future XDG override) must be named correctly in the hint —
+  // not the home display path the constants spell.
+  const dir = (displayPath: () => string, subpath: string): string =>
+    configDir === undefined ? displayPath() : join(configDir, subpath);
   return (
     `No enabled ${account === undefined ? "m365 or gmail accounts" : `m365 or gmail account named "${account}"`} found` +
-    ` — add ${m365AccountsDirDisplayPath()}/${file} or ${gmailAccountsDirDisplayPath()}/${file}` +
+    ` — add ${dir(m365AccountsDirDisplayPath, "accounts/m365")}/${file} or ${dir(gmailAccountsDirDisplayPath, "accounts/gmail")}/${file}` +
     ` with "enabled: true"${account === undefined ? "." : ", then re-run."}`
   );
+}
+
+/** One provider's setup pointer — for when that provider listed cleanly but has nothing to act on. */
+function providerHint(provider: "m365" | "gmail", configDir: string | undefined): string {
+  const dir =
+    configDir === undefined
+      ? provider === "m365"
+        ? m365AccountsDirDisplayPath()
+        : gmailAccountsDirDisplayPath()
+      : join(configDir, provider === "m365" ? "accounts/m365" : "accounts/gmail");
+  return `No enabled ${provider} accounts found — add ${dir}/<name>.yaml with "enabled: true".`;
 }
 
 /**
@@ -140,6 +155,9 @@ export async function runSyncCategories(
 
   if (options.account === "all") {
     let failures = 0;
+    let listingFailures = 0;
+    /** Providers that listed (possibly with zero accounts) — the named-account branch's symmetric counters. */
+    const emptyListed: Array<"m365" | "gmail"> = [];
     let selected = 0;
     for (const plan of providers) {
       let listing: EnabledAccountsListing;
@@ -148,6 +166,7 @@ export async function runSyncCategories(
       } catch (error) {
         // One provider's listing failure costs that provider, not the whole run.
         failures += 1;
+        listingFailures += 1;
         process.stderr.write(`${plan.provider}: ${errorLine(error)}\n`);
         continue;
       }
@@ -157,6 +176,7 @@ export async function runSyncCategories(
       const accounts = listing.accounts.map((account) => account.name);
       const total = accounts.length + listing.errors.length;
       selected += total;
+      if (listing.accounts.length === 0) emptyListed.push(plan.provider);
       const providerFailures =
         (await syncCategories({ accounts, labels, mailPort: plan.port, logPort, noun: plan.noun })) +
         listing.errors.length;
@@ -165,8 +185,21 @@ export async function runSyncCategories(
         process.stderr.write(`${providerFailures} of ${total} ${plan.provider} account(s) failed.\n`);
       }
     }
+    if (listingFailures > 0) {
+      // The counted line account failures already get (Epic-4 retro item 2): a listing failure
+      // is reported the same way, not only by its provider line.
+      process.stderr.write(`${listingFailures} of ${providers.length} provider listing(s) failed.\n`);
+    }
     if (selected === 0) {
-      process.stderr.write(`${noAccountsHint()}\n`);
+      if (listingFailures === 0) {
+        process.stderr.write(`${noAccountsHint(undefined, runtime.configDir)}\n`);
+      } else {
+        // A provider whose listing succeeded still owes its user a setup pointer — the counted
+        // line above names the failures, so the pointer no longer contradicts them.
+        for (const listedAndEmpty of emptyListed) {
+          process.stderr.write(`${providerHint(listedAndEmpty, runtime.configDir)}\n`);
+        }
+      }
       return 1;
     }
     return failures > 0 ? 1 : 0;
@@ -174,6 +207,7 @@ export async function runSyncCategories(
 
   const account = options.account;
   let failures = 0;
+  let listingFailures = 0;
   let synced = 0;
   for (const plan of providers) {
     let listing: EnabledAccountsListing;
@@ -182,6 +216,7 @@ export async function runSyncCategories(
     } catch (error) {
       // Only the failing provider is affected; the other still lists and syncs.
       failures += 1;
+      listingFailures += 1;
       process.stderr.write(`${plan.provider}: ${errorLine(error)}\n`);
       continue;
     }
@@ -200,8 +235,13 @@ export async function runSyncCategories(
       noun: plan.noun,
     });
   }
+  if (listingFailures > 0) {
+    // The same counted line the --account all branch prints, so failure reporting does not
+    // depend on the selection mode (Epic-4 retro item 2's asymmetry finding).
+    process.stderr.write(`${listingFailures} of ${providers.length} provider listing(s) failed.\n`);
+  }
   if (synced === 0 && failures === 0) {
-    process.stderr.write(`${noAccountsHint(account)}\n`);
+    process.stderr.write(`${noAccountsHint(account, runtime.configDir)}\n`);
     return 1;
   }
   return failures > 0 ? 1 : 0;
