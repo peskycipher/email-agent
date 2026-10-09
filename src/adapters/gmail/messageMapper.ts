@@ -11,7 +11,7 @@ function readString(entry: unknown, key: string): string {
 }
 
 /** Gmail's `labelIds`; a missing or non-array value degrades to `[]` and a non-string member is dropped. */
-function readLabelIds(entry: unknown): string[] {
+export function readLabelIds(entry: unknown): string[] {
   if (typeof entry !== "object" || entry === null) return [];
   const labelIds = (entry as Record<string, unknown>).labelIds;
   if (!Array.isArray(labelIds)) return [];

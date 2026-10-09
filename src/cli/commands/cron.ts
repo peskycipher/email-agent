@@ -104,7 +104,8 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
   });
   const gmailAdapter = new GmailAdapter({
     fetchFn,
-    getAccessToken: (accountName) => gmailAuth.getAccessToken(accountName),
+    getAccessToken: gmailAuth.getAccessToken.bind(gmailAuth),
+    logPort,
   });
   const plans: Record<CronCommandOptions["source"], IncrementalProviderPlan> = {
     m365: {
@@ -119,7 +120,7 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
       }),
       port: new M365Adapter({
         fetchFn,
-        getAccessToken: (accountName) => m365Auth.getAccessToken(accountName),
+        getAccessToken: m365Auth.getAccessToken.bind(m365Auth),
         logPort,
       }),
     },

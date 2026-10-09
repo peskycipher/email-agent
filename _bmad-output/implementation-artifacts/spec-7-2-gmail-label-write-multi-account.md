@@ -2,7 +2,7 @@
 title: 'Story 7.2: Gmail Label Write (Multi-Account)'
 type: 'feature'
 created: '2026-10-10'
-status: 'in-progress'
+status: 'done'
 route: 'dispatch'
 baseline_commit: '3d49a0401984cc76e92dc79a434095bb53614c5a'
 review_loop_iteration: 0
@@ -85,12 +85,12 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/adapters/gmail/gmailWire.ts` — extract URLs, request builders, bounded `send`, batch parsing, `readJsonObject` from `GmailAdapter.ts` — pure moves, no behaviour change.
-- [ ] `src/adapters/gmail/{gmailLabelSync,gmailMessageFetch,gmailHistory}.ts` — extract the three existing concerns, tests moving with them green — the split the Epic 6 retro asked for.
-- [ ] `src/adapters/gmail/gmailLabelWrite.ts` + `GmailAdapter.ts` — implement `writeLabels` (names → cached ids → read current `labelIds` → modify only when something is missing) and delegate to it — the story's whole behaviour.
-- [ ] `src/adapters/gmail/messageMapper.ts` — export the existing `readLabelIds` so both paths share one rule.
-- [ ] `tests/adapters/gmail/` — split the 1210-line test file along the same seams behind one shared harness, and pin every I/O-matrix row for `writeLabels` — the ACs are only real if tested.
-- [ ] `src/cli/commands/{backfill,cron,sync-categories}.ts` — pass the log port into `GmailAdapter`.
+- [x] `src/adapters/gmail/gmailWire.ts` — extract URLs, request builders, bounded `send`, batch parsing, `readJsonObject` from `GmailAdapter.ts` — pure moves, no behaviour change.
+- [x] `src/adapters/gmail/{gmailLabelSync,gmailMessageFetch,gmailHistory}.ts` — extract the three existing concerns, tests moving with them green — the split the Epic 6 retro asked for.
+- [x] `src/adapters/gmail/gmailLabelWrite.ts` + `GmailAdapter.ts` — implement `writeLabels` (names → cached ids → read current `labelIds` → modify only when something is missing) and delegate to it — the story's whole behaviour.
+- [x] `src/adapters/gmail/messageMapper.ts` — export the existing `readLabelIds` so both paths share one rule.
+- [x] `tests/adapters/gmail/` — split the 1210-line test file along the same seams behind one shared harness, and pin every I/O-matrix row for `writeLabels` — the ACs are only real if tested.
+- [x] `src/cli/commands/{backfill,cron,sync-categories}.ts` — pass the log port into `GmailAdapter`.
 
 **Acceptance Criteria:**
 - Given an account whose cache maps `Crypto→L2` and a message carrying `["L1"]`, when `writeLabels` runs, then it POSTs `modify` with `addLabelIds: ["L2"]` and sends no `removeLabelIds`.
@@ -103,6 +103,32 @@ context: []
 ## Spec Change Log
 
 ## Review Triage Log
+
+- **patch pass (mechanical)** — the patch dispatch lane failed to start (async runner startup timeout), so every `→ patch` row below was applied and verified in-session: `.bind` at all six auth sites, plus the read-URL/encoding/PARTIAL/CASE_MISMATCH/retry-fails/forceRefresh assertions, the docs, `FetchOpts`, and the unused exports. `bun run test` exits 0 (500 passed), `lint` 0, `build` 0.
+
+- **false** — blind (3 rows: diff omits untracked files / story subject missing / net test deletion): my diff artifact was built with `git diff`, which excludes untracked files. Regenerated with `git add -N` (16 files, 4578 lines) and re-reviewed. The review's own count (`git status`) disproves a coverage loss: all 60 moved tests are present across the four new suites — independently confirmed by the verification-gap layer.
+- **false** — blind: making `GmailAdapterDeps.logPort` required is an undocumented interface break. It is the frozen spec's Decisions ("gains a required `logPort`", mirroring M365 after Story 7.1) and the Code Map; the three CLI sites are updated in the same diff.
+- **false** — blind: `writeLabels` has no production caller. Frozen Never: "No orchestration or CLI work … Epic 8 drives fetch → classify → write". Reachability through `MailPort` is the intended boundary.
+- **false** — blind: the write suite drops the `AbortSignal` boundedness assertion the deleted file held. The harness still records `signal`, and the assertion survives in its new home (`gmail-label-sync.test.ts:52`); the write path never had one, and M365's write tests have none either.
+- **false** — blind: no 429/no-retry case on the write path. 429 backoff is Epic 9's, and the frozen API_ERROR row already covers every non-2xx other than 401/404.
+- **false** — blind: `src/adapters/index.ts` untouched. The facade deliberately re-exports `GmailAdapterError`/`GmailLabelIds`/`GmailHistoryOpts`/`GmailHistoryOutcome`, so the barrel resolves exactly as before — the facade is the public entry point.
+- **false** — blind: no supporting docs for the split or the new error code. No error-code inventory exists under `docs/`, and the story's Code Map is the module map.
+- **false** — blind: the facade's own `labelIdsFor` surface is no longer unit-tested. It is pinned in `gmail-label-sync.test.ts:102,122,285`.
+- **low** — rejected — blind: `GmailAdapterServices`/error types live in `gmailWire.ts`, against the frozen module summary. Real but cosmetic, and the smallest fix is moving shared DI/error types between modules — more than a direct correction; `send` owns the error type it throws.
+- **low** — rejected — blind: facade methods shadow the identically named module imports. Legal and unambiguous (bare identifiers resolve to the import), and the fix is a rename across five modules plus their tests — churn for taste.
+- **high** — blind + edge + vgap: the CLI wiring `(accountName) => gmailAuth.getAccessToken(accountName)` drops the second argument at all three Gmail sites, so the `{ forceRefresh: true }` the new 401 path passes is discarded and the replay re-uses the token Gmail just rejected. Verified: `GmailAuthAdapter.getAccessToken` only refreshes when the flag is set (`GmailAuthAdapter.ts:295`). The M365 wiring has the same latent gap from Story 7.1 — same seam, so fixed together. → patch.
+- **medium** — blind (2 rows: read URL unpinned, `startsWith` assertions) + vgap: the write tests never assert the read URL, so a wrong query (`?format=minimal&fields=labelIds`) would be answered 404 and swallowed by the 404 absorption — a silently skipped write. M365's sibling pins its read URL exactly. → patch.
+- **medium** — blind + vgap: nothing pins that `messageId` is percent-encoded, though the frozen Code Map calls it out (`+`/`/`/`=`). An unencoded id containing `/` 404s and is absorbed as "not found". M365's HAPPY test uses `AAMkAG==`. → patch.
+- **medium** — blind: the CASE_MISMATCH row is tested with a wholly absent name (`Promos` seeded, `Crypto` predicted), not the same name in different case, so the exact, case-sensitive cache lookup the frozen Decisions require is unpinned. → patch.
+- **medium** — blind: no partial-overlap case (some predicted ids present, some absent) — the delta loop's actual behavior, and the only shape that exercises "only the ids not already present". → patch.
+- **medium** — blind + edge + vgap: the frozen UNAUTHORIZED row's "typed error if the replay also fails" cell is unpinned, though the code delivers it (replay sits outside the `try`). M365 pins it (`UNAUTHORIZED_RETRY_FAILS`). → patch.
+- **medium** — vgap: `harness.ts`'s `tokenSource` discards the options argument, so the UNAUTHORIZED test counts calls without ever asserting `{ forceRefresh: true }`; M365's double records and asserts the flag. → patch (same test edit as the high finding's guard).
+- **low** — blind: only a read-time 401 is exercised; the catch wraps the modify call too. → patch (one test).
+- **low** — blind: `gmailWire.ts`'s `clampBatchSize` doc says "`$top` is the batch size" — an M365 OData leftover in a Gmail module whose parameter is `maxResults`. → patch (one word).
+- **low** — blind: `gmailMessageFetch.ts`'s "the same rule `listLabels` applies" now points at a private function in another module. → patch (comment).
+- **low** — blind: `messagesListUrl` accepts an ad-hoc `{ folder?; batchSize?; since? }` where it took `FetchOpts`, against the frozen "pure moves" scope. → patch (restore the DTO type; the only caller already passes one).
+- **low** — blind: `DEFAULT_LABEL`, `MAX_BATCH_SIZE`, `DEFAULT_BATCH_SIZE`, `REQUEST_TIMEOUT_MS` are exported from `gmailWire.ts` with no consumer outside it. → patch (drop the unused `export`s).
+- **low** — blind: `GmailAdapterServices`'s two mutable maps have no stated ownership, and the facade's `writeLabels`/class docs omit the 401 replay and 404 absorption the implementation has. → patch (doc comments only).
 
 ## Design Notes
 

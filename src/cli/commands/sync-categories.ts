@@ -145,7 +145,7 @@ export async function runSyncCategories(
       listEnabledAccounts: () => listM365Accounts(configDir),
       port: new M365Adapter({
         fetchFn,
-        getAccessToken: (accountName) => m365Auth.getAccessToken(accountName),
+        getAccessToken: m365Auth.getAccessToken.bind(m365Auth),
         logPort,
       }),
     },
@@ -153,7 +153,11 @@ export async function runSyncCategories(
       provider: "gmail",
       noun: "labels",
       listEnabledAccounts: () => listGmailAccounts(configDir),
-      port: new GmailAdapter({ fetchFn, getAccessToken: (accountName) => gmailAuth.getAccessToken(accountName) }),
+      port: new GmailAdapter({
+        fetchFn,
+        getAccessToken: gmailAuth.getAccessToken.bind(gmailAuth),
+        logPort,
+      }),
     },
   ];
 

@@ -106,7 +106,7 @@ export async function runBackfill(
       }),
       port: new M365Adapter({
         fetchFn,
-        getAccessToken: (accountName) => m365Auth.getAccessToken(accountName),
+        getAccessToken: m365Auth.getAccessToken.bind(m365Auth),
         logPort,
       }),
     },
@@ -121,7 +121,11 @@ export async function runBackfill(
         folders: entry.labels ?? ["INBOX"],
         ...(entry.batchSize === undefined ? {} : { batchSize: entry.batchSize }),
       }),
-      port: new GmailAdapter({ fetchFn, getAccessToken: (accountName) => gmailAuth.getAccessToken(accountName) }),
+      port: new GmailAdapter({
+        fetchFn,
+        getAccessToken: gmailAuth.getAccessToken.bind(gmailAuth),
+        logPort,
+      }),
     },
   };
   const plan = plans[options.source];
