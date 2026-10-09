@@ -121,8 +121,8 @@ function gmailListPage(ids: string[]): FetchResponseLike {
 /** A `multipart/mixed` batch response, one metadata detail per id. */
 function gmailBatchResponse(ids: string[], boundary = "batch_cli"): FetchResponseLike {
   const parts = ids.map(
-    (id) =>
-      `--${boundary}\r\nContent-Type: application/http\r\nContent-ID: <response-message-1>\r\n\r\n` +
+    (id, index) =>
+      `--${boundary}\r\nContent-Type: application/http\r\nContent-ID: <response-message-${index + 1}>\r\n\r\n` +
       `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n` +
       `${JSON.stringify({
         id,

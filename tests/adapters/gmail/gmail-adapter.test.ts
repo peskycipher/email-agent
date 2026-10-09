@@ -406,10 +406,10 @@ function batchResponse(
   boundary = "batch_abc",
 ): MultipartTestResponse {
   const chunks = parts.map(
-    (part) =>
+    (part, index) =>
       `--${boundary}\r\n` +
       `Content-Type: application/http\r\n` +
-      `Content-ID: <response-message-1>\r\n` +
+      `Content-ID: <response-message-${index + 1}>\r\n` +
       `\r\n` +
       `HTTP/1.1 ${part.status ?? 200} OK\r\n` +
       `Content-Type: application/json\r\n` +
@@ -527,31 +527,34 @@ test("a 2xx batch part without a message id is a typed error, never an empty DTO
 });
 
 test("correlates response parts by Content-ID, so a reordered batch cannot swap ids (BATCH_GET)", async () => {
-  const boundary = "batch_abc";
-  const part = (n: number, body: unknown): string =>
-    `--${boundary}\r\n` +
-    `Content-Type: application/http\r\n` +
-    `Content-ID: <message-${n}>\r\n` +
-    `\r\n` +
-    `HTTP/1.1 200 OK\r\n` +
-    `Content-Type: application/json\r\n` +
-    `\r\n` +
-    `${JSON.stringify(body)}\r\n\r\n`;
-  const text = `${part(2, gmailDetail("m2"))}${part(1, gmailDetail("m1"))}--${boundary}--\r\n`;
-  const response: MultipartTestResponse = {
-    ok: true,
-    status: 200,
-    headers: { get: () => `multipart/mixed; boundary="${boundary}"` },
-    json: async () => ({}),
-    text: async () => text,
-  };
-  const { fetchFn } = scriptedFetch([messageListPage(["m1", "m2"]), response]);
-  const adapter = new GmailAdapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  for (const prefix of ["", "response-"]) {
+    const boundary = "batch_abc";
+    const part = (n: number, body: unknown): string =>
+      `--${boundary}\r\n` +
+      `Content-Type: application/http\r\n` +
+      `Content-ID: <${prefix}message-${n}>\r\n` +
+      `\r\n` +
+      `HTTP/1.1 200 OK\r\n` +
+      `Content-Type: application/json\r\n` +
+      `\r\n` +
+      `${JSON.stringify(body)}\r\n\r\n`;
+    const text = `${part(2, gmailDetail("m2"))}${part(1, gmailDetail("m1"))}--${boundary}--\r\n`;
+    const response: MultipartTestResponse = {
+      ok: true,
+      status: 200,
+      headers: { get: () => `multipart/mixed; boundary="${boundary}"` },
+      json: async () => ({}),
+      text: async () => text,
+    };
+    const { fetchFn } = scriptedFetch([messageListPage(["m1", "m2"]), response]);
+    const adapter = new GmailAdapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
 
-  const messages = await adapter.fetchMessages({ source: "gmail", accountId: "personal" });
+    // The parts arrive reversed; the Content-ID still maps each DTO to its own id — in both
+    // Google's documented `<response-message-N>` echo and the request-echo form.
+    const messages = await adapter.fetchMessages({ source: "gmail", accountId: "personal" });
 
-  // The parts arrive reversed; the Content-ID still maps each DTO to its own id.
-  expect(messages.map((message) => message.id)).toEqual(["m1", "m2"]);
+    expect(messages.map((message) => message.id)).toEqual(["m1", "m2"]);
+  }
 });
 
 const batchSizeCases: Array<[number, string]> = [
@@ -603,6 +606,74 @@ test("follows nextPageToken and hydrates every page's ids exactly once (PAGED)",
   expect(listGets).toHaveLength(2);
   expect(listGets[0]?.url).toBe(`${MESSAGES_URL}?labelIds=INBOX&maxResults=50`);
   expect(listGets[1]?.url).toBe(`${MESSAGES_URL}?labelIds=INBOX&maxResults=50&pageToken=PAGE_2`);
+});
+
+test("an id repeated across pages is hydrated exactly once (PAGED)", async () => {
+  const { fetchFn, requests } = scriptedFetch([
+    messageListPage(["m1"], "PAGE_2"),
+    batchResponse([{ body: gmailDetail("m1") }], "batch_1"),
+    messageListPage(["m1", "m2"]),
+    batchResponse([{ body: gmailDetail("m2") }], "batch_2"),
+  ]);
+  const adapter = new GmailAdapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+  const messages = await adapter.fetchMessages({ source: "gmail", accountId: "personal" });
+
+  // Mail arriving mid-backfill can put one message on two pages; it is hydrated exactly once.
+  expect(messages.map((message) => message.id)).toEqual(["m1", "m2"]);
+  expect(requests.filter((request) => request.method === "POST")).toHaveLength(2);
+});
+
+test("a message already returned for the account is not returned by a second label walk (LABEL)", async () => {
+  const { fetchFn, requests } = scriptedFetch([
+    messageListPage(["m1"]),
+    batchResponse([{ body: gmailDetail("m1") }], "batch_1"),
+    messageListPage(["m1", "m2"]),
+    batchResponse([{ body: gmailDetail("m2") }], "batch_2"),
+  ]);
+  const adapter = new GmailAdapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+  const first = await adapter.fetchMessages({ source: "gmail", accountId: "personal" });
+  // Gmail labels overlap by design: m1 is listed again under Label_5.
+  const second = await adapter.fetchMessages({ source: "gmail", accountId: "personal", folder: "Label_5" });
+
+  expect(first.map((message) => message.id)).toEqual(["m1"]);
+  // The second walk returns only the message the first did not — no duplicate DTO, no double count.
+  expect(second.map((message) => message.id)).toEqual(["m2"]);
+  expect(requests.filter((request) => request.method === "POST")).toHaveLength(2);
+});
+
+test("a list entry without an id fails the account, never a silent drop (LIST_MALFORMED)", async () => {
+  const { fetchFn } = scriptedFetch([jsonResponse({ messages: [{}] })]);
+  const adapter = new GmailAdapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+  const error = (await adapter
+    .fetchMessages({ source: "gmail", accountId: "personal" })
+    .catch((err: unknown) => err)) as GmailAdapterError;
+
+  expect(error).toBeInstanceOf(GmailAdapterError);
+  expect(error.code).toBe("LIST_MESSAGES_FAILED");
+  expect(error.message).toContain("without an id");
+});
+
+test("a present-but-malformed page token fails the account, never a quiet truncated finish (PAGED)", async () => {
+  for (const badToken of ["", 7]) {
+    const { fetchFn, requests } = scriptedFetch([
+      jsonResponse({ messages: [{ id: "m1" }], nextPageToken: badToken }),
+      batchResponse([{ body: gmailDetail("m1") }], "batch_1"),
+    ]);
+    const adapter = new GmailAdapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+    const error = (await adapter
+      .fetchMessages({ source: "gmail", accountId: "personal" })
+      .catch((err: unknown) => err)) as GmailAdapterError;
+
+    expect(error).toBeInstanceOf(GmailAdapterError);
+    expect(error.code).toBe("LIST_MESSAGES_FAILED");
+    expect(error.message).toContain("malformed page token");
+    // The page's one list GET and its batch went out; the unusable token was never followed.
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(1);
+  }
 });
 
 test("the token seam's rejection fails the fetch with no Gmail call (AUTH)", async () => {

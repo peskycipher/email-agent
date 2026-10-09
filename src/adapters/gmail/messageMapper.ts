@@ -26,7 +26,7 @@ function readLabelIds(entry: unknown): string[] {
 function readInternalDate(entry: unknown): string {
   if (typeof entry !== "object" || entry === null) return "";
   const value = (entry as Record<string, unknown>).internalDate;
-  if (typeof value !== "string" || value.length === 0) return "";
+  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) return "";
   const millis = Number(value);
   if (!Number.isFinite(millis)) return "";
   const date = new Date(millis);

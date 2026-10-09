@@ -108,4 +108,8 @@
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-5-3-gmail-backfill-message-fetch-multi-account.md`
   summary: The `--source` help/example text added for Gmail backfill is only manually verifiable.
-  evidence: `src/cli/index.ts` calls `program.parseAsync` on import, so no test imports it; the `--source gmail` help shares the entry-point exposure already deferred for `--auth`/`--sync-categories`/`--backfill`/`--cron`. Closing it needs the entry-point refactor (`main.ts` + injected argv). Found by the verification-gap layer (2026-10-09).
+  evidence: `src/cli/index.ts:20-23` — the `--source` option — lives in a program that `parseAsync`s on import, so no test imports it; the `--source gmail` help shares the entry-point exposure already deferred for `--auth`/`--sync-categories`/`--backfill`/`--cron`. Closing it needs the entry-point refactor (`main.ts` + injected argv). Found by the verification-gap layer (2026-10-09).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-3-gmail-backfill-message-fetch-multi-account.md`
+  summary: A backfill acquires its access token once and can expire mid-walk on a long page walk.
+  evidence: `src/adapters/gmail/GmailAdapter.ts`'s `fetchMessages` (and M365's backfill, Story 5.1's same shape) calls `getAccessToken` once before an unbounded page walk, so a walk that outlives `TokenSet.expiresAt` fails the whole account as a late typed error with no re-acquisition. Refresh-on-401 is Story 5.3's recorded out-of-scope decision; Epic 8's orchestration owns it. Found by code review, second pass (2026-10-09).

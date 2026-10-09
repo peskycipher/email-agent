@@ -144,15 +144,15 @@ function batchBoundary(contentType: string | null | undefined): string | undefin
   return match?.[1];
 }
 
-/** Splits a `multipart/mixed` body into its part texts; the closing delimiter's chunk is dropped. */
-/** The batch-local index named by a response part's `Content-ID: <message-N>` header, or `undefined`. */
+/** The batch-local index a response part's `Content-ID` names — Google echoes the request's `<message-N>`, documented as `<response-message-N>`, and the parser accepts both — or `undefined`. */
 function contentIdIndexOf(chunk: string): number | undefined {
-  const match = /Content-ID:\s*<message-(\d+)>/i.exec(chunk);
+  const match = /Content-ID:\s*<(?:response-)?message-(\d+)>/i.exec(chunk);
   if (match === null) return undefined;
   const index = Number(match[1]) - 1;
   return Number.isInteger(index) && index >= 0 ? index : undefined;
 }
 
+/** Splits a `multipart/mixed` body into its part texts; the closing delimiter's chunk is dropped. */
 function splitBatchParts(body: string, boundary: string): string[] {
   const parts: string[] = [];
   for (const chunk of body.split(`--${boundary}`).slice(1)) {
@@ -228,6 +228,8 @@ export class GmailAdapter {
    * untouched, and the next successful run replaces it.
    */
   private readonly labelIdsByAccount = new Map<string, GmailLabelIds>();
+  /** Gmail labels overlap by design, so a message this instance already returned for the account is not returned twice. */
+  private readonly returnedIdsByAccount = new Map<string, Set<string>>();
 
   constructor(deps: GmailAdapterDeps) {
     this.fetchFn = deps.fetchFn;
@@ -365,6 +367,12 @@ export class GmailAdapter {
     const messages: MessageDTO[] = [];
     // A message can appear on two pages while mail arrives during a long backfill; each id is hydrated once.
     const seenIds = new Set<string>();
+    // And on two labels — the account-scoped set from earlier walks in this run keeps the count honest.
+    let accountSeen = this.returnedIdsByAccount.get(opts.accountId);
+    if (accountSeen === undefined) {
+      accountSeen = new Set<string>();
+      this.returnedIdsByAccount.set(opts.accountId, accountSeen);
+    }
     // A repeated page token would page forever; each token is followed once.
     const seenTokens = new Set<string>();
     let pageToken: string | undefined;
@@ -405,7 +413,7 @@ export class GmailAdapter {
             `Gmail listed a message without an id for account "${opts.accountId}".`,
           );
         }
-        if (seenIds.has(id)) continue;
+        if (seenIds.has(id) || accountSeen.has(id)) continue;
         seenIds.add(id);
         ids.push(id);
       }
@@ -413,7 +421,19 @@ export class GmailAdapter {
         // Each batch carries at most the clamped batch size; a failure in any batch fails the account.
         messages.push(...(await this.fetchBatch(opts.accountId, token, ids.slice(start, start + batchSize))));
       }
-      pageToken = readString(body, "nextPageToken");
+      // The page's ids count as returned only once its batches succeeded.
+      for (const id of ids) accountSeen.add(id);
+      const rawToken = body?.nextPageToken;
+      pageToken = typeof rawToken === "string" && rawToken.length > 0 ? rawToken : undefined;
+      if (rawToken !== undefined && pageToken === undefined) {
+        // A present-but-unusable token must not quietly end the walk: a truncated backfill
+        // may never look complete (the frozen partial-walk rule, kept from Story 5.3).
+        throw new GmailAdapterError(
+          "LIST_MESSAGES_FAILED",
+          opts.accountId,
+          `Gmail returned a malformed page token for account "${opts.accountId}".`,
+        );
+      }
       if (pageToken !== undefined) {
         if (seenTokens.has(pageToken)) {
           throw new GmailAdapterError(
@@ -474,8 +494,9 @@ export class GmailAdapter {
       const index = contentIdIndexOf(part) ?? position;
       if (index >= ids.length || messages[index] !== undefined) throw unreadableBatchError(accountId);
       const message = mapGmailMessage(parsed.body, accountId);
-      // A part that is not a message yields an empty id; counting it would lose the message silently.
-      if (message.id.length === 0) throw unreadableBatchError(accountId);
+      // A part that is not the message the request named — an empty id, or another
+      // message's payload — is misattribution, never a silent swap or drop.
+      if (message.id !== ids[index]) throw unreadableBatchError(accountId);
       messages[index] = message;
     });
     if (messages.some((message) => message === undefined)) throw unreadableBatchError(accountId);

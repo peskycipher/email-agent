@@ -95,6 +95,8 @@ test("a bare From address has no display name and a quoted name is unquoted", ()
 
 test("an unparseable internalDate degrades to \"\" rather than throwing", () => {
   expect(mapGmailMessage(gmailDetail({ internalDate: "not-a-number" }), "personal").receivedDateTime).toBe("");
+  // Whitespace-only parses as epoch 0 through Number(); digits-only keeps the epoch answer honest.
+  expect(mapGmailMessage(gmailDetail({ internalDate: "  " }), "personal").receivedDateTime).toBe("");
   expect(mapGmailMessage(gmailDetail({ internalDate: 1759999999000 }), "personal").receivedDateTime).toBe("");
 });
 
