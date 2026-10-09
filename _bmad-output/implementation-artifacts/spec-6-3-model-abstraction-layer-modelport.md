@@ -2,7 +2,7 @@
 title: 'Story 6.3: Model Abstraction Layer (ModelPort)'
 type: 'feature'
 created: '2026-10-09'
-status: 'in-review'
+status: 'done'
 route: 'dispatch'
 review_loop_iteration: 0
 baseline_commit: '5764b91a4a2cf54642f3f73b1c9e05d57e7c740b'
