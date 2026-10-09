@@ -50,6 +50,9 @@ export { mapGmailMessage } from "./gmail/messageMapper.js";
 export { loadTaxonomy, TaxonomyError } from "./config/taxonomy.js";
 export type { LoadTaxonomyOptions, TaxonomyErrorCode } from "./config/taxonomy.js";
 
+export { completeWithRetry, labelSetSchema, validateLabelSet } from "./model/labelSetValidation.js";
+export type { CompleteWithRetryOptions, LabelSetValidation } from "./model/labelSetValidation.js";
+
 export {
   accountStateDir,
   readAccountState,
