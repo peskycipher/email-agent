@@ -203,6 +203,45 @@ test("a non-Error rejection is rendered as a line, not a crash", async () => {
   ]);
 });
 
+test("forwards an account's since instant into every folder's FetchOpts (INCREMENTAL)", async () => {
+  const calls: FetchOpts[] = [];
+  const mailPort: MessageFetchTarget = {
+    async fetchMessages(opts) {
+      calls.push(opts);
+      return [];
+    },
+  };
+  const log = recordingLogPort();
+  const since = new Date("2026-10-09T00:00:00.000Z");
+
+  await fetchAllMessages({
+    accounts: [{ accountId: "work", folders: ["Inbox", "Archive"], since }],
+    mailPort,
+    logPort: log.logPort,
+  });
+
+  expect(calls).toEqual([
+    { source: "m365", accountId: "work", folder: "Inbox", batchSize: 50, since },
+    { source: "m365", accountId: "work", folder: "Archive", batchSize: 50, since },
+  ]);
+});
+
+test("an account without since issues no lower bound, so the backfill stays filterless", async () => {
+  const calls: FetchOpts[] = [];
+  const mailPort: MessageFetchTarget = {
+    async fetchMessages(opts) {
+      calls.push(opts);
+      return [];
+    },
+  };
+  const log = recordingLogPort();
+
+  await fetchAllMessages({ accounts: [{ accountId: "work" }], mailPort, logPort: log.logPort });
+
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).not.toHaveProperty("since");
+});
+
 test("stamps the requested source on every fetch", async () => {
   const calls: FetchOpts[] = [];
   const mailPort: MessageFetchTarget = {

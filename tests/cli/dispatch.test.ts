@@ -94,3 +94,56 @@ test("--backfill combined with --sync-categories is rejected", () => {
   expect(command.kind).toBe("error");
   expect(command.kind === "error" ? command.message : "").toContain("--backfill and --sync-categories");
 });
+
+test("--cron without --source defaults to m365 and --account to all", () => {
+  expect(resolveCliCommand({ cron: true })).toEqual({ kind: "cron", account: "all" });
+});
+
+test("--cron --source m365 --account work targets that one account", () => {
+  expect(resolveCliCommand({ cron: true, source: "m365", account: "work" })).toEqual({
+    kind: "cron",
+    account: "work",
+  });
+});
+
+test("--cron --source gmail names Story 5.4 and never fetches (CLI_PROVIDER)", () => {
+  const command = resolveCliCommand({ cron: true, source: "gmail" });
+
+  expect(command.kind).toBe("error");
+  expect(command.kind === "error" ? command.message : "").toContain("Story 5.4");
+});
+
+test("--cron --source all is rejected with the Story 5.4 line", () => {
+  const command = resolveCliCommand({ cron: true, source: "all" });
+
+  expect(command.kind).toBe("error");
+  expect(command.kind === "error" ? command.message : "").toContain("Story 5.4");
+});
+
+test("--cron --source outlook is rejected as an unknown source", () => {
+  const command = resolveCliCommand({ cron: true, source: "outlook" });
+
+  expect(command.kind).toBe("error");
+  expect(command.kind === "error" ? command.message : "").toContain('Unknown --source "outlook"');
+});
+
+test("--cron --backfill is rejected, never silently ignored", () => {
+  const command = resolveCliCommand({ cron: true, backfill: true });
+
+  expect(command.kind).toBe("error");
+  expect(command.kind === "error" ? command.message : "").toContain("--backfill and --cron");
+});
+
+test("--cron --auth is rejected, never silently ignored", () => {
+  const command = resolveCliCommand({ cron: true, auth: "m365", account: "work" });
+
+  expect(command.kind).toBe("error");
+  expect(command.kind === "error" ? command.message : "").toContain("--cron and --auth");
+});
+
+test("--cron --sync-categories is rejected", () => {
+  const command = resolveCliCommand({ cron: true, syncCategories: true });
+
+  expect(command.kind).toBe("error");
+  expect(command.kind === "error" ? command.message : "").toContain("--cron and --sync-categories");
+});

@@ -12,6 +12,8 @@ export interface FetchAccount {
   accountId: string;
   folders?: string[];
   batchSize?: number;
+  /** The incremental lower bound (Story 5.2); absent on the backfill path, so no `$filter` is issued. */
+  since?: Date;
 }
 
 /** The folder walk's default, written once here so the orchestrator and Story 5.3 agree on it. */
@@ -43,8 +45,9 @@ function errorLine(error: unknown): string {
  * one account's failure (auth, non-2xx, network) is logged with its `accountId` and never
  * aborts the others, while a failure in one folder does not stop that account's other
  * folders. Each account's folders use the `DEFAULT_FOLDERS`/`DEFAULT_BATCH_SIZE` defaults
- * unless its plan overrides them. Returns the total fetched and the count of failed
- * accounts so the caller can set an exit code. Story 5.3 reuses this loop for Gmail.
+ * unless its plan overrides them, and an account's `since` (Story 5.2) bounds each of its
+ * folders' fetches while an absent `since` leaves the walk filterless. Returns the total fetched
+ * and the count of failed accounts so the caller can set an exit code. Story 5.3 reuses this loop for Gmail.
  */
 export async function fetchAllMessages(options: FetchAllMessagesOptions): Promise<FetchAllMessagesResult> {
   const { accounts, mailPort, logPort, source = "m365" } = options;
@@ -66,6 +69,7 @@ export async function fetchAllMessages(options: FetchAllMessagesOptions): Promis
           accountId: account.accountId,
           folder,
           batchSize,
+          ...(account.since === undefined ? {} : { since: account.since }),
         });
         accountFetched += messages.length;
       } catch (error) {

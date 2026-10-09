@@ -95,7 +95,13 @@ function messagesUrl(opts: FetchOpts): string {
     opts.folder === undefined || opts.folder.length === 0
       ? MESSAGES_URL
       : `${MAIL_FOLDERS_URL}/${encodeURIComponent(opts.folder)}/messages`;
-  return `${base}?$top=${clampBatchSize(opts.batchSize)}&$select=${MESSAGE_SELECT}`;
+  const query = [`$top=${clampBatchSize(opts.batchSize)}`, `$select=${MESSAGE_SELECT}`];
+  if (opts.since !== undefined) {
+    // The stored instant is an ISO string; encode it rather than interpolating the raw `:`s into the query.
+    query.push(`$filter=receivedDateTime ge ${encodeURIComponent(opts.since.toISOString())}`);
+    query.push("$orderby=receivedDateTime asc");
+  }
+  return `${base}?${query.join("&")}`;
 }
 
 async function readJsonObject(response: FetchResponseLike): Promise<Record<string, unknown> | undefined> {

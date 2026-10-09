@@ -75,3 +75,17 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-5-1-m365-backfill-message-fetch-multi-account.md`
   summary: A 200 response whose body cannot be parsed as JSON is reported as a missing `value` array, so an unreadable response is mislabelled as a payload-shape error.
   evidence: `readJsonObject` swallows `response.json()` failures and returns `undefined` (`src/adapters/m365/M365Adapter.ts:103-110`), so "the body had no `value`" and "the body could not be parsed" reach the same typed error. Pre-existing — `listCategoryNames` (Story 4.2) applies the same rule and Story 5.1's `fetchMessages` copies it. Separating the two needs a shape decision for `readJsonObject` (a sentinel, or a parameter saying whether to distinguish), so it is not a mechanical fix. The failure is loud either way: a typed error naming the account, with no partial array. Found by code review (2026-10-09).
+
+## Deferred from: review of spec-5-2-m365-incremental-message-fetch-cron-multi-account.md (2026-10-09)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-2-m365-incremental-message-fetch-cron-multi-account.md`
+  summary: The incremental orchestrator returns only counts and discards the fetched `MessageDTO`s, yet advances each account's stored `lastRunTimestamp`, so a first (filterless) run's messages cannot be consumed downstream and are excluded by every later `$filter=receivedDateTime ge …`.
+  evidence: `fetchIncremental` returns `{ fetched, failures }` (`src/orch/incremental.ts:24-27`) and `fetchAllMessages` likewise (`src/orch/fetch.ts:28-31`), while a successful no-state run still writes the cycle start (`src/orch/incremental.ts:63-84`). In v1 nothing consumes DTOs, so the loss is not observable yet; it becomes real when Epic 6/7 consume fetched messages and Epic 8.3 loops the orchestrator, which will need a DTO egress seam (or a consumer callback) and a ruling on whether a first filterless run may mark itself consumed before its messages are processed. Found by code review (2026-10-09).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-2-m365-incremental-message-fetch-cron-multi-account.md`
+  summary: No test boots the commander entry point, so the new `--cron` branch's `--account` hand-off (`runCron({ account: command.account })`) and exit code are manual-check only.
+  evidence: `src/cli/index.ts` calls `program.parseAsync` on import, so no test can import it; `tests/cli/dispatch.test.ts` asserts only the resolved `CliCommand`, and `tests/cli/cron.test.ts` calls `runCron` directly. A regression to `runCron({ account: "all" })` would make `--cron --account work` act on every enabled mailbox while `bun run build|lint|test` stay green. Pre-existing shape shared with `--auth`/`--sync-categories`/`--backfill`; closing it needs an entry-point refactor. Found by the verification-gap review layer (2026-10-09).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-2-m365-incremental-message-fetch-cron-multi-account.md`
+  summary: Unrelated untracked workflow artifacts under `_bmad-output/party-mode/memories/` ride into a `git add -A` of story work and are not gitignored.
+  evidence: `_bmad-output/party-mode/memories/installed/.memlog.md` is a pre-existing party-mode session memory (Story 2.1) with no relation to Story 5.2, and `_bmad-output/party-mode/**` is not covered by `.gitignore`. Add the sessions/memories path to `.gitignore` (or relocate it) so story change sets do not carry unrelated session logs. Found by code review (2026-10-09).

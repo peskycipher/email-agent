@@ -21,6 +21,11 @@ const MESSAGES_URL = "https://graph.microsoft.com/v1.0/me/messages";
 const FOLDER_MESSAGES_URL = "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages";
 const MESSAGE_SELECT = "id,internetMessageId,subject,bodyPreview,receivedDateTime,categories,isRead,from";
 
+/** The incremental lower bound: `SINCE` is its `Date` form, `ENCODED_SINCE` its percent-encoded query form. */
+const SINCE_ISO = "2026-10-09T00:00:00.000Z";
+const SINCE = new Date(SINCE_ISO);
+const ENCODED_SINCE = "2026-10-09T00%3A00%3A00.000Z";
+
 /** A Graph message carrying every selected field; individual tests override what they assert. */
 function graphMessage(id: string): Record<string, unknown> {
   return {
@@ -391,6 +396,55 @@ test("scopes the request to the configured mail folder (FOLDER)", async () => {
 
   expect(requests[0]?.url.startsWith(`${FOLDER_MESSAGES_URL}?`)).toBe(true);
   expect(requests[0]?.url).toContain("$top=50");
+});
+
+test("an incremental fetch adds $filter and $orderby to the first page (HAPPY, ORDERBY)", async () => {
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ value: [graphMessage("m1"), graphMessage("m2")] }),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+  const messages = await adapter.fetchMessages({ source: "m365", accountId: "work", since: SINCE });
+
+  expect(messages).toHaveLength(2);
+  expect(requests).toHaveLength(1);
+  expect(requests[0]?.url.startsWith(`${MESSAGES_URL}?`)).toBe(true);
+  expect(requests[0]?.url).toContain("$top=50");
+  expect(requests[0]?.url).toContain(`$select=${MESSAGE_SELECT}`);
+  expect(requests[0]?.url).toContain(`$filter=receivedDateTime ge ${ENCODED_SINCE}`);
+  expect(requests[0]?.url).toContain("$orderby=receivedDateTime asc");
+});
+
+test("without since the URL carries neither $filter nor $orderby (NO_STATE)", async () => {
+  const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] })]);
+  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+  await adapter.fetchMessages({ source: "m365", accountId: "work" });
+
+  expect(requests[0]?.url).not.toContain("$filter");
+  expect(requests[0]?.url).not.toContain("$orderby");
+  expect(requests[0]?.url).toBe(`${MESSAGES_URL}?$top=50&$select=${MESSAGE_SELECT}`);
+});
+
+test("the filter's ISO value is percent-encoded, not interpolated raw (FILTER_ENCODING)", async () => {
+  const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] })]);
+  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+  await adapter.fetchMessages({ source: "m365", accountId: "work", since: new Date(SINCE_ISO) });
+
+  // The raw `:`s would break the query; only the encoded form appears.
+  expect(requests[0]?.url).toContain(`ge ${ENCODED_SINCE}`);
+  expect(requests[0]?.url).not.toContain(`ge ${SINCE_ISO}`);
+});
+
+test("a folder-scoped incremental fetch carries the filter too (FOLDER)", async () => {
+  const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] })]);
+  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+
+  await adapter.fetchMessages({ source: "m365", accountId: "work", folder: "Inbox", since: SINCE });
+
+  expect(requests[0]?.url.startsWith(`${FOLDER_MESSAGES_URL}?`)).toBe(true);
+  expect(requests[0]?.url).toContain(`$filter=receivedDateTime ge ${ENCODED_SINCE}`);
 });
 
 test("follows @odata.nextLink page by page, in order, using the link verbatim (PAGED)", async () => {

@@ -41,3 +41,6 @@ export type { GmailAdapterDeps, GmailAdapterErrorCode, GmailLabelIds } from "./g
 
 export { loadTaxonomy, TaxonomyError } from "./config/taxonomy.js";
 export type { LoadTaxonomyOptions, TaxonomyErrorCode } from "./config/taxonomy.js";
+
+export { accountStateDir, readAccountState, stateFileDisplayPath, writeLastRunTimestamp, StateFileError } from "./config/stateFile.js";
+export type { AccountState, StateFileErrorCode, StateFileOptions } from "./config/stateFile.js";

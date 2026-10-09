@@ -4,6 +4,7 @@ export interface CliOptions {
   account?: string;
   syncCategories?: boolean;
   backfill?: boolean;
+  cron?: boolean;
   source?: string;
 }
 
@@ -16,6 +17,7 @@ export type CliCommand =
   | { kind: "auth"; provider: string; account: string }
   | { kind: "sync"; account: string }
   | { kind: "backfill"; source: "m365"; account: string }
+  | { kind: "cron"; account: string }
   | { kind: "error"; message: string };
 
 const AUTH_FLAGS_REQUIRED =
@@ -23,8 +25,9 @@ const AUTH_FLAGS_REQUIRED =
 
 /** Only M365 backfill exists yet; the Gmail half is a later story, named so the line is actionable. */
 function resolveBackfill(options: CliOptions): CliCommand {
-  if (options.auth !== undefined || options.syncCategories === true) {
-    const other = options.auth !== undefined ? "--auth" : "--sync-categories";
+  if (options.auth !== undefined || options.syncCategories === true || options.cron === true) {
+    const other =
+      options.auth !== undefined ? "--auth" : options.syncCategories === true ? "--sync-categories" : "--cron";
     return {
       kind: "error",
       message: `--backfill and ${other} cannot be combined — run them as separate commands.`,
@@ -44,12 +47,37 @@ function resolveBackfill(options: CliOptions): CliCommand {
   return { kind: "backfill", source: "m365", account: options.account ?? "all" };
 }
 
+/** M365 incremental only; the Gmail half is Story 5.4, named so the line is actionable. */
+function resolveCron(options: CliOptions): CliCommand {
+  if (options.auth !== undefined || options.syncCategories === true || options.backfill === true) {
+    const other =
+      options.auth !== undefined ? "--auth" : options.syncCategories === true ? "--sync-categories" : "--backfill";
+    return {
+      kind: "error",
+      message: `--cron and ${other} cannot be combined — run them as separate commands.`,
+    };
+  }
+  const source = options.source ?? "m365";
+  if (source === "gmail" || source === "all") {
+    return {
+      kind: "error",
+      message: `--source ${source} is not supported yet — Gmail incremental fetch is Story 5.4; use --source m365.`,
+    };
+  }
+  if (source !== "m365") {
+    return { kind: "error", message: `Unknown --source "${source}" — supported sources are "m365" and "gmail" (Story 5.4).` };
+  }
+  // `--account` defaults to "all": the cron cycle is meant to run for every enabled account.
+  return { kind: "cron", account: options.account ?? "all" };
+}
+
 export function resolveCliCommand(options: CliOptions): CliCommand {
   if (options.backfill === true) return resolveBackfill(options);
+  if (options.cron === true) return resolveCron(options);
 
   if (options.source !== undefined) {
     // Without this guard a stray `--source` would vanish and the run would fail for another reason.
-    return { kind: "error", message: "--source requires --backfill (e.g. --backfill --source m365)." };
+    return { kind: "error", message: "--source requires --backfill or --cron (e.g. --backfill --source m365)." };
   }
 
   if (options.syncCategories === true) {
