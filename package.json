@@ -12,7 +12,7 @@
     "clean": "tsc -b --clean",
     "lint": "oxlint && node scripts/check-core-external-imports.mjs",
     "test": "vitest run && bun run typecheck",
-    "typecheck": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target ES2022 --ignoreConfig tests/core/ports.type-test.ts"
+    "typecheck": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target ES2022 --ignoreConfig --types node tests/core/ports.type-test.ts"
   },
   "dependencies": {
     "@microsoft/microsoft-graph-client": "3.0.7",
