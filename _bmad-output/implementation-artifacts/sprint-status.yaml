@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-08-2026 10:25
-last_updated: 10-10-2026 02:20
+last_updated: 10-10-2026 03:46
 project: email-agent
 project_key: NOKEY
 tracking_system: file-system
@@ -71,8 +71,8 @@ development_status:
 
   epic-7: in-progress
   7-1-m365-label-write-multi-account: done
-  7-2-gmail-label-write-multi-account: review
-  epic-7-retrospective: optional
+  7-2-gmail-label-write-multi-account: done
+  epic-7-retrospective: done
 
   epic-8: backlog
   8-1-backfill-mode-execution-multi-account: backlog
