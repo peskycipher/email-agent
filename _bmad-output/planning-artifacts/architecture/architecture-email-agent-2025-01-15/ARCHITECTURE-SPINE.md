@@ -71,9 +71,10 @@ companions: []
 
 ### AD-3 — ModelClient is an adapter (port: `ModelPort`)
 
-- **Binds:** `ClassificationEngine`, `JevModelAdapter`, `OpenAIModelAdapter`, future adapters
+- **Binds:** `ClassificationEngine`, `JevAdapter`, `OpenAIAdapter`, `ModelAdapterFactory`, future adapters
 - **Prevents:** Model-specific code in ClassificationEngine; hardcoded Jev calls
-- **Rule:** `ModelPort = { complete(prompt: string, schema: JsonSchema, config: ModelConfig): Promise<unknown> }`. ClassificationEngine calls `modelPort.complete()` with rendered prompt + output schema. Adapters implement provider-specific auth, request/response shaping, retry.
+- **Rule:** `ModelPort = { complete(prompt: PromptParts, taxonomy: Taxonomy, config: ModelConfig): Promise<unknown> }` — the *classification* seam, not a generic completion seam (Story 6.3 decision 1, 2026-10-09, replaces the earlier `complete(prompt, schema, config)` shape: `JsonSchema` was consumed by no adapter and the Jev API cannot honor one — `@typesafe-ai/sdk` takes typed `noul`/`choice` questions only, extra request fields reject with 400; verified live 2026-10-09). ClassificationEngine calls `modelPort.complete()` with Story 6.1's rendered prompt halves and the merged taxonomy. Adapters own provider auth, wire-format shaping (Jev: one noul question per label, threshold `config.labelThreshold ?? 0.5`; OpenAI: internal strict JSON schema from the taxonomy) and their own SDK-level retries; the orchestrator owns retry-with-backoff for transport failures (PRD FR-1).
+- **Default config:** `provider="jev"`, `model="jev-latest"` (the AC's `system1` is a System-One model-*class* name; the API's models are `jev-latest` and `jev-preview`), `apiKeyEnvVar="TYPESAFE_API_KEY"`, `temperature=0.1`, `maxTokens=500`.
 
 ### AD-4 — TokenStore is an adapter (port: `TokenPort`)
 
