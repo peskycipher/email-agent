@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-08-2026 10:25
-last_updated: 10-09-2026 18:09
+last_updated: 10-09-2026 18:18
 project: email-agent
 project_key: NOKEY
 tracking_system: file-system
@@ -189,7 +189,7 @@ action_items:
     action: "Reconcile epics.md epic-5 text to as-built: cursor file state/<provider>-<name>.json,
       Gmail writing both keys, legacy read-back (m365 only), INBOX-only window"
     owner: "Loki"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-5-retro-2026-10-09.md"
   - id: "epic-5-retro-item-14-fold-the-cli-provider-plumbing-quadrupli"
     epic: 5
@@ -203,7 +203,7 @@ action_items:
     action: "Settle NFR3 progress contract: declare the per-account line as v1 progress,
       or plan the per-100 tick into Epic 8"
     owner: "Loki"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-5-retro-2026-10-09.md"
   - id: "epic-5-retro-item-16-process-lesson-approval-checkpoints-re-r"
     epic: 5
