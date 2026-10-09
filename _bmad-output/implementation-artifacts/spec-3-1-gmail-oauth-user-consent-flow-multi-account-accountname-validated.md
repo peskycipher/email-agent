@@ -122,6 +122,8 @@ Code review of `bf6bf9ab..fdf8686` (2026-10-09, 14 files, +1930/−203). Four la
 
 ## Spec Change Log
 
+- 2026-10-09 (revisit pass, human-approved): `listEnabledAccounts` (shared `perAccountSettings.ts` factory) no longer silently skips account files whose stem fails `ACCOUNT_NAME_PATTERN`; it now reports an `INVALID_ACCOUNT_NAME` error in `errors`, so `--account all` surfaces `My_Account.yaml` instead of a misleading "No enabled … accounts found". Tests added to both the m365 and gmail account-settings suites. Known-bad state avoided: a user with an invalid-named file being told no accounts exist. KEEP: the `--account all` malformed-file reporting, the non-ENOENT `readdir` rethrow, and the `reserveLoopbackPort` race (still deferred — needs a seam decision).
+
 ## Review Triage Log
 
 **Loop iteration 0 (2026-10-09).** Three layers ran (blind-hunter, edge-case-hunter, verification-gap) over the diff since `bf6bf9ab`; no layer was skipped. Verdicts are mine, re-verified against the source — not the reviewers' own rankings.

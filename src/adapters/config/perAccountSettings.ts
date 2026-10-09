@@ -153,7 +153,7 @@ export function createPerAccountSettings<S extends PerAccountSettingsBase>(
 
   /**
    * The only implementable `--account all` source until `Config.<provider>.accounts[]`
-   * lands (Epic 11): enumerate `accounts/<provider>/*.yaml`, skip names that fail the
+   * lands (Epic 11): enumerate `accounts/<provider>/*.yaml`, report names that fail the
    * account-name rule, keep `enabled: true` entries, and report — not swallow — any
    * file whose settings cannot be read or validated (I/O matrix row 8).
    */
@@ -173,7 +173,16 @@ export function createPerAccountSettings<S extends PerAccountSettingsBase>(
     for (const entry of entries.sort()) {
       if (!entry.endsWith(".yaml")) continue;
       const accountName = entry.slice(0, -".yaml".length);
-      if (!ACCOUNT_NAME_PATTERN.test(accountName)) continue;
+      if (!ACCOUNT_NAME_PATTERN.test(accountName)) {
+        errors.push(
+          new AccountSettingsError(
+            "INVALID_ACCOUNT_NAME",
+            accountName,
+            `Account name "${accountName}" is invalid — it must match ${ACCOUNT_NAME_PATTERN.source}.`,
+          ),
+        );
+        continue;
+      }
       try {
         const settings = await readAccountSettings(accountName, options);
         if (settings.enabled) accounts.push(settings);

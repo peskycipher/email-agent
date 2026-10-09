@@ -137,6 +137,26 @@ test("listEnabledAccounts keeps only enabled, valid entries and reports the inva
   expect(errors.map((error) => error.accountName)).toEqual(["c"]);
 });
 
+test("listEnabledAccounts reports an invalid-named file instead of silently skipping it", async () => {
+  await writeAccount("a", yamlFor("a"));
+  await writeFile(join(dir(), "My_Account.yaml"), yamlFor("My_Account"), "utf8");
+
+  const { accounts, errors } = await listEnabledAccounts({ configDir });
+
+  expect(accounts.map((account) => account.name)).toEqual(["a"]);
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toBeInstanceOf(AccountSettingsError);
+  expect(errors[0]?.code).toBe("INVALID_ACCOUNT_NAME");
+  expect(errors[0]?.accountName).toBe("My_Account");
+});
+
+test("listEnabledAccounts propagates a non-ENOENT readdir failure", async () => {
+  await rm(dir(), { recursive: true, force: true });
+  await writeFile(dir(), "not a directory", "utf8");
+
+  await expect(listEnabledAccounts({ configDir })).rejects.toBeInstanceOf(Error);
+});
+
 test("listEnabledAccounts returns empty when the directory is missing", async () => {
   await rm(dir(), { recursive: true, force: true });
 

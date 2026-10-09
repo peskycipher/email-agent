@@ -12,6 +12,9 @@ package-lock.json
 config.yaml
 .env
 
+# bmad workflow session logs (party-mode memories, etc.) — not project source
+_bmad-output/party-mode/
+
 # build output
 dist/
 coverage/
