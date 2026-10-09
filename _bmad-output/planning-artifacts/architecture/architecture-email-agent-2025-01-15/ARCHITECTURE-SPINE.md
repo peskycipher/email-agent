@@ -38,8 +38,8 @@ companions: []
         ▼                      ▼                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      SKILL CORE                             │
-│  classify(message: MessageDTO, taxonomy, config): LabelSet  │
-│  (pure function, zero I/O, zero deps)                       │
+│  buildPrompt: pure prompt builder (core, zero deps)         │
+│  composition: orch/classify.ts (Story 6.4 decisions 6-7)    │
 └─────────────────────────────────────────────────────────────┘
         ▲                      ▲                      ▲
         │                      │                      │
@@ -61,7 +61,7 @@ companions: []
 
 - **Binds:** `ClassificationEngine`, all harnesses
 - **Prevents:** Harness-specific logic leaking into classification (model calls, API clients, file I/O)
-- **Rule:** `classify(message: MessageDTO, taxonomy: Taxonomy, modelConfig: ModelConfig): Promise<LabelSet>` — single async function, no side effects. All I/O happens in adapters outside the core.
+- **Rule (reconciled 2026-10-09, Story 6.4 decisions 6-7):** engine logic stays pure in core (`buildPrompt`, DTOs, ports — zero deps, no side effects); the composed `classify` lives in the application layer as `classify(options: ClassifyOptions)` carrying `{ message, taxonomy, model: ModelPort, config: ModelConfig, logPort: LogPort, context? }`. All I/O arrives via the injected `ModelPort`/`LogPort` — never an adapter import.
 
 ### AD-2 — MessageDTO is the single shared data shape
 
@@ -183,7 +183,6 @@ email-classify/
 │   │   │   ├── TokenSet.ts
 │   │   │   └── FetchOpts.ts
 │   │   ├── skill/
-│   │   │   ├── classify.ts           # pure function: classify(message, taxonomy, modelConfig, modelPort) -> LabelSet
 │   │   │   ├── prompt.ts             # prompt template + few-shots
 │   │   │   ├── schema.ts             # Zod schema for LabelSet output
 │   │   │   └── taxonomy.ts           # loads taxonomy.yaml
@@ -229,6 +228,7 @@ email-classify/
 │   │
 │   └── orch/                        # orchestration (depends on core ports)
 │       ├── backfill.ts               # backfill flow
+│       ├── classify.ts               # composition: buildPrompt + completeWithRetry (Story 6.4 decision 6)
 │       ├── cron.ts                   # cron flow
 │       └── sync.ts                   # category/label sync
 │

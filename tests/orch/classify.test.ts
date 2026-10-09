@@ -1,4 +1,9 @@
-import { expect, test } from "vitest";
+import { afterEach, expect, test } from "vitest";
+import { JevAdapter } from "../../src/adapters/model/JevAdapter.js";
+import type {
+  JevClient,
+  JevSystemOneRequest,
+} from "../../src/adapters/model/JevAdapter.js";
 import { classify } from "../../src/orch/classify.js";
 import type { LabelDef } from "../../src/core/dto/LabelDef.js";
 import type { MessageDTO } from "../../src/core/dto/MessageDTO.js";
@@ -22,6 +27,12 @@ const CONFIG: ModelConfig = {
 };
 
 const CONTEXT: LogContext = { accountId: "personal", internetMessageId: "<msg-1@example.com>" };
+
+const JEV_KEY_ENV = "EMAIL_CLASSIFY_TEST_JEV_KEY";
+
+afterEach(() => {
+  delete process.env[JEV_KEY_ENV];
+});
 
 function message(subject: string, internetMessageId: string): MessageDTO {
   return {
@@ -87,7 +98,7 @@ function recordingLogPort(): { logPort: LogPort; entries: LogEntry[] } {
 function classifyOptions(overrides: {
   message: MessageDTO;
   model: ModelPort;
-  log: LogPort;
+  logPort: LogPort;
   context?: LogContext;
 }) {
   return {
@@ -95,41 +106,63 @@ function classifyOptions(overrides: {
     taxonomy: TAXONOMY,
     model: overrides.model,
     config: CONFIG,
-    log: overrides.log,
+    logPort: overrides.logPort,
     context: overrides.context,
   };
 }
 
-test("HAPPY makes exactly one complete call and returns the above-threshold labels", async () => {
-  // The Jev adapter's own cut (0.9/0.6 above the threshold, 0.01 below) arrives as the
-  // validated reply shape the port resolves with.
-  const { model, calls } = scriptedModel([{ labels: ["Crypto", "Business"] }]);
+test("HAPPY drives the real JevAdapter over 0.9/0.6/0.01 noul probabilities to one complete call and the above-threshold labels", async () => {
+  process.env[JEV_KEY_ENV] = "key";
+  const jevConfig: ModelConfig = { ...CONFIG, apiKeyEnvVar: JEV_KEY_ENV };
+  // The adapter's own thresholding (0.9/0.6 above 0.5, 0.01 below) — same stdlib-only
+  // stub-client idiom as tests/adapters/model/jev-adapter.test.ts.
+  const requests: JevSystemOneRequest[] = [];
+  const client: JevClient = {
+    async systemOne(request) {
+      requests.push(request);
+      return {
+        model: "jev-latest",
+        answers: Object.fromEntries(
+          Object.entries({ Crypto: 0.9, Business: 0.6, Noise: 0.01 }).map(([name, noul]) => [name, { type: "noul", noul }]),
+        ),
+        usage: { input_tokens: 42, output_tokens: 7 },
+      };
+    },
+  };
   const log = recordingLogPort();
+  const jev = new JevAdapter({ log: log.logPort, createJevClient() { return client; } });
+  let completeCalls = 0;
+  const model: ModelPort = {
+    async complete(prompt, taxonomy, config) {
+      completeCalls += 1;
+      return jev.complete(prompt, taxonomy, config);
+    },
+  };
   const messageSnapshot = structuredClone(MESSAGE);
   const taxonomySnapshot = structuredClone(TAXONOMY);
 
-  const labels = await classify(classifyOptions({ message: MESSAGE, model, log: log.logPort, context: CONTEXT }));
+  const labels = await classify(classifyOptions({ message: MESSAGE, model, logPort: log.logPort, context: CONTEXT }));
 
   expect(labels).toEqual({ labels: ["Crypto", "Business"] });
-  expect(calls).toHaveLength(1);
+  expect(completeCalls).toBe(1);
   // The prompt is 6.1's `buildPrompt` output for this message and taxonomy — built here,
   // not by the caller — and the conversation receives the frozen taxonomy and config unchanged.
-  expect(calls[0].prompt.system).toContain("Crypto: Coins, tokens, trading and market news.");
-  expect(calls[0].prompt.user).toContain("Subject: Coins are up");
-  expect(calls[0].taxonomy).toBe(TAXONOMY);
-  expect(calls[0].config).toBe(CONFIG);
+  expect(requests).toHaveLength(1);
+  expect(requests[0].state).toContain("Crypto: Coins, tokens, trading and market news.");
+  expect(requests[0].state).toContain("Subject: Coins are up");
+  expect(Object.keys(requests[0].questions)).toEqual(["Crypto", "Business", "Noise"]);
+  expect(requests[0].model).toBe(jevConfig.model);
+  expect(log.entries.filter((entry) => entry.level === "info")).toHaveLength(1);
   // Neither argument is mutated.
   expect(MESSAGE).toEqual(messageSnapshot);
   expect(TAXONOMY).toEqual(taxonomySnapshot);
-  // The engine itself logs nothing on the happy path.
-  expect(log.entries).toEqual([]);
 });
 
 test("EMPTY CLASSIFIED resolves to a valid empty set with no error log", async () => {
   const { model, calls } = scriptedModel([{ labels: [] }]);
   const log = recordingLogPort();
 
-  const labels = await classify(classifyOptions({ message: MESSAGE, model, log: log.logPort, context: CONTEXT }));
+  const labels = await classify(classifyOptions({ message: MESSAGE, model, logPort: log.logPort, context: CONTEXT }));
 
   expect(labels).toEqual({ labels: [] });
   expect(calls).toHaveLength(1);
@@ -140,7 +173,7 @@ test("MALFORMED REPLY is retried and the valid set is returned after exactly two
   const { model, calls } = scriptedModel([{ labels: "x" }, { labels: ["Crypto"] }]);
   const log = recordingLogPort();
 
-  const labels = await classify(classifyOptions({ message: MESSAGE, model, log: log.logPort, context: CONTEXT }));
+  const labels = await classify(classifyOptions({ message: MESSAGE, model, logPort: log.logPort, context: CONTEXT }));
 
   expect(labels).toEqual({ labels: ["Crypto"] });
   expect(calls).toHaveLength(2);
@@ -151,7 +184,7 @@ test("EXHAUSTION within the ≤3 budget yields the empty set and one structured 
   const { model, calls } = scriptedModel([{ labels: "x" }]);
   const log = recordingLogPort();
 
-  const labels = await classify(classifyOptions({ message: MESSAGE, model, log: log.logPort, context: CONTEXT }));
+  const labels = await classify(classifyOptions({ message: MESSAGE, model, logPort: log.logPort, context: CONTEXT }));
 
   expect(labels).toEqual({ labels: [] });
   expect(calls).toHaveLength(3);
@@ -161,6 +194,22 @@ test("EXHAUSTION within the ≤3 budget yields the empty set and one structured 
   expect(entry.context?.raw).toEqual({ labels: "x" });
   expect(typeof entry.context?.reason).toBe("string");
   expect(entry.context?.reason).not.toBe("");
+  expect(entry.context?.accountId).toBe("personal");
+  expect(entry.context?.internetMessageId).toBe("<msg-1@example.com>");
+});
+
+test("A port resolving undefined exhausts the ≤3 budget to the empty set with one structured no-message error", async () => {
+  const { model, calls } = scriptedModel([undefined]);
+  const log = recordingLogPort();
+
+  const labels = await classify(classifyOptions({ message: MESSAGE, model, logPort: log.logPort, context: CONTEXT }));
+
+  expect(labels).toEqual({ labels: [] });
+  expect(calls).toHaveLength(3);
+  expect(log.entries).toHaveLength(1);
+  const [entry] = log.entries;
+  expect(entry.level).toBe("error");
+  expect(entry.context?.reason).toBe("(root): Invalid input: expected object, received undefined");
   expect(entry.context?.accountId).toBe("personal");
   expect(entry.context?.internetMessageId).toBe("<msg-1@example.com>");
 });
@@ -177,7 +226,7 @@ test("TRANSPORT FAILURE propagates unwrapped with no empty-set fallback", async 
   const log = recordingLogPort();
 
   const attempt = async () =>
-    classify(classifyOptions({ message: MESSAGE, model, log: log.logPort, context: CONTEXT }));
+    classify(classifyOptions({ message: MESSAGE, model, logPort: log.logPort, context: CONTEXT }));
 
   // PRD FR-1: the orchestrator re-queues — an outage must not read as a valid empty classification.
   await expect(attempt()).rejects.toBe(transportError);
@@ -205,7 +254,7 @@ test("PER-MESSAGE FLOW classifies messages 1 and 3 and continues the batch when 
   // (and would be re-queued via FR-1), never a batch abort.
   for (const entry of messages) {
     try {
-      const labels = await classify(classifyOptions({ message: entry, model, log: log.logPort, context: CONTEXT }));
+      const labels = await classify(classifyOptions({ message: entry, model, logPort: log.logPort, context: CONTEXT }));
       results.push({ subject: entry.subject, ...labels });
     } catch (error) {
       results.push({ subject: entry.subject, error });

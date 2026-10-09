@@ -9,7 +9,7 @@ import { buildPrompt } from "../core/skill/prompt.js";
 
 /**
  * The composed classification unit (Story 6.4, decision 7): the repo's seams-object
- * idiom (6.2's `CompleteWithRetryOptions`, 4.4's `SyncCategoriesOptions`), with AD-1's
+ * idiom (6.2's `CompleteWithRetryOptions`, Story 4.1's `SyncCategoriesOptions`), with AD-1's
  * trio (message, taxonomy, modelConfig) carrying the story and the port/logger plumbing
  * alongside. The caller owns the adapter and the logger — nothing here imports an SDK.
  */
@@ -23,7 +23,7 @@ export interface ClassifyOptions {
   /** The run's model config, carried unchanged into `completeWithRetry`. */
   config: ModelConfig;
   /** The injected logger; only 6.2's exhaustion path writes, through it. */
-  log: LogPort;
+  logPort: LogPort;
   /** Per-message log fields (`accountId`, message id) the caller owns. */
   context?: LogContext;
 }
@@ -40,7 +40,7 @@ export interface ClassifyOptions {
  * the conversation semantics 6.2's, the wire formats 6.3's (Story 6.4 decision 6/7).
  */
 export async function classify(options: ClassifyOptions): Promise<LabelSet> {
-  const { message, taxonomy, model, config, log, context } = options;
+  const { message, taxonomy, model, config, logPort, context } = options;
   const prompt = buildPrompt(message, taxonomy);
-  return completeWithRetry({ model, prompt, config, taxonomy, log, context });
+  return completeWithRetry({ model, prompt, config, taxonomy, log: logPort, context });
 }

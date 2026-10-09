@@ -517,13 +517,12 @@ So that **each message is classified in one model call with full observability**
 **Acceptance Criteria:**
 
 **Given** a `MessageDTO` and the active taxonomy
-**When** `classify(message, taxonomy, modelConfig)` is called
-**Then** it builds the prompt from the template, calls `ModelPort.complete()`, validates the output
+**When** `classify(options: ClassifyOptions)` is called with `{ message, taxonomy, model: ModelPort, config: ModelConfig, logPort: LogPort, context? }` (reconciled 2026-10-09, Story 6.4 decisions 6-7 — composition in `orch/classify.ts`, options-object idiom per 6.2's precedent)
+**Then** it builds the prompt from the template (6.1's `buildPrompt`, core-pure), calls `ModelPort.complete()` through 6.2's `completeWithRetry`, validates the output
 **And** returns `LabelSet` (validated labels array)
 **And** latency per message < 3s p95 on Jev System1 (target, not hard SLA)
 **And** token usage logged per message (input/output tokens)
-**And** function is pure: no I/O, no side effects, no external deps
-**And** all I/O happens in adapters outside this function
+**And** engine logic stays pure: `buildPrompt` is zero-dep core; all I/O arrives via the injected `ModelPort`/`LogPort` from the application layer
 
 ---
 
