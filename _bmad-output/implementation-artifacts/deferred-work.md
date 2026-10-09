@@ -89,3 +89,13 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-5-2-m365-incremental-message-fetch-cron-multi-account.md`
   summary: Unrelated untracked workflow artifacts under `_bmad-output/party-mode/memories/` ride into a `git add -A` of story work and are not gitignored.
   evidence: `_bmad-output/party-mode/memories/installed/.memlog.md` is a pre-existing party-mode session memory (Story 2.1) with no relation to Story 5.2, and `_bmad-output/party-mode/**` is not covered by `.gitignore`. Add the sessions/memories path to `.gitignore` (or relocate it) so story change sets do not carry unrelated session logs. Found by code review (2026-10-09).
+
+## Deferred from: code review of spec-5-2-m365-incremental-message-fetch-cron-multi-account.md (2026-10-09)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-2-m365-incremental-message-fetch-cron-multi-account.md`
+  summary: No test covers the `--cron` branch of the CLI entry point, so the `--account` hand-off into `runCron` and the exit-code mapping are unverified.
+  evidence: `src/cli/index.ts:41-42` runs `runCron({ account: command.account })` inside the action body that `parseAsync`-on-import makes unimportable; `tests/cli/dispatch.test.ts` asserts only the resolved `CliCommand`, and `tests/cli/cron.test.ts` calls `runCron` directly. A regression to `runCron({ account: "all" })` leaves `bun run build|lint|test` green while `--cron --account work` acts on every mailbox. Pre-existing shape shared with `--auth`/`--sync-categories`/`--backfill`; closing it needs the entry-point refactor (`main.ts` + injected argv). Found by verification-gap + acceptance-auditor (2026-10-09).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-2-m365-incremental-message-fetch-cron-multi-account.md`
+  summary: `_bmad-output/implementation-artifacts/epic-5-context.md` promises behaviour the shipped temporary command deliberately does not provide.
+  evidence: `epic-5-context.md:25` says state files are "guarded by a process-level lock"; the lock is deferred by human decision (spec line 40, `ponytail:` ceiling at `src/adapters/config/stateFile.ts:142`). `epic-5-context.md:38` promises per-account cron reporting of start/fetched/classified/labeled/duration/next-run; the temporary command emits one aggregate line (`src/cli/commands/cron.ts:104-108`). Human-owned context doc — a refresh request for a planning/context pass, not a code defect. Found by the acceptance-auditor (2026-10-09).

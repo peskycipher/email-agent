@@ -35,6 +35,8 @@ export interface FetchIncrementalOptions {
 export interface FetchIncrementalResult {
   fetched: number;
   failures: number;
+  /** Accounts whose fetch produced messages (or completed cleanly); ≥1 whenever `fetched > 0`. */
+  accountsFetched: number;
 }
 
 /** Renders one actionable line — never a stack trace or a raw payload (AD-4). */
@@ -73,6 +75,7 @@ export async function fetchIncremental(options: FetchIncrementalOptions): Promis
   } = options;
   let fetched = 0;
   let failures = 0;
+  let accountsFetched = 0;
   for (const account of accounts) {
     const cycleStart = now();
     let plan: FetchAccount;
@@ -86,6 +89,9 @@ export async function fetchIncremental(options: FetchIncrementalOptions): Promis
     }
     const result = await fetchAllMessages({ accounts: [plan], mailPort, logPort, source });
     fetched += result.fetched;
+    // An account counts as fetched when it returned messages or completed cleanly; a partly-failed
+    // account still contributed messages, so it stays in the count while also counting as a failure.
+    if (result.failures === 0 || result.fetched > 0) accountsFetched += 1;
     if (result.failures > 0) {
       // The fetch failed, so this account's stored state must not advance.
       failures += result.failures;
@@ -99,5 +105,5 @@ export async function fetchIncremental(options: FetchIncrementalOptions): Promis
       logPort.error(errorLine(error), { accountId: account.accountId });
     }
   }
-  return { fetched, failures };
+  return { fetched, failures, accountsFetched };
 }

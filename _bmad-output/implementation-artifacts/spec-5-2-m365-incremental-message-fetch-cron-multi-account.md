@@ -95,6 +95,36 @@ context:
 - Given a failed fetch for an account, when the run finishes, then that account's stored `lastRunTimestamp` is byte-for-byte unchanged and the exit code is 1.
 - Given `--cron --source gmail`, when the command runs, then one line names Story 5.4 and no request is attempted.
 
+### Review Findings
+
+- [x] [Review][Patch] Cron success line can claim messages from zero accounts — DECISION (Loki, 2026-10-09): report the number of accounts whose cycle actually succeeded; `fetchIncremental` gains an `accountsFetched` field and `runCron` prints it instead of `selected.length - failures`. [src/cli/commands/cron.ts:111]
+- [x] [Review][Patch] Add the malformed-settings cron case — `tests/cli/cron.test.ts` never produces a `listing.errors` entry, so the invalid-settings line and the counted failure line for `--cron` are unpinned; add a case mirroring `tests/cli/backfill.test.ts:228`. [tests/cli/cron.test.ts]
+- [x] [Review][Patch] Pin the state-file write-failure path — no test drives `writeLastRunTimestamp`'s `STATE_WRITE_FAILED` branch (the orch test injects a throwing seam, not the real writer); make `state/` unwritable and assert the typed code and the path. [src/adapters/config/stateFile.ts:164]
+- [x] [Review][Defer] CLI entry-point hand-off unpinned — deferred: pre-existing shape (`parseAsync` on import) shared with `--auth`/`--sync-categories`/`--backfill`; already recorded in deferred-work, needs the entry-point refactor (Epic 11). [src/cli/index.ts:41]
+- [x] [Review][Defer] `epic-5-context.md` promises a process-level lock and per-account cron reporters the temporary command does not ship — deferred: the context doc is human-owned; this is a planning/context refresh, not a code defect. [_bmad-output/implementation-artifacts/epic-5-context.md:25]
+
+**Rejected**
+
+- `low` — deferred-work.md:87 restates the Story 5.1 entry-point deferral at :71 — ledger duplication, no behavioural harm; a merge is bookkeeping, not a fix.
+- `false` — spec `status: 'done'` does not contradict the board `review`: the two files use their own vocabularies and the build workflow sets both; `review` is the pre-review board state.
+- `low` — `## Spec Change Log` is empty while the review patches outgrew the frozen text — doc completeness; the fix edits the spec under review.
+- `false` — the frozen "ISO-8601 for the two timestamps" wording does not contradict shipped code in any way that changes behaviour: only `lastRunTimestamp` is a timestamp, and validating the two id keys as non-empty strings is the only reading consistent with Gmail's numeric history IDs. The fix edits the spec.
+- `false` — the HAPPY matrix row's "DTOs returned" describes the port-level fetch; the aggregate return is the DTO-egress gap already deferred, not a new defect. The fix edits the frozen matrix.
+- `low` — "all 13 rows covered" overstates the exit-code half of three rows — a wording overclaim in the spec; the code is pinned as far as the deferred entry point allows.
+- `low` — `resolveCron`'s `--backfill` guard is unreachable because `resolveCliCommand` checks `--backfill` first — a harmless four-line defensive guard that documents intent; deleting it re-fragilizes the order dependence.
+- `low` — the filter's operator space is left raw while the colon is encoded — WHATWG `fetch` (the production `FetchLike`) percent-encodes the query space during URL parsing, so the wire request is valid; changing it churns the URL builder and its tests for no behavioural gain.
+- `low` — a corrupt state file has no documented recovery path and the write is non-atomic — the crash window is rare and repair is manual by design; `tmp`+`rename` is more than a direct correction.
+- `false` — the cycle-start sample "could move after the state read": sampling after the state read is still *before the fetch*, which is exactly the frozen contract; moving it after the fetch fails the CYCLE_START test.
+- `low` — the config root and `isEnoent` are respelled per module and the display path is not derived from `accountStateDir` — matches the repo's established per-module-constant pattern (`configFile.ts:7`, `perAccountSettings.ts:8`); the display path is correct in both default and injected modes.
+- `low` — no test pins that `lastProcessedMessageId` survives a rewrite and the Design Notes say "keys it does not own" — all three modelled keys are preserved; the narrowing sentence and the extra test edit the spec.
+- `low` — the Verification manual checks run bare `node` while the commands use `mise exec node@20` — doc wording; the built artefact runs on the system node; the fix edits the spec.
+- `low` — the validated `--source` is dropped before the orchestrator — `--cron` only ever accepts `m365`, which is exactly what the adapter stamps, so no observable defect; wiring it adds public surface.
+- `low` — a crashed non-atomic state write can truncate the file — same rare crash window as the rejected recovery item; `tmp`+`rename` is more than a direct correction.
+- `low` — local clock skew can drop messages in a window bounded by the skew — environmental, and the fix adds an unvalidated margin constant beyond the frozen cycle-start intent; no evidence of skew in this environment.
+- `false` — the spec's `grep "googleapis"` verification line can never be clean because hostnames contain the substring; the real invariant (no SDK import) is enforced by `.oxlintrc.json` and holds. A spec-text error, not a code defect.
+- `false` — the frozen "two timestamps" wording appears a second time through the Acceptance Auditor; same refutation as above.
+- `false` — the frozen Code Map omits `source` from `fetchIncremental` — same inert half-wiring as the rejected `--source` item; a doc-drift note whose fix edits the spec.
+
 ## Implementation Notes
 
 - **2026-10-09 — Story 5.2 implementation.** `M365Adapter.messagesUrl` appends `$filter=receivedDateTime ge <percent-encoded ISO>` + `$orderby=receivedDateTime asc` only when `opts.since` is set (absent `since` leaves Story 5.1's URL byte-identical); `src/adapters/config/stateFile.ts` owns `state/<accountName>.json` with three optional keys and read-merge-write at 0700/0600; `FetchAccount.since` is forwarded by `fetchAllMessages`; `src/orch/incremental.ts` reads the stored bound, captures the per-account cycle start, and records it only after a successful cycle; the temporary `--cron --source m365 --account <name|all>` command wires it with per-account isolation and a counted failure line.

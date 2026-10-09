@@ -93,7 +93,7 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
   }
 
   const accounts = selected.map(planFor);
-  const { fetched, failures } = await fetchIncremental({
+  const { fetched, failures, accountsFetched } = await fetchIncremental({
     accounts,
     mailPort,
     logPort,
@@ -106,8 +106,8 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
   if (totalFailures > 0) {
     process.stderr.write(`${totalFailures} of ${total} m365 account(s) failed.\n`);
   }
-  // The count of accounts whose cycle succeeded, not the number selected: a failed account is
-  // already reported on stderr, and claiming it here would read as if it had fetched something.
-  process.stdout.write(`Fetched ${fetched} message(s) from ${selected.length - failures} account(s).\n`);
+  // The count of accounts that actually produced messages, not the number selected: a failed
+  // account is already reported on stderr, and claiming it here would read as if it had fetched.
+  process.stdout.write(`Fetched ${fetched} message(s) from ${accountsFetched} account(s).\n`);
   return totalFailures > 0 ? 1 : 0;
 }

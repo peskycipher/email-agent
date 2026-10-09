@@ -86,7 +86,7 @@ test("reads each account's own timestamp and advances it to that account's cycle
     now: () => starts[next++] as Date,
   });
 
-  expect(result).toEqual({ fetched: 2, failures: 0 });
+  expect(result).toEqual({ fetched: 2, failures: 0, accountsFetched: 2 });
   // Sequential, in plan order, each request carrying its own account's bound.
   expect(calls.map((call) => [call.accountId, call.since?.toISOString()])).toEqual([
     ["work", "2026-10-08T08:00:00.000Z"],
@@ -120,7 +120,7 @@ test("a failed fetch leaves that account's state untouched while the other advan
     now: () => start,
   });
 
-  expect(result).toEqual({ fetched: 1, failures: 1 });
+  expect(result).toEqual({ fetched: 1, failures: 1, accountsFetched: 1 });
   // Only the healthy account's state advanced.
   expect(state.writes).toEqual([{ accountId: "home", date: start }]);
   expect(log.entries).toContainEqual({
@@ -151,7 +151,7 @@ test("an account with no state fetches without a bound and then creates its stat
     now: () => start,
   });
 
-  expect(result).toEqual({ fetched: 1, failures: 0 });
+  expect(result).toEqual({ fetched: 1, failures: 0, accountsFetched: 1 });
   expect(calls[0]).not.toHaveProperty("since");
   expect(state.writes).toEqual([{ accountId: "work", date: start }]);
 });
@@ -175,7 +175,7 @@ test("a filter that matches nothing fetches zero but still advances the state (N
     now: () => start,
   });
 
-  expect(result).toEqual({ fetched: 0, failures: 0 });
+  expect(result).toEqual({ fetched: 0, failures: 0, accountsFetched: 1 });
   expect(state.writes).toEqual([{ accountId: "work", date: start }]);
 });
 
@@ -197,7 +197,7 @@ test("an invalid stored state fails that account before any request (STATE_INVAL
     writeLastRunTimestamp: async () => {},
   });
 
-  expect(result).toEqual({ fetched: 0, failures: 1 });
+  expect(result).toEqual({ fetched: 0, failures: 1, accountsFetched: 0 });
   expect(log.entries).toEqual([
     {
       level: "error",
@@ -226,7 +226,7 @@ test("a state write failure still returns the fetched messages and counts as a f
     now: () => new Date("2026-10-09T12:00:00.000Z"),
   });
 
-  expect(result).toEqual({ fetched: 1, failures: 1 });
+  expect(result).toEqual({ fetched: 1, failures: 1, accountsFetched: 1 });
   expect(log.entries).toContainEqual({
     level: "error",
     message: 'Could not write the state for account "work".',
@@ -256,7 +256,7 @@ test("the persisted timestamp is the pre-fetch cycle start, not a post-fetch clo
     now: () => new Date(start.getTime() + clock * 60_000),
   });
 
-  expect(result).toEqual({ fetched: 1, failures: 0 });
+  expect(result).toEqual({ fetched: 1, failures: 0, accountsFetched: 1 });
   expect(state.writes).toEqual([{ accountId: "work", date: start }]);
 });
 
@@ -313,7 +313,7 @@ test("the real state writer preserves a key owned by another provider (STATE_MER
     now: () => start,
   });
 
-  expect(result).toEqual({ fetched: 1, failures: 0 });
+  expect(result).toEqual({ fetched: 1, failures: 0, accountsFetched: 1 });
   expect(await readAccountState("work", { configDir })).toEqual({
     lastHistoryId: "42",
     lastRunTimestamp: "2026-10-09T12:00:00.000Z",

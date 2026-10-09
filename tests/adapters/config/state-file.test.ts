@@ -146,3 +146,17 @@ test("writing restores 0700 on a pre-existing loose state directory", async () =
 
   expect((await stat(accountStateDir({ configDir }))).mode & 0o777).toBe(0o700);
 });
+
+test("an unwritable config root fails the write with STATE_WRITE_FAILED (STATE_WRITE_FAILS)", async () => {
+  // The read sees ENOENT (no state yet); creating the directory under a read-only root then fails.
+  await chmod(configDir, 0o500);
+
+  const error = await writeLastRunTimestamp("work", new Date(), { configDir }).catch((err: unknown) => err);
+
+  expect(error).toBeInstanceOf(StateFileError);
+  expect((error as StateFileError).code).toBe("STATE_WRITE_FAILED");
+  expect((error as StateFileError).accountName).toBe("work");
+  expect((error as StateFileError).message).toContain(statePath());
+
+  await chmod(configDir, 0o700);
+});

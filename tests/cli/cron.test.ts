@@ -235,3 +235,42 @@ test("--cron --account <name> targets that one account only", async () => {
   expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
   await expect(readFile(statePath("other"), "utf8")).rejects.toThrow();
 });
+
+test("--cron --account all counts an account with malformed settings as a failure (ACCOUNT_FAILURE)", async () => {
+  await writeAccount("work");
+  await writeFile(join(configDir, "accounts", "m365", "broken.yaml"), "name: [unclosed\n", "utf8");
+  const { fetchFn } = recordingFetch([graphPage(["m1"])]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runCron(
+    { account: "all" },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      now: () => CYCLE_START,
+    },
+  );
+
+  expect(code).toBe(1);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("m365 broken: ");
+  expect(errors).toContain("1 of 2 m365 account(s) failed.");
+  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
+});
+
+test("--cron --account all with only malformed settings reports invalid settings, not the setup hint", async () => {
+  await writeFile(join(configDir, "accounts", "m365", "broken.yaml"), "name: [unclosed\n", "utf8");
+  const { fetchFn } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runCron({ account: "all" }, { fetchFn, configDir });
+
+  expect(code).toBe(1);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("1 m365 account(s) have invalid settings");
+  expect(errors).not.toContain("No enabled m365 accounts found");
+  expect(capturedLines(stdout)).toHaveLength(0);
+});
