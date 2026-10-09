@@ -88,11 +88,11 @@ function clampBatchSize(batchSize: number | undefined): number {
   return Math.min(Math.max(Math.trunc(batchSize), 1), MAX_BATCH_SIZE);
 }
 
-/** Whole mailbox, or one folder when `opts.folder` is set; `$top` and `$select` ride every page. */
+/** Whole mailbox, or one folder when `opts.folder` is set. `$top` and `$select` are built here for the first page; every later page reuses Graph's `@odata.nextLink` verbatim, which carries the original query. */
 function messagesUrl(opts: FetchOpts): string {
   // A configured folder is typically a display name ("Sent Items"), so the path segment is encoded.
   const base =
-    opts.folder === undefined
+    opts.folder === undefined || opts.folder.length === 0
       ? MESSAGES_URL
       : `${MAIL_FOLDERS_URL}/${encodeURIComponent(opts.folder)}/messages`;
   return `${base}?$top=${clampBatchSize(opts.batchSize)}&$select=${MESSAGE_SELECT}`;
@@ -173,6 +173,7 @@ export class M365Adapter {
           "LIST_MESSAGES_FAILED",
           opts.accountId,
           `Microsoft Graph returned no message list for account "${opts.accountId}".`,
+          response.status,
         );
       }
       for (const entry of page) messages.push(mapGraphMessage(entry, opts.accountId));

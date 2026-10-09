@@ -151,6 +151,8 @@ test("--account all keeps going after an account fails and exits 1 with a counte
   expect(errors).toContain("--auth m365 --account alpha");
   expect(errors).toContain("1 of 2 m365 account(s) failed.");
   expect(capturedLines(stdout).join("")).toContain("info beta: Fetched 2 messages.");
+  // The summary counts the account that fetched, not the two that were selected.
+  expect(capturedLines(stdout).join("")).toContain("Fetched 2 message(s) from 1 account(s).");
   expect(requests).toHaveLength(1);
   expect(requests[0]?.authorization).toBe("Bearer access-m365-beta");
 });
@@ -274,4 +276,37 @@ test("a folder whose name needs encoding is percent-encoded in the request path"
   expect(requests).toHaveLength(1);
   expect(requests[0]?.url.startsWith(`${FOLDER_MESSAGES_URL}/Sent%20Items/messages?`)).toBe(true);
   expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
+});
+
+test("--account <name> with that account's own malformed settings exits 1 with the invalid-settings line", async () => {
+  await writeFile(join(configDir, "accounts", "m365", "work.yaml"), "name: [unclosed", "utf8");
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runBackfill({ source: "m365", account: "work" }, { fetchFn, configDir });
+
+  expect(code).toBe(1);
+  expect(requests).toHaveLength(0);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("m365 work:");
+  expect(errors).toContain("invalid settings");
+  // The file is there but broken, so "no such account" would be the wrong guidance.
+  expect(errors).not.toContain("No enabled m365 account named");
+  expect(capturedLines(stdout)).toHaveLength(0);
+});
+
+test("an unreadable accounts directory exits 1 with the listing error, not a crash", async () => {
+  await rm(join(configDir, "accounts", "m365"), { recursive: true, force: true });
+  await writeFile(join(configDir, "accounts", "m365"), "not a directory", "utf8");
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runBackfill({ source: "m365", account: "all" }, { fetchFn, configDir });
+
+  expect(code).toBe(1);
+  expect(requests).toHaveLength(0);
+  expect(capturedLines(stderr).join("")).toContain("m365: ");
+  expect(capturedLines(stdout)).toHaveLength(0);
 });

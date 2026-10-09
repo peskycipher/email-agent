@@ -103,6 +103,31 @@ context:
 - Given `getAccessToken` rejects for the first of two accounts, when the fetch runs, then the run reports that account's failure, the second account is fetched, and the exit code is 1.
 - Given `--backfill --source gmail`, when the command runs, then one line names Story 5.3 as the owner and no request is attempted.
 
+### Review Findings
+
+- [x] [Review][Patch] The comment claims `$top` and `$select` "ride every page", but `messagesUrl` builds them for the first page only; later pages reuse Graph's `@odata.nextLink` verbatim, which carries the original query — say that instead [src/adapters/m365/M365Adapter.ts:90]
+- [x] [Review][Patch] The success line prints `Fetched <n> message(s) from <selected> account(s).`, which counts *attempted* accounts, so a run where one of two accounts failed still reports "from 2 account(s)" — report the accounts that actually fetched (`selected.length - failures`) [src/cli/commands/backfill.ts:103]
+- [x] [Review][Patch] A 200 whose body carries no `value` array throws without the HTTP status even though there is one, while the sibling non-2xx branch passes it and the Boundary says "the HTTP status where there is one" [src/adapters/m365/M365Adapter.ts:172-177]
+- [x] [Review][Patch] `opts.folder` is only checked for `undefined`, so an empty string builds the malformed `mailFolders//messages` — treat an empty folder as the whole mailbox [src/adapters/m365/M365Adapter.ts:92-95]
+- [x] [Review][Patch] A folder listed twice in one account's settings is fetched twice (the settings schema does not require uniqueness) — walk the de-duplicated folder list [src/orch/fetch.ts:64]
+- [x] [Review][Patch] No test drives `listM365Accounts` *throwing* (the non-ENOENT `readdir` rethrow), so the command's `m365: <error>` + exit 1 path is unpinned while the sibling `--sync-categories` command pins the equivalent [tests/cli/backfill.test.ts]
+- [x] [Review][Patch] No test runs `--account <name>` where that account's own settings file is malformed, so the named-account invalid-settings branch is unpinned (the two existing malformed-file tests both use `--account all`) [tests/cli/backfill.test.ts]
+
+- [x] [Review][Defer] A 200 whose body is not JSON is reported as "returned no message list" — an unreadable response wearing the payload-shape wording [src/adapters/m365/M365Adapter.ts:103-110] — deferred: pre-existing in `listCategoryNames` (Story 4.2) and copied here; separating the two needs a shape decision for `readJsonObject`, not a one-line fix.
+
+**Rejected (10):**
+
+1. `false` — the spec's Implementation Notes still call the folder interpolation "unencoded": the only fix edits the spec under review, and the note is agent-owned bookkeeping rather than behaviour.
+2. `false` — the Execution task line still names `since?`: same reason, the only fix edits the spec (the code already matches the frozen Never list).
+3. `false` — the spec says `done` while `sprint-status.yaml` says `review`: both are right for their own lifecycle — the build workflow marks the spec done and leaves the board at `review`, and this review's final step flips the board to `done`.
+4. `low` — the access token is resolved once for the whole walk: a walk outliving the token is possible in principle, but Graph tokens live about an hour while an 8k-message backfill takes minutes, the failure is a typed per-account error, and mid-walk refresh is a later story's hook (tracked in `deferred-work.md` since Story 2.1).
+5. `low` — the named-account hint says "add …/X.yaml" when the file exists but is `enabled: false`: `listEnabledAccounts` returns only enabled accounts, so the CLI cannot tell "disabled" from "absent" without new plumbing.
+6. `low` — `noAccountsHint` prints the static `~/.config/email-classify` path under an injected `configDir`: already carried as an open epic-4 retrospective action item, and the fix spans three commands plus a path-display convention.
+7. `low` — `errorLine` is duplicated in `src/orch/fetch.ts` and `src/cli/commands/auth.ts`: AD-10 forbids the import, the same per-module copy already exists in `src/orch/sync.ts`, and sharing it would add core surface.
+8. `false` — `opts.source` is ignored by `M365Adapter`: an adapter knowing its own provider is correct, and the DTO's `source: "m365"` is more truthful than echoing a caller-supplied string; no Gmail request is made.
+9. `low` — a cyclic `@odata.nextLink` would loop forever: Graph is the only server involved and a cycle violates its contract, the fix needs a visited set or page cap, and the pre-existing `listCategoryNames` walk shares the exposure.
+10. `low` — the commit message attributes the temporary command's replacement to Epic 8.1 while the code comment says Epic 11: the comment is accurate (8.1 extends the command, 11 replaces the wiring) and the commit text is unchangeable without rewriting history.
+
 ## Implementation Notes
 
 - **2026-10-09 — Story 5.1 implementation.** Built `M365Adapter.fetchMessages` (paged message list, `$top` = the clamped batch size, `$select` including `from`/`isRead`, a folder-scoped URL when `opts.folder` is set, typed `LIST_MESSAGES_FAILED` errors through the existing `send`/`AbortSignal`), the total `mapGraphMessage` mapper, `src/orch/fetch.ts` (`fetchAllMessages` with per-account and per-folder isolation, `DEFAULT_FOLDERS`/`DEFAULT_BATCH_SIZE` written once), the additive optional `MessageDTO.isRead` and m365 settings `folders`/`batchSize`, and the temporary `--backfill --source m365 --account <name|all>` command with its dispatch guards.

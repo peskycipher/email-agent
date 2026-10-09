@@ -69,3 +69,9 @@
 ## Deferred from: review of spec-5-1-m365-backfill-message-fetch-multi-account.md (2026-10-09)
 
 - **No test boots the commander entry point, so the new CLI flags are manual-check only.** `src/cli/index.ts` calls `program.parseAsync` on import, so no test can import it; the `--backfill`/`--source` flag strings and the action-handler routing are verified by the spec's manual checks alone. A regression there — a renamed flag, a dropped `.option`, a misrouted `command.kind` — still passes `bun run build`, `bun run lint` and `bun run test` while the command silently stops working. Pre-existing shape: the `--auth` and `--sync-categories` wiring has the same exposure. Closing it needs an entry-point refactor (extract the program builder or split the action body) — out of Story 5.1's scope. Found by the verification-gap review layer (2026-10-09).
+
+## Deferred from: code review of spec-5-1-m365-backfill-message-fetch-multi-account.md (2026-10-09)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-1-m365-backfill-message-fetch-multi-account.md`
+  summary: A 200 response whose body cannot be parsed as JSON is reported as a missing `value` array, so an unreadable response is mislabelled as a payload-shape error.
+  evidence: `readJsonObject` swallows `response.json()` failures and returns `undefined` (`src/adapters/m365/M365Adapter.ts:103-110`), so "the body had no `value`" and "the body could not be parsed" reach the same typed error. Pre-existing — `listCategoryNames` (Story 4.2) applies the same rule and Story 5.1's `fetchMessages` copies it. Separating the two needs a shape decision for `readJsonObject` (a sentinel, or a parameter saying whether to distinguish), so it is not a mechanical fix. The failure is loud either way: a typed error naming the account, with no partial array. Found by code review (2026-10-09).

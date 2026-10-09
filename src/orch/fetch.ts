@@ -57,7 +57,9 @@ export async function fetchAllMessages(options: FetchAllMessagesOptions): Promis
     const batchSize = account.batchSize ?? DEFAULT_BATCH_SIZE;
     let accountFetched = 0;
     let accountFailed = false;
-    for (const folder of folders) {
+    // A settings file can list the same folder twice; walking the de-duplicated list keeps both the
+    // work and the count honest.
+    for (const folder of new Set(folders)) {
       try {
         const messages = await mailPort.fetchMessages({
           source,
