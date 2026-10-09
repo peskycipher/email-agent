@@ -2,7 +2,7 @@
 title: 'Story 6.4: Single-Call Classification Function'
 type: 'feature'
 created: '2026-10-09'
-status: 'in-review'
+status: 'done'
 route: 'dispatch'
 review_loop_iteration: 0
 baseline_commit: 'f871ea1bef6402fa25aa8ab491f35f6003853758'
