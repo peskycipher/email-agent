@@ -37,12 +37,25 @@ export * as gmailAccountSettings from "./gmail/accountSettings.js";
 export type { GmailAccountSettings, GmailAccountsListing } from "./gmail/accountSettings.js";
 
 export { GmailAdapter, GmailAdapterError } from "./gmail/GmailAdapter.js";
-export type { GmailAdapterDeps, GmailAdapterErrorCode, GmailLabelIds } from "./gmail/GmailAdapter.js";
+export type {
+  GmailAdapterDeps,
+  GmailAdapterErrorCode,
+  GmailHistoryOpts,
+  GmailHistoryOutcome,
+  GmailLabelIds,
+} from "./gmail/GmailAdapter.js";
 
 export { mapGmailMessage } from "./gmail/messageMapper.js";
 
 export { loadTaxonomy, TaxonomyError } from "./config/taxonomy.js";
 export type { LoadTaxonomyOptions, TaxonomyErrorCode } from "./config/taxonomy.js";
 
-export { accountStateDir, readAccountState, stateFileDisplayPath, writeLastRunTimestamp, StateFileError } from "./config/stateFile.js";
+export {
+  accountStateDir,
+  readAccountState,
+  stateFileDisplayPath,
+  writeLastHistoryId,
+  writeLastRunTimestamp,
+  StateFileError,
+} from "./config/stateFile.js";
 export type { AccountState, StateFileErrorCode, StateFileOptions } from "./config/stateFile.js";

@@ -105,28 +105,38 @@ test("--backfill combined with --sync-categories is rejected", () => {
 });
 
 test("--cron without --source defaults to m365 and --account to all", () => {
-  expect(resolveCliCommand({ cron: true })).toEqual({ kind: "cron", account: "all" });
+  expect(resolveCliCommand({ cron: true })).toEqual({ kind: "cron", source: "m365", account: "all" });
 });
 
 test("--cron --source m365 --account work targets that one account", () => {
   expect(resolveCliCommand({ cron: true, source: "m365", account: "work" })).toEqual({
     kind: "cron",
+    source: "m365",
     account: "work",
   });
 });
 
-test("--cron --source gmail names Story 5.4 and never fetches (CLI_PROVIDER)", () => {
-  const command = resolveCliCommand({ cron: true, source: "gmail" });
-
-  expect(command.kind).toBe("error");
-  expect(command.kind === "error" ? command.message : "").toContain("Story 5.4");
+test("--cron --source gmail selects the Gmail path, defaulting --account to all (CLI_SOURCE)", () => {
+  expect(resolveCliCommand({ cron: true, source: "gmail" })).toEqual({
+    kind: "cron",
+    source: "gmail",
+    account: "all",
+  });
 });
 
-test("--cron --source all is rejected with the Story 5.4 line", () => {
+test("--cron --source gmail --account personal targets that one account", () => {
+  expect(resolveCliCommand({ cron: true, source: "gmail", account: "personal" })).toEqual({
+    kind: "cron",
+    source: "gmail",
+    account: "personal",
+  });
+});
+
+test("--cron --source all is rejected, since a cron cycle names one provider (SOURCE_ALL)", () => {
   const command = resolveCliCommand({ cron: true, source: "all" });
 
   expect(command.kind).toBe("error");
-  expect(command.kind === "error" ? command.message : "").toContain("Story 5.4");
+  expect(command.kind === "error" ? command.message : "").toContain("--source all is not supported");
 });
 
 test("--cron --source outlook is rejected as an unknown source", () => {

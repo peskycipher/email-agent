@@ -17,14 +17,14 @@ program
   )
   .option("--sync-categories", "ensure the taxonomy's labels exist as M365 master categories and Gmail labels")
   .option("--backfill", "fetch every selected account's messages (m365 or gmail backfill; nothing is written back)")
-  .option("--cron", "fetch only what is new per selected account (m365 incremental; nothing is written back)")
+  .option("--cron", "fetch only what is new per selected account (m365 or gmail incremental; the gmail window is the account's INBOX only; nothing is written back)")
   .option(
     "--source <provider>",
-    'message source for --backfill/--cron; "m365" or "gmail" for --backfill, only "m365" for --cron (defaults to "m365")',
+    'message source for --backfill/--cron; "m365" or "gmail" (defaults to "m365"; "all" is not a provider)',
   )
   .addHelpText(
     "after",
-    "\nExamples:\n  $ email-classify --auth m365 --account work\n  $ email-classify --auth m365 --account all\n  $ email-classify --auth gmail --account personal\n  $ email-classify --auth gmail --account all\n  $ email-classify --sync-categories --account all\n  $ email-classify --backfill --source m365 --account work\n  $ email-classify --backfill --source m365 --account all\n  $ email-classify --backfill --source gmail --account all\n  $ email-classify --cron --source m365 --account work\n  $ email-classify --cron --source m365 --account all\n",
+    "\nExamples:\n  $ email-classify --auth m365 --account work\n  $ email-classify --auth m365 --account all\n  $ email-classify --auth gmail --account personal\n  $ email-classify --auth gmail --account all\n  $ email-classify --sync-categories --account all\n  $ email-classify --backfill --source m365 --account work\n  $ email-classify --backfill --source m365 --account all\n  $ email-classify --backfill --source gmail --account all\n  $ email-classify --cron --source m365 --account work\n  $ email-classify --cron --source m365 --account all\n  $ email-classify --cron --source gmail --account work\n  $ email-classify --cron --source gmail --account all\n",
   )
   .action(async (options: CliOptions) => {
     const command = resolveCliCommand(options);
@@ -42,7 +42,7 @@ program
       return;
     }
     if (command.kind === "cron") {
-      process.exitCode = await runCron({ account: command.account });
+      process.exitCode = await runCron({ source: command.source, account: command.account });
       return;
     }
     process.exitCode = await runAuth({ provider: command.provider, account: command.account });

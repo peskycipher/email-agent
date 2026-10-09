@@ -17,13 +17,13 @@ export type CliCommand =
   | { kind: "auth"; provider: string; account: string }
   | { kind: "sync"; account: string }
   | { kind: "backfill"; source: "m365" | "gmail"; account: string }
-  | { kind: "cron"; account: string }
+  | { kind: "cron"; source: "m365" | "gmail"; account: string }
   | { kind: "error"; message: string };
 
 const AUTH_FLAGS_REQUIRED =
   "--auth <provider> and --account <name|all> are both required (e.g. --auth gmail --account personal).";
 
-/** Both providers have a backfill; only m365 has the incremental path (Story 5.4 owns Gmail's). */
+/** Both providers have a backfill; Story 5.4 gave Gmail an incremental path too, but `--cron` still names its provider here. */
 function resolveBackfill(options: CliOptions): CliCommand {
   if (options.auth !== undefined || options.syncCategories === true || options.cron === true) {
     const other =
@@ -45,7 +45,10 @@ function resolveBackfill(options: CliOptions): CliCommand {
   return { kind: "backfill", source, account: options.account ?? "all" };
 }
 
-/** M365 incremental only; the Gmail half is Story 5.4, named so the line is actionable. */
+/**
+ * Both providers have an incremental path (Story 5.4 lifted Gmail's); `all` is not a provider, and
+ * the multi-provider loop is Story 8.3's.
+ */
 function resolveCron(options: CliOptions): CliCommand {
   if (options.auth !== undefined || options.syncCategories === true || options.backfill === true) {
     const other =
@@ -56,17 +59,15 @@ function resolveCron(options: CliOptions): CliCommand {
     };
   }
   const source = options.source ?? "m365";
-  if (source === "gmail" || source === "all") {
-    return {
-      kind: "error",
-      message: `--source ${source} is not supported yet — Gmail incremental fetch is Story 5.4; use --source m365.`,
-    };
+  if (source === "all") {
+    // Human decision (2026-10-09): a cron cycle names one provider; Story 8.3 owns the `all` loop.
+    return { kind: "error", message: `--source all is not supported — choose "m365" or "gmail".` };
   }
-  if (source !== "m365") {
-    return { kind: "error", message: `Unknown --source "${source}" — supported sources are "m365" and "gmail" (Story 5.4).` };
+  if (source !== "m365" && source !== "gmail") {
+    return { kind: "error", message: `Unknown --source "${source}" — supported sources are "m365" and "gmail".` };
   }
   // `--account` defaults to "all": the cron cycle is meant to run for every enabled account.
-  return { kind: "cron", account: options.account ?? "all" };
+  return { kind: "cron", source, account: options.account ?? "all" };
 }
 
 export function resolveCliCommand(options: CliOptions): CliCommand {

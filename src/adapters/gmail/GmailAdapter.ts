@@ -12,6 +12,12 @@ const LABELS_URL = "https://gmail.googleapis.com/gmail/v1/users/me/labels";
 /** The whole-mailbox message list; `labelIds` scopes it to one label (Story 5.3). */
 const MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages";
 
+/** The mailbox's current `historyId`, the only place a list-path cycle can read one (Story 5.4). */
+const PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile";
+
+/** The account's change history since a stored id (Story 5.4); `labelId` scopes it to one label. */
+const HISTORY_URL = "https://gmail.googleapis.com/gmail/v1/users/me/history";
+
 /**
  * Gmail exposes no REST `messages.batchGet`: hydrating details is a generic multipart
  * batch POST, one inner metadata GET per id (Story 5.3 design note).
@@ -44,11 +50,33 @@ interface MultipartResponseLike extends FetchResponseLike {
 /** The per-account label-name → label-id map Epic 7 writes classifications back with. */
 export type GmailLabelIds = ReadonlyMap<string, string>;
 
+/** One history walk's arguments; the orchestrator's `GmailHistoryTarget` names the same shape. */
+export interface GmailHistoryOpts {
+  accountId: string;
+  /** The stored `lastHistoryId` the walk resumes from. */
+  historyId: string;
+  /** Bounds each hydration batch (Gmail's 1..100), exactly as `FetchOpts.batchSize` does. */
+  batchSize?: number;
+}
+
+/**
+ * A history walk's outcome: the hydrated `messagesAdded` DTOs plus the response's top-level
+ * `historyId` to store — or Gmail's expired 404, a normal result the caller falls back from.
+ * `skippedIds` names the added ids Gmail answered 404 for (a message purged after it was
+ * added): per-message answers, never the account's failure (Story 5.4 decision EC1).
+ * Structurally the orchestrator's own `GmailHistoryOutcome` (AD-10: the adapter never imports `orch`).
+ */
+export type GmailHistoryOutcome =
+  | { kind: "ok"; messages: MessageDTO[]; historyId: string; skippedIds: string[] }
+  | { kind: "expired" };
+
 export type GmailAdapterErrorCode =
   | "LIST_LABELS_FAILED"
   | "CREATE_LABEL_FAILED"
   | "LIST_MESSAGES_FAILED"
-  | "BATCH_GET_MESSAGES_FAILED";
+  | "BATCH_GET_MESSAGES_FAILED"
+  | "GET_PROFILE_FAILED"
+  | "LIST_HISTORY_FAILED";
 
 /**
  * Typed at the adapter boundary so the CLI renders one actionable line (AD-4) —
@@ -110,13 +138,34 @@ function clampBatchSize(batchSize: number | undefined): number {
 
 /**
  * The message list URL: `labelIds` is `opts.folder` when set, else Gmail's `INBOX` system
- * label; `maxResults` is the clamped batch size; later pages carry a `pageToken`.
+ * label; `maxResults` is the clamped batch size; later pages carry a `pageToken`. A `since`
+ * lower bound (Story 5.4's expiry fallback) becomes Gmail's only server-side time filter,
+ * `q=after:<epoch-seconds>` — stepped back one second, because `after:` is exclusive and the
+ * bound must never drop the message sitting exactly on it.
  */
 function messagesListUrl(opts: FetchOpts, pageToken: string | undefined): string {
   const label = opts.folder === undefined || opts.folder.length === 0 ? DEFAULT_LABEL : opts.folder;
   const query = [`labelIds=${encodeURIComponent(label)}`, `maxResults=${clampBatchSize(opts.batchSize)}`];
+  if (opts.since !== undefined) {
+    const afterSeconds = Math.floor(opts.since.getTime() / 1000) - 1;
+    query.push(`q=${encodeURIComponent(`after:${afterSeconds}`)}`);
+  }
   if (pageToken !== undefined) query.push(`pageToken=${encodeURIComponent(pageToken)}`);
   return `${MESSAGES_URL}?${query.join("&")}`;
+}
+
+/**
+ * The history walk URL: `startHistoryId` is the stored id, `labelId` scopes the walk to the epic's
+ * INBOX cron window (the same Gmail system label `DEFAULT_LABEL` names for the list path), and
+ * later pages carry a `pageToken`. All three are percent-encoded.
+ */
+function historyUrl(historyId: string, pageToken: string | undefined): string {
+  const query = [
+    `startHistoryId=${encodeURIComponent(historyId)}`,
+    `labelId=${encodeURIComponent(DEFAULT_LABEL)}`,
+  ];
+  if (pageToken !== undefined) query.push(`pageToken=${encodeURIComponent(pageToken)}`);
+  return `${HISTORY_URL}?${query.join("&")}`;
 }
 
 /**
@@ -197,10 +246,77 @@ function unreadableBatchError(accountId: string): GmailAdapterError {
   );
 }
 
-function readString(entry: unknown, key: string): string | undefined {
+/** The field of an object entry, or `undefined` when the entry is not an object or lacks the key. */
+function readField(entry: unknown, key: string): unknown {
   if (typeof entry !== "object" || entry === null) return undefined;
-  const value = (entry as Record<string, unknown>)[key];
+  return (entry as Record<string, unknown>)[key];
+}
+
+function readString(entry: unknown, key: string): string | undefined {
+  const value = readField(entry, key);
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** One actionable line for a history response that cannot be read — never a dropped message (Story 5.4). */
+function unreadableHistoryError(accountId: string, detail: string): GmailAdapterError {
+  return new GmailAdapterError(
+    "LIST_HISTORY_FAILED",
+    accountId,
+    `Gmail returned ${detail} for account "${accountId}".`,
+  );
+}
+
+interface GmailHistoryPage {
+  ids: string[];
+  historyId: string;
+  nextPageToken: string | undefined;
+}
+
+/**
+ * One `users.history.list` page: the `messagesAdded` ids only — `labelsAdded`/`labelsRemoved`
+ * records belong to Epic 7's write-back, not to fetch (Story 5.4) — plus its top-level history id
+ * and page token. A page without a history id, a `history` that is not a list, or a record
+ * without an id is a typed error, never "no new mail"; an absent `history` key is an empty page,
+ * which is what Gmail returns when nothing changed.
+ */
+function parseHistoryPage(body: Record<string, unknown> | undefined, accountId: string): GmailHistoryPage {
+  const historyId = readString(body, "historyId");
+  if (historyId === undefined) {
+    // Without the id the cycle could not record anything, so this page is not usable.
+    throw unreadableHistoryError(accountId, "a history response without a history id");
+  }
+  const records = readField(body, "history");
+  const ids: string[] = [];
+  if (records !== undefined) {
+    if (!Array.isArray(records)) {
+      throw unreadableHistoryError(accountId, 'a history response whose "history" is not a list');
+    }
+    for (const record of records) {
+      if (readString(record, "id") === undefined) {
+        throw unreadableHistoryError(accountId, "a history record without an id");
+      }
+      const added = readField(record, "messagesAdded");
+      if (added === undefined) continue;
+      if (!Array.isArray(added)) {
+        throw unreadableHistoryError(accountId, 'a history record whose "messagesAdded" is not a list');
+      }
+      for (const entry of added) {
+        const id = readString(readField(entry, "message"), "id");
+        if (id === undefined) {
+          // An added message without an id cannot be hydrated; skipping it would drop it silently.
+          throw unreadableHistoryError(accountId, "a messagesAdded entry without a message id");
+        }
+        ids.push(id);
+      }
+    }
+  }
+  const rawToken = readField(body, "nextPageToken");
+  if (rawToken !== undefined && (typeof rawToken !== "string" || rawToken.length === 0)) {
+    // A present-but-unusable token must not quietly end the walk: a truncated history walk and
+    // an advanced cursor would drop the messages the unread pages carried.
+    throw unreadableHistoryError(accountId, 'a history response whose "nextPageToken" is not a usable token');
+  }
+  return { ids, historyId, nextPageToken: typeof rawToken === "string" && rawToken.length > 0 ? rawToken : undefined };
 }
 
 async function readJsonObject(response: FetchResponseLike): Promise<Record<string, unknown> | undefined> {
@@ -217,7 +333,8 @@ async function readJsonObject(response: FetchResponseLike): Promise<Record<strin
  * stdlib-only). `ensureCategories` keeps `MailPort`'s name — and its `Promise<void>`
  * signature — so the same `CategorySyncTarget` seam and `syncCategories` loop serve both
  * providers. `fetchMessages` (Story 5.3) conforms to two of `MailPort`'s three methods;
- * `writeLabels` belongs to Epic 7.
+ * `writeLabels` belongs to Epic 7. `fetchHistoryId`/`fetchHistory` (Story 5.4) are the two calls
+ * the incremental orchestrator needs, and they satisfy its `GmailHistoryTarget` structurally.
  */
 export class GmailAdapter {
   private readonly fetchFn: GmailAdapterDeps["fetchFn"];
@@ -418,8 +535,16 @@ export class GmailAdapter {
         ids.push(id);
       }
       for (let start = 0; start < ids.length; start += batchSize) {
-        // Each batch carries at most the clamped batch size; a failure in any batch fails the account.
-        messages.push(...(await this.fetchBatch(opts.accountId, token, ids.slice(start, start + batchSize))));
+        // Each batch carries at most the clamped batch size; a failure in any batch fails the
+        // account. The label-list path never tolerates a 404 part — that tolerance belongs only
+        // to the history walk, whose ids can outlive their messages (Story 5.4, EC1).
+        const { messages: batchMessages } = await this.fetchBatchParts(
+          opts.accountId,
+          token,
+          ids.slice(start, start + batchSize),
+          false,
+        );
+        messages.push(...batchMessages);
       }
       // The page's ids count as returned only once its batches succeeded.
       for (const id of ids) accountSeen.add(id);
@@ -448,8 +573,118 @@ export class GmailAdapter {
     return messages;
   }
 
-  /** Hydrates one batch of ids with a single `POST /batch/gmail/v1`; each part maps back to a DTO in order. */
-  private async fetchBatch(accountId: string, token: string, ids: string[]): Promise<MessageDTO[]> {
+  /**
+   * The mailbox's current `historyId` (`users.getProfile`). A list-path cycle reads it **before**
+   * its walk, so the id predates everything the walk sees and a message arriving mid-cycle is
+   * re-fetched next run rather than lost (Story 5.4).
+   */
+  async fetchHistoryId(accountId: string): Promise<string> {
+    const token = (await this.getAccessToken(accountId)).accessToken;
+    const response = await this.send(
+      PROFILE_URL,
+      getRequest(authorizationHeader(token)),
+      accountId,
+      "GET_PROFILE_FAILED",
+    );
+    if (!response.ok) {
+      throw new GmailAdapterError(
+        "GET_PROFILE_FAILED",
+        accountId,
+        `Gmail refused to read the profile for account "${accountId}" (HTTP ${response.status}).`,
+        response.status,
+      );
+    }
+    const historyId = readString(await readJsonObject(response), "historyId");
+    if (historyId === undefined) {
+      // Without the id this cycle could record nothing, so the profile is not usable.
+      throw new GmailAdapterError(
+        "GET_PROFILE_FAILED",
+        accountId,
+        `Gmail returned no history id for account "${accountId}".`,
+      );
+    }
+    return historyId;
+  }
+
+  /**
+   * Walks `users.history.list` from a stored `startHistoryId`, page by page, scoped to `INBOX`
+   * (the epic's cron window), and hydrates only the `messagesAdded` ids through the same batch
+   * endpoint `fetchMessages` uses. Gmail's 404 — a `startHistoryId` that has aged out — is the
+   * `{ kind: "expired" }` outcome, not an error and never "no new mail"; every other non-2xx is a
+   * typed error. The returned `historyId` is the response's top-level id.
+   */
+  async fetchHistory(opts: GmailHistoryOpts): Promise<GmailHistoryOutcome> {
+    const token = (await this.getAccessToken(opts.accountId)).accessToken;
+    const batchSize = clampBatchSize(opts.batchSize);
+    // A message added once can be reported on two pages; each id is hydrated exactly once.
+    const ids: string[] = [];
+    const seenIds = new Set<string>();
+    const skippedIds: string[] = [];
+    // A repeated page token would page forever; each token is followed once.
+    const seenTokens = new Set<string>();
+    let pageToken: string | undefined;
+    for (;;) {
+      const response = await this.send(
+        historyUrl(opts.historyId, pageToken),
+        getRequest(authorizationHeader(token)),
+        opts.accountId,
+        "LIST_HISTORY_FAILED",
+      );
+      if (response.status === 404) {
+        // Gmail's documented answer for a history id older than it keeps; a normal outcome the
+        // caller falls back from — never an error and never "no new mail" (Story 5.4).
+        return { kind: "expired" };
+      }
+      if (!response.ok) {
+        throw new GmailAdapterError(
+          "LIST_HISTORY_FAILED",
+          opts.accountId,
+          `Gmail refused to list history for account "${opts.accountId}" (HTTP ${response.status}).`,
+          response.status,
+        );
+      }
+      const page = parseHistoryPage(await readJsonObject(response), opts.accountId);
+      for (const id of page.ids) {
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        ids.push(id);
+      }
+      if (page.nextPageToken === undefined) {
+        // Each batch carries at most the clamped batch size; the history hydration tolerates only
+        // a purged message's 404 part (EC1) — every other failure still fails the account.
+        const messages: MessageDTO[] = [];
+        for (let start = 0; start < ids.length; start += batchSize) {
+          const batch = await this.fetchBatchParts(opts.accountId, token, ids.slice(start, start + batchSize), true);
+          messages.push(...batch.messages);
+          skippedIds.push(...batch.skippedIds);
+        }
+        return { kind: "ok", messages, historyId: page.historyId, skippedIds };
+      }
+      if (seenTokens.has(page.nextPageToken)) {
+        throw new GmailAdapterError(
+          "LIST_HISTORY_FAILED",
+          opts.accountId,
+          `Gmail repeated a page token for account "${opts.accountId}".`,
+        );
+      }
+      seenTokens.add(page.nextPageToken);
+      pageToken = page.nextPageToken;
+    }
+  }
+
+  /**
+   * The batch parser and mapper, shared by the label walk's `fetchMessages` and the history walk's
+   * hydration. A part that answers 404 is a purged message's answer (Story 5.4 decision EC1):
+   * only in a history walk (`allowPurged`) that id is skipped and named in the outcome — failing
+   * the whole cycle instead would re-fail every run until history expiry — while a POST-level
+   * failure of any other kind, or a malformed part, still fails the account.
+   */
+  private async fetchBatchParts(
+    accountId: string,
+    token: string,
+    ids: string[],
+    allowPurged: boolean,
+  ): Promise<{ messages: MessageDTO[]; skippedIds: string[] }> {
     const response: MultipartResponseLike = await this.send(
       BATCH_URL,
       {
@@ -479,10 +714,24 @@ export class GmailAdapter {
       throw unreadableBatchError(accountId);
     }
     const messages: Array<MessageDTO | undefined> = Array.from({ length: ids.length }, () => undefined);
+    // Which ids the parts have answered for, filled or skipped: every index needs exactly one answer.
+    const settled = Array.from({ length: ids.length }, () => false);
+    const skippedIds: string[] = [];
     parts.forEach((part, position) => {
       const parsed = parseBatchPart(part);
       if (parsed === undefined) throw unreadableBatchError(accountId);
       if (parsed.status < 200 || parsed.status >= 300) {
+        if (allowPurged && parsed.status === 404) {
+          // The request names each part; only a Content-ID naming this part's own slot is a purged
+          // message's answer — a nameless or duplicate 404 part is malformed, never an absorbable
+          // skip. (The success path has the same settled guard.)
+          const index = contentIdIndexOf(part);
+          if (index !== undefined && index < ids.length && !settled[index]) {
+            settled[index] = true;
+            skippedIds.push(ids[index]);
+            return;
+          }
+        }
         throw new GmailAdapterError(
           "BATCH_GET_MESSAGES_FAILED",
           accountId,
@@ -492,14 +741,15 @@ export class GmailAdapter {
       }
       // The request names each part; prefer that Content-ID so a reordered response cannot swap ids.
       const index = contentIdIndexOf(part) ?? position;
-      if (index >= ids.length || messages[index] !== undefined) throw unreadableBatchError(accountId);
+      if (index >= ids.length || settled[index]) throw unreadableBatchError(accountId);
       const message = mapGmailMessage(parsed.body, accountId);
       // A part that is not the message the request named — an empty id, or another
       // message's payload — is misattribution, never a silent swap or drop.
       if (message.id !== ids[index]) throw unreadableBatchError(accountId);
       messages[index] = message;
+      settled[index] = true;
     });
-    if (messages.some((message) => message === undefined)) throw unreadableBatchError(accountId);
-    return messages as MessageDTO[];
+    if (!settled.every((answered) => answered)) throw unreadableBatchError(accountId);
+    return { messages: messages.filter((message): message is MessageDTO => message !== undefined), skippedIds };
   }
 }
