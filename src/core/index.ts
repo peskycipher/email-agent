@@ -14,3 +14,4 @@ export type { ModelConfig } from "./dto/ModelConfig.js";
 export type { TokenSet } from "./dto/TokenSet.js";
 export type { Config } from "./dto/Config.js";
 export type { FetchOpts } from "./dto/FetchOpts.js";
+export type { PromptParts } from "./skill/prompt.js";
