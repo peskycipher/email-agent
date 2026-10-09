@@ -107,3 +107,61 @@ test("listEnabledAccounts propagates a non-ENOENT readdir failure", async () => 
 
   await expect(listEnabledAccounts({ configDir })).rejects.toBeInstanceOf(Error);
 });
+
+test("parses the optional folders and batchSize keys", async () => {
+  await writeAccount("work", yamlFor("work") + "folders:\n  - Inbox\n  - Archive\nbatchSize: 100\n");
+
+  const settings = await readAccountSettings("work", { configDir });
+
+  expect(settings.folders).toEqual(["Inbox", "Archive"]);
+  expect(settings.batchSize).toBe(100);
+});
+
+test("folders and batchSize stay absent when the file omits them", async () => {
+  await writeAccount("work", yamlFor("work"));
+
+  const settings = await readAccountSettings("work", { configDir });
+
+  expect(settings).toEqual({
+    name: "work",
+    enabled: true,
+    tenantId: "tenant-1",
+    clientId: "client-1",
+  });
+  expect(settings.folders).toBeUndefined();
+  expect(settings.batchSize).toBeUndefined();
+});
+
+test("rejects a batchSize above 100 as SETTINGS_INVALID", async () => {
+  await writeAccount("work", yamlFor("work") + "batchSize: 101\n");
+
+  const error = await readAccountSettings("work", { configDir }).catch((e: unknown) => e);
+
+  expect((error as AccountSettingsError).code).toBe("SETTINGS_INVALID");
+  expect((error as Error).message).toContain("batchSize");
+});
+
+test("rejects a batchSize below 1 as SETTINGS_INVALID", async () => {
+  await writeAccount("work", yamlFor("work") + "batchSize: 0\n");
+
+  const error = await readAccountSettings("work", { configDir }).catch((e: unknown) => e);
+
+  expect((error as AccountSettingsError).code).toBe("SETTINGS_INVALID");
+});
+
+test("rejects an empty folders list as SETTINGS_INVALID", async () => {
+  await writeAccount("work", yamlFor("work") + "folders: []\n");
+
+  const error = await readAccountSettings("work", { configDir }).catch((e: unknown) => e);
+
+  expect((error as AccountSettingsError).code).toBe("SETTINGS_INVALID");
+  expect((error as Error).message).toContain("folders");
+});
+
+test("rejects an empty folder name as SETTINGS_INVALID", async () => {
+  await writeAccount("work", yamlFor("work") + 'folders:\n  - ""\n');
+
+  const error = await readAccountSettings("work", { configDir }).catch((e: unknown) => e);
+
+  expect((error as AccountSettingsError).code).toBe("SETTINGS_INVALID");
+});

@@ -18,6 +18,9 @@ const accountSettingsSchema = z.object({
   enabled: z.boolean(),
   tenantId: z.string().min(1),
   clientId: z.string().min(1),
+  // Story 5.1: optional so Story 2.1's `toEqual` on a four-key settings file stays green.
+  folders: z.array(z.string().min(1)).min(1).optional(),
+  batchSize: z.number().int().min(1).max(100).optional(),
 });
 
 export type M365AccountSettings = z.infer<typeof accountSettingsSchema>;

@@ -13,6 +13,8 @@ export type {
 export { M365Adapter, M365AdapterError } from "./m365/M365Adapter.js";
 export type { M365AdapterDeps, M365AdapterErrorCode } from "./m365/M365Adapter.js";
 
+export { mapGraphMessage } from "./m365/messageMapper.js";
+
 export { accountSettingsDisplayPath, accountsDir, accountsDirDisplayPath, listEnabledAccounts, readAccountSettings, AccountSettingsError } from "./m365/accountSettings.js";
 export type {
   AccountSettingsErrorCode,

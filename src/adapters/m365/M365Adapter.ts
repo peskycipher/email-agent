@@ -1,9 +1,23 @@
+import type { FetchOpts } from "../../core/dto/FetchOpts.js";
 import type { LabelDef } from "../../core/dto/LabelDef.js";
+import type { MessageDTO } from "../../core/dto/MessageDTO.js";
 import type { TokenSet } from "../../core/dto/TokenSet.js";
+import { mapGraphMessage } from "./messageMapper.js";
 import type { FetchLike, FetchResponseLike } from "./M365AuthAdapter.js";
 
 /** Graph's per-mailbox master categories: one GET to list them, one POST per missing category. */
 const MASTER_CATEGORIES_URL = "https://graph.microsoft.com/v1.0/me/outlook/masterCategories";
+
+/** The whole-mailbox message list; a folder-scoped fetch prefixes `mailFolders/{folder}` to it. */
+const MESSAGES_URL = "https://graph.microsoft.com/v1.0/me/messages";
+const MAIL_FOLDERS_URL = "https://graph.microsoft.com/v1.0/me/mailFolders";
+
+/** The fields the mapper reads; `from` populates the DTO's required sender pair. */
+const MESSAGE_SELECT = "id,internetMessageId,subject,bodyPreview,receivedDateTime,categories,isRead,from";
+
+/** Graph's `$top` ceiling and this adapter's fallback; the orchestrator owns the effective default. */
+const MAX_BATCH_SIZE = 100;
+const DEFAULT_BATCH_SIZE = 50;
 
 /** A healthy Graph call answers in seconds; a stalled socket must not hang the sync forever. */
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -11,7 +25,10 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** The `FetchLike` init shape, reused so the GET builder can honestly omit `body`. */
 type FetchInit = Parameters<FetchLike>[1];
 
-export type M365AdapterErrorCode = "LIST_CATEGORIES_FAILED" | "CREATE_CATEGORY_FAILED";
+export type M365AdapterErrorCode =
+  | "LIST_CATEGORIES_FAILED"
+  | "CREATE_CATEGORY_FAILED"
+  | "LIST_MESSAGES_FAILED";
 
 /**
  * Typed at the adapter boundary so the CLI renders one actionable line (AD-4) —
@@ -65,6 +82,22 @@ function readNextLink(body: Record<string, unknown> | undefined): string | undef
   return typeof next === "string" && next.length > 0 ? next : undefined;
 }
 
+/** `$top` is the batch size: defaulted when unset and clamped to Graph's 1..100 range. */
+function clampBatchSize(batchSize: number | undefined): number {
+  if (typeof batchSize !== "number" || !Number.isFinite(batchSize)) return DEFAULT_BATCH_SIZE;
+  return Math.min(Math.max(Math.trunc(batchSize), 1), MAX_BATCH_SIZE);
+}
+
+/** Whole mailbox, or one folder when `opts.folder` is set; `$top` and `$select` ride every page. */
+function messagesUrl(opts: FetchOpts): string {
+  // A configured folder is typically a display name ("Sent Items"), so the path segment is encoded.
+  const base =
+    opts.folder === undefined
+      ? MESSAGES_URL
+      : `${MAIL_FOLDERS_URL}/${encodeURIComponent(opts.folder)}/messages`;
+  return `${base}?$top=${clampBatchSize(opts.batchSize)}&$select=${MESSAGE_SELECT}`;
+}
+
 async function readJsonObject(response: FetchResponseLike): Promise<Record<string, unknown> | undefined> {
   try {
     const body = await response.json();
@@ -75,9 +108,9 @@ async function readJsonObject(response: FetchResponseLike): Promise<Record<strin
 }
 
 /**
- * M365 master-category sync over plain `fetch` (no Graph SDK — Story 2.1's decision,
- * and `tests/adapters/**` stay stdlib-only). Only `ensureCategories` is implemented;
- * the other two `MailPort` methods belong to Epics 5 and 7.
+ * M365 Graph work over plain `fetch` (no Graph SDK — Story 2.1's decision,
+ * and `tests/adapters/**` stay stdlib-only). `ensureCategories` and `fetchMessages`
+ * are implemented; `writeLabels` belongs to Epic 7.
  */
 export class M365Adapter {
   private readonly fetchFn: FetchLike;
@@ -104,6 +137,48 @@ export class M365Adapter {
       // one from being POSTed into a duplicate (or a 409).
       existing.add(label.name);
     }
+  }
+
+  /**
+   * Walks the account's message list page by page in Graph's order, following
+   * `@odata.nextLink` until it is absent (Story 5.1). A non-2xx page, a missing
+   * `value` array, or a network failure throws a typed error and returns no partial
+   * array — a truncated backfill must never look like a finished one.
+   */
+  async fetchMessages(opts: FetchOpts): Promise<MessageDTO[]> {
+    const token = (await this.getAccessToken(opts.accountId)).accessToken;
+    const messages: MessageDTO[] = [];
+    let url: string | undefined = messagesUrl(opts);
+    while (url !== undefined) {
+      const response = await this.send(
+        url,
+        getRequest(authorizationHeader(token)),
+        opts.accountId,
+        "LIST_MESSAGES_FAILED",
+      );
+      if (!response.ok) {
+        throw new M365AdapterError(
+          "LIST_MESSAGES_FAILED",
+          opts.accountId,
+          `Microsoft Graph refused to list messages for account "${opts.accountId}" (HTTP ${response.status}).`,
+          response.status,
+        );
+      }
+      const body = await readJsonObject(response);
+      const page = body?.value;
+      if (!Array.isArray(page)) {
+        // A page without its `value` array is an error, never "no messages" — the
+        // same rule `listCategoryNames` applies.
+        throw new M365AdapterError(
+          "LIST_MESSAGES_FAILED",
+          opts.accountId,
+          `Microsoft Graph returned no message list for account "${opts.accountId}".`,
+        );
+      }
+      for (const entry of page) messages.push(mapGraphMessage(entry, opts.accountId));
+      url = readNextLink(body);
+    }
+    return messages;
   }
 
   private async listCategoryNames(accountId: string, token: string): Promise<Set<string>> {
