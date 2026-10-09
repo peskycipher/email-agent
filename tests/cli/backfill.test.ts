@@ -96,11 +96,64 @@ async function writeAccount(name: string, extra = ""): Promise<void> {
   await writeFile(join(configDir, "accounts", "m365", `${name}.yaml`), body, "utf8");
 }
 
+async function writeGmailAccount(name: string, extra = ""): Promise<void> {
+  const body = `name: ${name}\nenabled: true\nclientId: client-1\nclientSecretEnvVar: GMAIL_SECRET\n${extra}`;
+  await writeFile(join(configDir, "accounts", "gmail", `${name}.yaml`), body, "utf8");
+}
+
+const GMAIL_MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages";
+const GMAIL_BATCH_URL = "https://gmail.googleapis.com/batch/gmail/v1";
+
+function cachedGmailToken(accountId: string): TokenSet {
+  return {
+    accessToken: `access-gmail-${accountId}`,
+    refreshToken: `refresh-${accountId}`,
+    expiresAt: Date.now() + 3_600_000,
+    scopes: ["gmail.readonly", "gmail.labels", "gmail.modify"],
+  };
+}
+
+/** Gmail's `messages.list` page: ids only. */
+function gmailListPage(ids: string[]): FetchResponseLike {
+  return jsonResponse({ messages: ids.map((id) => ({ id })) });
+}
+
+/** A `multipart/mixed` batch response, one metadata detail per id. */
+function gmailBatchResponse(ids: string[], boundary = "batch_cli"): FetchResponseLike {
+  const parts = ids.map(
+    (id) =>
+      `--${boundary}\r\nContent-Type: application/http\r\nContent-ID: <response-message-1>\r\n\r\n` +
+      `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n` +
+      `${JSON.stringify({
+        id,
+        internetMessageId: `<${id}@example.com>`,
+        labelIds: ["INBOX"],
+        snippet: `Preview ${id}`,
+        internalDate: "1759999999000",
+        payload: {
+          headers: [
+            { name: "From", value: `Sender ${id} <${id}@example.com>` },
+            { name: "Subject", value: `Subject ${id}` },
+          ],
+        },
+      })}\r\n\r\n`,
+  );
+  parts.push(`--${boundary}--\r\n`);
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => `multipart/mixed; boundary="${boundary}"` },
+    json: async () => ({}),
+    text: async () => parts.join(""),
+  } as FetchResponseLike;
+}
+
 let configDir: string;
 
 beforeEach(async () => {
   configDir = await mkdtemp(join(tmpdir(), "cli-backfill-"));
   await mkdir(join(configDir, "accounts", "m365"), { recursive: true });
+  await mkdir(join(configDir, "accounts", "gmail"), { recursive: true });
 });
 
 afterEach(async () => {
@@ -308,5 +361,120 @@ test("an unreadable accounts directory exits 1 with the listing error, not a cra
   expect(code).toBe(1);
   expect(requests).toHaveLength(0);
   expect(capturedLines(stderr).join("")).toContain("m365: ");
+  expect(capturedLines(stdout)).toHaveLength(0);
+});
+
+test("--backfill --source gmail --account all fetches through the list+batch path, never Graph (CLI_SOURCE)", async () => {
+  await writeGmailAccount("personal");
+  const { fetchFn, requests } = recordingFetch([
+    gmailListPage(["m1", "m2"]),
+    gmailBatchResponse(["m1", "m2"]),
+  ]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runBackfill(
+    { source: "gmail", account: "all" },
+    { fetchFn, tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }), configDir },
+  );
+
+  expect(code).toBe(0);
+  expect(capturedLines(stderr)).toHaveLength(0);
+  expect(capturedLines(stdout)).toEqual([
+    "info personal: Fetched 2 messages.\n",
+    "Fetched 2 message(s) from 1 account(s).\n",
+  ]);
+  expect(requests).toHaveLength(2);
+  expect(requests[0]?.method).toBe("GET");
+  expect(requests[0]?.url).toBe(`${GMAIL_MESSAGES_URL}?labelIds=INBOX&maxResults=50`);
+  expect(requests[0]?.authorization).toBe("Bearer access-gmail-personal");
+  expect(requests[1]?.method).toBe("POST");
+  expect(requests[1]?.url).toBe(GMAIL_BATCH_URL);
+  // Not a single request reached Microsoft Graph.
+  expect(requests.every((request) => request.url.startsWith("https://gmail.googleapis.com/"))).toBe(true);
+});
+
+test("--backfill --source gmail --account all keeps going after an account fails (MULTI_ACCOUNT)", async () => {
+  await writeGmailAccount("alpha");
+  await writeGmailAccount("beta");
+  const { fetchFn, requests } = recordingFetch([gmailListPage(["m1"]), gmailBatchResponse(["m1"])]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runBackfill(
+    { source: "gmail", account: "all" },
+    { fetchFn, tokenStore: memoryTokenStore({ "gmail:beta": cachedGmailToken("beta") }), configDir },
+  );
+
+  expect(code).toBe(1);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("alpha: ");
+  expect(errors).toContain("--auth gmail --account alpha");
+  expect(errors).toContain("1 of 2 gmail account(s) failed.");
+  expect(capturedLines(stdout).join("")).toContain("info beta: Fetched 1 messages.");
+  expect(requests).toHaveLength(2);
+  expect(requests[0]?.authorization).toBe("Bearer access-gmail-beta");
+});
+
+test("--backfill --source gmail --account all with no enabled gmail account exits 1 with the setup hint (NO_ACCOUNTS)", async () => {
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runBackfill({ source: "gmail", account: "all" }, { fetchFn, configDir });
+
+  expect(code).toBe(1);
+  expect(requests).toHaveLength(0);
+  expect(capturedLines(stdout)).toHaveLength(0);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("No enabled gmail accounts found");
+  expect(errors).toContain("~/.config/email-classify/accounts/gmail/<name>.yaml");
+});
+
+test("a gmail account's configured labels drive the list's labelIds (LABEL)", async () => {
+  await writeGmailAccount("personal", "labels: [Label_5]\nbatchSize: 100\n");
+  const { fetchFn, requests } = recordingFetch([gmailListPage([])]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+
+  const code = await runBackfill(
+    { source: "gmail", account: "all" },
+    { fetchFn, tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }), configDir },
+  );
+
+  expect(code).toBe(0);
+  expect(requests).toHaveLength(1);
+  expect(requests[0]?.url).toBe(`${GMAIL_MESSAGES_URL}?labelIds=Label_5&maxResults=100`);
+  expect(capturedLines(stdout).join("")).toContain("Fetched 0 message(s) from 1 account(s).");
+});
+
+test("--backfill --source gmail --account all with only malformed settings exits 1 with the gmail invalid-settings line", async () => {
+  await writeFile(join(configDir, "accounts", "gmail", "broken.yaml"), "name: [unclosed", "utf8");
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runBackfill({ source: "gmail", account: "all" }, { fetchFn, configDir });
+
+  expect(code).toBe(1);
+  expect(requests).toHaveLength(0);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("gmail broken:");
+  expect(errors).toContain("invalid settings");
+  // The file exists but is broken, so "add a file" would be the wrong guidance.
+  expect(errors).not.toContain("No enabled gmail accounts found");
+  expect(capturedLines(stdout)).toHaveLength(0);
+});
+
+test("--backfill --source gmail --account <name> with no such account exits 1 with the named hint", async () => {
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runBackfill({ source: "gmail", account: "nobody" }, { fetchFn, configDir });
+
+  expect(code).toBe(1);
+  expect(requests).toHaveLength(0);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("No enabled gmail account named");
   expect(capturedLines(stdout)).toHaveLength(0);
 });

@@ -11,14 +11,17 @@ import {
 /**
  * Temporary per-account reader for `--account all` (Story 2.1 decision 1, applied to
  * Gmail in Story 3.1): Epic 11 replaces it with `ConfigLoader`/DI over
- * `Config.gmail.accounts[]`. Validates only the four auth keys; the Epic-5 keys
- * (`labels`, `batchSize`) live in the same file and are tolerated.
+ * `Config.gmail.accounts[]`. Validates the four auth keys plus the optional
+ * Story 5.3 fetch keys (`labels`, `batchSize`), mirroring m365's `folders`/`batchSize`.
  */
 const accountSettingsSchema = z.object({
   name: z.string().regex(ACCOUNT_NAME_PATTERN),
   enabled: z.boolean(),
   clientId: z.string().min(1),
   clientSecretEnvVar: z.string().min(1),
+  // Story 5.3: optional so Story 3.1's `toEqual` on a four-key settings file stays green.
+  labels: z.array(z.string().min(1)).min(1).optional(),
+  batchSize: z.number().int().min(1).max(100).optional(),
 });
 
 export type GmailAccountSettings = z.infer<typeof accountSettingsSchema>;

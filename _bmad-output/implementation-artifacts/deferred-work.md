@@ -99,3 +99,13 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-5-2-m365-incremental-message-fetch-cron-multi-account.md`
   summary: `_bmad-output/implementation-artifacts/epic-5-context.md` promises behaviour the shipped temporary command deliberately does not provide.
   evidence: `epic-5-context.md:25` says state files are "guarded by a process-level lock"; the lock is deferred by human decision (spec line 40, `ponytail:` ceiling at `src/adapters/config/stateFile.ts:142`). `epic-5-context.md:38` promises per-account cron reporting of start/fetched/classified/labeled/duration/next-run; the temporary command emits one aggregate line (`src/cli/commands/cron.ts:104-108`). Human-owned context doc — a refresh request for a planning/context pass, not a code defect. Found by the acceptance-auditor (2026-10-09).
+
+## Deferred from: review of spec-5-3-gmail-backfill-message-fetch-multi-account.md (2026-10-09)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-3-gmail-backfill-message-fetch-multi-account.md`
+  summary: An unrelated party-mode session memory is bundled into the Story 5.3 change set.
+  evidence: `_bmad-output/party-mode/memories/installed/.memlog.md` (new, untracked) records a Story 2.1 M365 device-code session dated 2026-10-08, is unrelated to Story 5.3, and sits in the human-owned `_bmad-output/` tree. Keep it out of the story commit (or gitignore the memories path). Found by code review (2026-10-09).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-3-gmail-backfill-message-fetch-multi-account.md`
+  summary: The `--source` help/example text added for Gmail backfill is only manually verifiable.
+  evidence: `src/cli/index.ts` calls `program.parseAsync` on import, so no test imports it; the `--source gmail` help shares the entry-point exposure already deferred for `--auth`/`--sync-categories`/`--backfill`/`--cron`. Closing it needs the entry-point refactor (`main.ts` + injected argv). Found by the verification-gap layer (2026-10-09).

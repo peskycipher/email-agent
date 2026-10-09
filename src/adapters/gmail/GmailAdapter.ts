@@ -1,18 +1,54 @@
+import type { FetchOpts } from "../../core/dto/FetchOpts.js";
 import type { LabelDef } from "../../core/dto/LabelDef.js";
+import type { MessageDTO } from "../../core/dto/MessageDTO.js";
 import type { TokenSet } from "../../core/dto/TokenSet.js";
 import type { FetchResponseLike } from "./GmailAuthAdapter.js";
 import { nearestGmailColor, textColorFor } from "./labelColors.js";
+import { mapGmailMessage } from "./messageMapper.js";
 
 /** Gmail's per-account labels: one GET to list them, one POST per missing label. */
 const LABELS_URL = "https://gmail.googleapis.com/gmail/v1/users/me/labels";
 
+/** The whole-mailbox message list; `labelIds` scopes it to one label (Story 5.3). */
+const MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages";
+
+/**
+ * Gmail exposes no REST `messages.batchGet`: hydrating details is a generic multipart
+ * batch POST, one inner metadata GET per id (Story 5.3 design note).
+ */
+const BATCH_URL = "https://gmail.googleapis.com/batch/gmail/v1";
+
+/** The multipart boundary this adapter sends on a batch request; Gmail answers with its own, read from the response. */
+const BATCH_BOUNDARY = "email_classify_batch";
+
+/** Gmail's system label for the inbox, used when the account configures no label. */
+const DEFAULT_LABEL = "INBOX";
+
+/** Gmail's `maxResults` ceiling and this adapter's fallback; the orchestrator owns the effective default. */
+const MAX_BATCH_SIZE = 100;
+const DEFAULT_BATCH_SIZE = 50;
+
 /** A healthy Gmail call answers in seconds; a stalled socket must not hang the sync forever. */
 const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * `FetchResponseLike` models only JSON responses; a batch response is `multipart/mixed`, whose
+ * boundary is a response header and whose body is text. A real `Response` supplies both, and
+ * both are optional here so an injected JSON-only test double still satisfies the seam.
+ */
+interface MultipartResponseLike extends FetchResponseLike {
+  headers?: { get(name: string): string | null };
+  text?: () => Promise<string>;
+}
 
 /** The per-account label-name → label-id map Epic 7 writes classifications back with. */
 export type GmailLabelIds = ReadonlyMap<string, string>;
 
-export type GmailAdapterErrorCode = "LIST_LABELS_FAILED" | "CREATE_LABEL_FAILED";
+export type GmailAdapterErrorCode =
+  | "LIST_LABELS_FAILED"
+  | "CREATE_LABEL_FAILED"
+  | "LIST_MESSAGES_FAILED"
+  | "BATCH_GET_MESSAGES_FAILED";
 
 /**
  * Typed at the adapter boundary so the CLI renders one actionable line (AD-4) —
@@ -66,6 +102,93 @@ function postRequest(headers: Record<string, string>, payload: Record<string, un
   };
 }
 
+/** `maxResults`/batch size: defaulted when unset and clamped to Gmail's 1..100 range. */
+function clampBatchSize(batchSize: number | undefined): number {
+  if (typeof batchSize !== "number" || !Number.isFinite(batchSize)) return DEFAULT_BATCH_SIZE;
+  return Math.min(Math.max(Math.trunc(batchSize), 1), MAX_BATCH_SIZE);
+}
+
+/**
+ * The message list URL: `labelIds` is `opts.folder` when set, else Gmail's `INBOX` system
+ * label; `maxResults` is the clamped batch size; later pages carry a `pageToken`.
+ */
+function messagesListUrl(opts: FetchOpts, pageToken: string | undefined): string {
+  const label = opts.folder === undefined || opts.folder.length === 0 ? DEFAULT_LABEL : opts.folder;
+  const query = [`labelIds=${encodeURIComponent(label)}`, `maxResults=${clampBatchSize(opts.batchSize)}`];
+  if (pageToken !== undefined) query.push(`pageToken=${encodeURIComponent(pageToken)}`);
+  return `${MESSAGES_URL}?${query.join("&")}`;
+}
+
+/**
+ * The batch request body: one `application/http` part per message id, each a metadata GET
+ * for exactly the fields the mapper reads. The closing delimiter terminates the body.
+ */
+function batchRequestBody(ids: string[]): string {
+  const parts = ids.map(
+    (id, index) =>
+      `--${BATCH_BOUNDARY}\r\n` +
+      `Content-Type: application/http\r\n` +
+      `Content-ID: <message-${index + 1}>\r\n` +
+      `\r\n` +
+      `GET /gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From,Subject HTTP/1.1\r\n`,
+  );
+  // The parts already end in CRLF; `join` adds the blank line multipart requires before each delimiter.
+  parts.push(`--${BATCH_BOUNDARY}--`);
+  return `${parts.join("\r\n")}\r\n`;
+}
+
+/** The boundary named by a `multipart/mixed` response's `Content-Type`, or `undefined` when it is not multipart. */
+function batchBoundary(contentType: string | null | undefined): string | undefined {
+  if (typeof contentType !== "string") return undefined;
+  const match = /boundary="?([^";]+)"?/i.exec(contentType);
+  return match?.[1];
+}
+
+/** Splits a `multipart/mixed` body into its part texts; the closing delimiter's chunk is dropped. */
+function splitBatchParts(body: string, boundary: string): string[] {
+  const parts: string[] = [];
+  for (const chunk of body.split(`--${boundary}`).slice(1)) {
+    // Nothing follows the terminator, whose chunk starts with `--`.
+    if (chunk.startsWith("--")) break;
+    parts.push(chunk);
+  }
+  return parts;
+}
+
+/** One batch part's embedded HTTP status and JSON body; `undefined` means the part is not a parseable response. */
+function parseBatchPart(chunk: string): { status: number; body: unknown } | undefined {
+  const start = chunk.indexOf("HTTP/");
+  if (start < 0) return undefined;
+  const embedded = chunk.slice(start);
+  const status = /^HTTP\/\d(?:\.\d)?\s+(\d{3})/.exec(embedded);
+  if (status === null) return undefined;
+  const separator = embedded.indexOf("\r\n\r\n");
+  if (separator < 0) return undefined;
+  try {
+    return { status: Number(status[1]), body: JSON.parse(embedded.slice(separator + 4).trim()) };
+  } catch {
+    return undefined;
+  }
+}
+
+async function readResponseText(response: MultipartResponseLike): Promise<string | undefined> {
+  if (typeof response.text !== "function") return undefined;
+  try {
+    return await response.text();
+  } catch {
+    return undefined;
+  }
+}
+
+/** One actionable line for a batch that cannot be parsed — never a silent skip (Story 5.3). */
+function unreadableBatchError(accountId: string): GmailAdapterError {
+  return new GmailAdapterError(
+    "BATCH_GET_MESSAGES_FAILED",
+    accountId,
+    `Gmail returned an unreadable message batch for account "${accountId}".`,
+  );
+}
+
 function readString(entry: unknown, key: string): string | undefined {
   if (typeof entry !== "object" || entry === null) return undefined;
   const value = (entry as Record<string, unknown>)[key];
@@ -85,7 +208,8 @@ async function readJsonObject(response: FetchResponseLike): Promise<Record<strin
  * Gmail label sync over plain `fetch` (Story 3.1's decision, and `tests/adapters/**` stay
  * stdlib-only). `ensureCategories` keeps `MailPort`'s name — and its `Promise<void>`
  * signature — so the same `CategorySyncTarget` seam and `syncCategories` loop serve both
- * providers; the other two `MailPort` methods belong to Epics 5 and 7.
+ * providers. `fetchMessages` (Story 5.3) conforms to two of `MailPort`'s three methods;
+ * `writeLabels` belongs to Epic 7.
  */
 export class GmailAdapter {
   private readonly fetchFn: GmailAdapterDeps["fetchFn"];
@@ -135,6 +259,7 @@ export class GmailAdapter {
 
   private async listLabels(accountId: string, token: string): Promise<Map<string, string>> {
     const response = await this.send(
+      LABELS_URL,
       getRequest(authorizationHeader(token)),
       accountId,
       "LIST_LABELS_FAILED",
@@ -174,6 +299,7 @@ export class GmailAdapter {
     // the nearest allowed pair is what actually goes on the wire.
     const backgroundColor = nearestGmailColor(label.gmailColor);
     const response = await this.send(
+      LABELS_URL,
       postRequest(authorizationHeader(token), {
         name: label.name,
         color: { backgroundColor, textColor: textColorFor(backgroundColor) },
@@ -202,12 +328,13 @@ export class GmailAdapter {
   }
 
   private async send(
+    url: string,
     init: FetchInit,
     accountId: string,
     code: GmailAdapterErrorCode,
   ): Promise<FetchResponseLike> {
     try {
-      return await this.fetchFn(LABELS_URL, {
+      return await this.fetchFn(url, {
         ...init,
         // Never override a caller-supplied signal; bound the request only when there is none.
         signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -216,5 +343,115 @@ export class GmailAdapter {
       // The thrown value can carry a stack and a raw cause; the typed error carries neither.
       throw new GmailAdapterError(code, accountId, `Gmail could not be reached for account "${accountId}".`);
     }
+  }
+
+  /**
+   * Walks the account's message list page by page, following `nextPageToken` until it is
+   * absent, and hydrates each page's ids through the multipart batch endpoint (Story 5.3).
+   * A non-2xx or malformed page, an unreadable batch, or a network failure throws a typed
+   * error and returns no partial array — a truncated backfill must never look finished.
+   */
+  async fetchMessages(opts: FetchOpts): Promise<MessageDTO[]> {
+    const token = (await this.getAccessToken(opts.accountId)).accessToken;
+    const batchSize = clampBatchSize(opts.batchSize);
+    const messages: MessageDTO[] = [];
+    // A message can appear on two pages while mail arrives during a long backfill; each id is hydrated once.
+    const seenIds = new Set<string>();
+    let pageToken: string | undefined;
+    do {
+      const response = await this.send(
+        messagesListUrl(opts, pageToken),
+        getRequest(authorizationHeader(token)),
+        opts.accountId,
+        "LIST_MESSAGES_FAILED",
+      );
+      if (!response.ok) {
+        throw new GmailAdapterError(
+          "LIST_MESSAGES_FAILED",
+          opts.accountId,
+          `Gmail refused to list messages for account "${opts.accountId}" (HTTP ${response.status}).`,
+          response.status,
+        );
+      }
+      const body = await readJsonObject(response);
+      const page = body?.messages;
+      if (!Array.isArray(page)) {
+        // A page without its `messages` array is an error, never "no messages" — the
+        // same rule `listLabels` applies.
+        throw new GmailAdapterError(
+          "LIST_MESSAGES_FAILED",
+          opts.accountId,
+          `Gmail returned no message list for account "${opts.accountId}".`,
+        );
+      }
+      const ids: string[] = [];
+      for (const entry of page) {
+        const id = readString(entry, "id");
+        if (id === undefined) {
+          // A list entry without an id cannot be hydrated; treating it as "no messages" would drop it.
+          throw new GmailAdapterError(
+            "LIST_MESSAGES_FAILED",
+            opts.accountId,
+            `Gmail listed a message without an id for account "${opts.accountId}".`,
+          );
+        }
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        ids.push(id);
+      }
+      for (let start = 0; start < ids.length; start += batchSize) {
+        // Each batch carries at most the clamped batch size; a failure in any batch fails the account.
+        messages.push(...(await this.fetchBatch(opts.accountId, token, ids.slice(start, start + batchSize))));
+      }
+      pageToken = readString(body, "nextPageToken");
+    } while (pageToken !== undefined);
+    return messages;
+  }
+
+  /** Hydrates one batch of ids with a single `POST /batch/gmail/v1`; each part maps back to a DTO in order. */
+  private async fetchBatch(accountId: string, token: string, ids: string[]): Promise<MessageDTO[]> {
+    const response: MultipartResponseLike = await this.send(
+      BATCH_URL,
+      {
+        method: "POST",
+        headers: {
+          ...authorizationHeader(token),
+          "content-type": `multipart/mixed; boundary=${BATCH_BOUNDARY}`,
+        },
+        body: batchRequestBody(ids),
+      },
+      accountId,
+      "BATCH_GET_MESSAGES_FAILED",
+    );
+    if (!response.ok) {
+      throw new GmailAdapterError(
+        "BATCH_GET_MESSAGES_FAILED",
+        accountId,
+        `Gmail refused to fetch message details for account "${accountId}" (HTTP ${response.status}).`,
+        response.status,
+      );
+    }
+    const body = await readResponseText(response);
+    const boundary = batchBoundary(response.headers?.get("content-type"));
+    const parts = body === undefined || boundary === undefined ? undefined : splitBatchParts(body, boundary);
+    if (parts === undefined || parts.length !== ids.length) {
+      // Without one parseable part per id, some message's details would be silently dropped.
+      throw unreadableBatchError(accountId);
+    }
+    const messages: MessageDTO[] = [];
+    for (const part of parts) {
+      const parsed = parseBatchPart(part);
+      if (parsed === undefined) throw unreadableBatchError(accountId);
+      if (parsed.status < 200 || parsed.status >= 300) {
+        throw new GmailAdapterError(
+          "BATCH_GET_MESSAGES_FAILED",
+          accountId,
+          `Gmail refused to fetch message details for account "${accountId}" (HTTP ${parsed.status}).`,
+          parsed.status,
+        );
+      }
+      messages.push(mapGmailMessage(parsed.body, accountId));
+    }
+    return messages;
   }
 }

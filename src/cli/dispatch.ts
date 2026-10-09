@@ -16,14 +16,14 @@ export interface CliOptions {
 export type CliCommand =
   | { kind: "auth"; provider: string; account: string }
   | { kind: "sync"; account: string }
-  | { kind: "backfill"; source: "m365"; account: string }
+  | { kind: "backfill"; source: "m365" | "gmail"; account: string }
   | { kind: "cron"; account: string }
   | { kind: "error"; message: string };
 
 const AUTH_FLAGS_REQUIRED =
   "--auth <provider> and --account <name|all> are both required (e.g. --auth gmail --account personal).";
 
-/** Only M365 backfill exists yet; the Gmail half is a later story, named so the line is actionable. */
+/** Both providers have a backfill; only m365 has the incremental path (Story 5.4 owns Gmail's). */
 function resolveBackfill(options: CliOptions): CliCommand {
   if (options.auth !== undefined || options.syncCategories === true || options.cron === true) {
     const other =
@@ -34,17 +34,15 @@ function resolveBackfill(options: CliOptions): CliCommand {
     };
   }
   const source = options.source ?? "m365";
-  if (source === "gmail" || source === "all") {
-    return {
-      kind: "error",
-      message: `--source ${source} is not supported yet — Gmail message fetch is Story 5.3; use --source m365.`,
-    };
+  if (source === "all") {
+    // Human decision (2026-10-09): `all` is not a provider — a backfill names one.
+    return { kind: "error", message: `--source all is not supported — choose "m365" or "gmail".` };
   }
-  if (source !== "m365") {
-    return { kind: "error", message: `Unknown --source "${source}" — supported sources are "m365" and "gmail" (Story 5.3).` };
+  if (source !== "m365" && source !== "gmail") {
+    return { kind: "error", message: `Unknown --source "${source}" — supported sources are "m365" and "gmail".` };
   }
   // `--account` defaults to "all": backfill is meant to run for every enabled account.
-  return { kind: "backfill", source: "m365", account: options.account ?? "all" };
+  return { kind: "backfill", source, account: options.account ?? "all" };
 }
 
 /** M365 incremental only; the Gmail half is Story 5.4, named so the line is actionable. */

@@ -16,12 +16,15 @@ program
     "account to act on (a per-account settings name, or 'all' for every enabled account; defaults to 'all' for --sync-categories, --backfill and --cron)",
   )
   .option("--sync-categories", "ensure the taxonomy's labels exist as M365 master categories and Gmail labels")
-  .option("--backfill", "fetch every selected account's messages (m365 backfill; nothing is written back)")
+  .option("--backfill", "fetch every selected account's messages (m365 or gmail backfill; nothing is written back)")
   .option("--cron", "fetch only what is new per selected account (m365 incremental; nothing is written back)")
-  .option("--source <provider>", 'message source for --backfill/--cron; only "m365" today (defaults to "m365")')
+  .option(
+    "--source <provider>",
+    'message source for --backfill/--cron; "m365" or "gmail" for --backfill, only "m365" for --cron (defaults to "m365")',
+  )
   .addHelpText(
     "after",
-    "\nExamples:\n  $ email-classify --auth m365 --account work\n  $ email-classify --auth m365 --account all\n  $ email-classify --auth gmail --account personal\n  $ email-classify --auth gmail --account all\n  $ email-classify --sync-categories --account all\n  $ email-classify --backfill --source m365 --account work\n  $ email-classify --backfill --source m365 --account all\n  $ email-classify --cron --source m365 --account work\n  $ email-classify --cron --source m365 --account all\n",
+    "\nExamples:\n  $ email-classify --auth m365 --account work\n  $ email-classify --auth m365 --account all\n  $ email-classify --auth gmail --account personal\n  $ email-classify --auth gmail --account all\n  $ email-classify --sync-categories --account all\n  $ email-classify --backfill --source m365 --account work\n  $ email-classify --backfill --source m365 --account all\n  $ email-classify --backfill --source gmail --account all\n  $ email-classify --cron --source m365 --account work\n  $ email-classify --cron --source m365 --account all\n",
   )
   .action(async (options: CliOptions) => {
     const command = resolveCliCommand(options);

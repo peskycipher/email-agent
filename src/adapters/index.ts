@@ -39,6 +39,8 @@ export type { GmailAccountSettings, GmailAccountsListing } from "./gmail/account
 export { GmailAdapter, GmailAdapterError } from "./gmail/GmailAdapter.js";
 export type { GmailAdapterDeps, GmailAdapterErrorCode, GmailLabelIds } from "./gmail/GmailAdapter.js";
 
+export { mapGmailMessage } from "./gmail/messageMapper.js";
+
 export { loadTaxonomy, TaxonomyError } from "./config/taxonomy.js";
 export type { LoadTaxonomyOptions, TaxonomyErrorCode } from "./config/taxonomy.js";
 

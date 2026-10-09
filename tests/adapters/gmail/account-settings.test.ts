@@ -44,15 +44,45 @@ test("reads and validates a gmail settings file", async () => {
   });
 });
 
-test("tolerates the Epic-5 label keys in the same file", async () => {
+test("parses the optional Story 5.3 labels and batchSize keys", async () => {
   await writeAccount(
     "personal",
-    `name: personal\nenabled: true\nclientId: client-1\nclientSecretEnvVar: GMAIL_SECRET\nlabels: [INBOX]\nbatchSize: 50\n`,
+    `name: personal\nenabled: true\nclientId: client-1\nclientSecretEnvVar: GMAIL_SECRET\nlabels: [INBOX, Label_5]\nbatchSize: 50\n`,
   );
 
   const settings = await readAccountSettings("personal", { configDir });
 
   expect(settings.clientId).toBe("client-1");
+  expect(settings.labels).toEqual(["INBOX", "Label_5"]);
+  expect(settings.batchSize).toBe(50);
+});
+
+test("leaves labels and batchSize undefined when the file omits them", async () => {
+  await writeAccount("personal", yamlFor("personal"));
+
+  const settings = await readAccountSettings("personal", { configDir });
+
+  expect(settings.labels).toBeUndefined();
+  expect(settings.batchSize).toBeUndefined();
+});
+
+const invalidFetchKeys: Array<[string, string, string]> = [
+  ["batchSize 0", "batchSize: 0", "batchSize"],
+  ["batchSize 101", "batchSize: 101", "batchSize"],
+  ["an empty labels list", "labels: []", "labels"],
+  ["a labels list with an empty string", 'labels: [""]', "labels"],
+];
+
+test.each(invalidFetchKeys)("rejects %s as SETTINGS_INVALID", async (_label, extra, field) => {
+  await writeAccount(
+    "personal",
+    `name: personal\nenabled: true\nclientId: client-1\nclientSecretEnvVar: GMAIL_SECRET\n${extra}\n`,
+  );
+
+  const error = await readAccountSettings("personal", { configDir }).catch((e: unknown) => e);
+
+  expect((error as AccountSettingsError).code).toBe("SETTINGS_INVALID");
+  expect((error as Error).message).toContain(field);
 });
 
 test("missing settings name the expected gmail path", async () => {

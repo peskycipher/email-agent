@@ -53,18 +53,27 @@ test("--backfill --source m365 --account work targets that one account", () => {
   });
 });
 
-test("--backfill --source gmail names Story 5.3 and never fetches (CLI_SOURCE)", () => {
-  const command = resolveCliCommand({ backfill: true, source: "gmail" });
-
-  expect(command.kind).toBe("error");
-  expect(command.kind === "error" ? command.message : "").toContain("Story 5.3");
+test("--backfill --source gmail selects the Gmail path, defaulting --account to all (CLI_SOURCE)", () => {
+  expect(resolveCliCommand({ backfill: true, source: "gmail" })).toEqual({
+    kind: "backfill",
+    source: "gmail",
+    account: "all",
+  });
 });
 
-test("--backfill --source all is rejected with the Story 5.3 line", () => {
+test("--backfill --source gmail --account personal targets that one account", () => {
+  expect(resolveCliCommand({ backfill: true, source: "gmail", account: "personal" })).toEqual({
+    kind: "backfill",
+    source: "gmail",
+    account: "personal",
+  });
+});
+
+test("--backfill --source all is rejected, since a backfill names one provider", () => {
   const command = resolveCliCommand({ backfill: true, source: "all" });
 
   expect(command.kind).toBe("error");
-  expect(command.kind === "error" ? command.message : "").toContain("Story 5.3");
+  expect(command.kind === "error" ? command.message : "").toContain("--source all is not supported");
 });
 
 test("--backfill --source outlook is rejected as an unknown source", () => {
