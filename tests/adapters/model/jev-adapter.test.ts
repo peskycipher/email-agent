@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { afterEach, expect, test } from "vitest";
 import { JevAdapter } from "../../../src/adapters/model/JevAdapter.js";
 import type {
   JevClient,
@@ -105,6 +105,10 @@ function debugEntries(entries: LogEntry[]): LogEntry[] {
   return entries.filter((entry) => entry.level === "debug");
 }
 
+afterEach(() => {
+  delete process.env[KEY_ENV];
+});
+
 test("JEV HAPPY: one systemOne request, thresholded labels, one info usage log, one debug distribution log", async () => {
   const client = stubJevClient({ Invoices: 0.98, "Action Needed": 0.01 });
   const { logPort, entries } = recordingLogPort();
@@ -183,6 +187,60 @@ test("JEV THRESHOLD BOUNDARY: a probability exactly at the threshold joins the s
 
   expect(reply).toEqual({ labels: ["Invoices"] });
   expect(debugEntries(entries)[0].context?.labelProbs).toEqual({ Invoices: 0.5, "Action Needed": 0.01 });
+});
+
+test("UNTRUSTED ANSWERS: an omitted or non-numeric noul is null in labelProbs and never joins the set", async () => {
+  const requests: JevSystemOneRequest[] = [];
+  const client: JevClient = {
+    async systemOne(request) {
+      requests.push(request);
+      return {
+        model: "jev-latest",
+        // "Action Needed" is omitted entirely; "Invoices" carries a string noul.
+        answers: { Invoices: { type: "noul", noul: "0.98" } },
+        usage: { input_tokens: 42, output_tokens: 7 },
+      };
+    },
+  };
+  const { logPort, entries } = recordingLogPort();
+  const adapter = makeAdapter(client, logPort);
+
+  process.env[KEY_ENV] = "key";
+  const reply = await adapter.complete(PROMPT, TAXONOMY, CONFIG);
+
+  expect(reply).toEqual({ labels: [] });
+  expect(requests).toHaveLength(1);
+  expect(debugEntries(entries)[0].context?.labelProbs).toEqual({
+    Invoices: null,
+    "Action Needed": null,
+  });
+  // The degraded reply still usage-logs exactly once.
+  expect(infoEntries(entries)).toHaveLength(1);
+});
+
+test("UNTRUSTED ANSWERS: a non-object answers member degrades to nulls, not a TypeError", async () => {
+  const client: JevClient = {
+    async systemOne() {
+      return {
+        model: "jev-latest",
+        answers: undefined as unknown as Readonly<Record<string, unknown>>,
+        usage: undefined as unknown as Readonly<{ input_tokens: number; output_tokens: number }>,
+      };
+    },
+  };
+  const { logPort, entries } = recordingLogPort();
+  const adapter = makeAdapter(client, logPort);
+
+  process.env[KEY_ENV] = "key";
+  const reply = await adapter.complete(PROMPT, TAXONOMY, CONFIG);
+
+  expect(reply).toEqual({ labels: [] });
+  expect(debugEntries(entries)[0].context?.labelProbs).toEqual({ Invoices: null, "Action Needed": null });
+  expect(infoEntries(entries)[0].context).toMatchObject({
+    provider: "jev",
+    inputTokens: 0,
+    outputTokens: 0,
+  });
 });
 
 test("MISSING KEY at call time: typed MISSING_API_KEY thrown before any client construction", async () => {

@@ -151,6 +151,24 @@ test("PROVIDER ROUTING: provider custom selects the OpenAI adapter and passes ex
   });
 });
 
+test("CUSTOM ROUTING: provider custom without extraParams.baseURL throws UNSUPPORTED_PROVIDER at wiring time", () => {
+  const { deps, observed } = stubDeps();
+  process.env[OPENAI_KEY_ENV] = "key";
+  const config: ModelConfig = {
+    ...DEFAULT_MODEL_CONFIG,
+    provider: "custom",
+    apiKeyEnvVar: OPENAI_KEY_ENV,
+  };
+
+  const attempt = () => createModelAdapter(config, deps);
+
+  // Without an endpoint the OpenAI client would target api.openai.com with the
+  // user's custom key — named as a wiring fault instead.
+  expect(attempt).toThrow(ModelAdapterError);
+  expect(attempt).toThrow(/extraParams\.baseURL/);
+  expect(observed.openAIConstructions).toEqual([]);
+});
+
 test("UNSUPPORTED PROVIDER: provider anthropic throws at wiring time, naming the remedy, before any client is built", () => {
   const { deps, observed } = stubDeps();
   process.env[JEV_KEY_ENV] = "key";

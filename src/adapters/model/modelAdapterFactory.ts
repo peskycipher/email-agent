@@ -61,6 +61,22 @@ export function resolveEnvApiKey(config: ModelConfig): string | undefined {
 }
 
 /**
+ * `resolveEnvApiKey` + the typed `MISSING_API_KEY` fault in one place: the factory's
+ * wiring-time check and both adapters' call-time re-check (decision 5) share it, so
+ * the check and its message cannot drift apart.
+ */
+export function requireEnvApiKey(config: ModelConfig): string {
+  const value = resolveEnvApiKey(config);
+  if (value === undefined) {
+    throw new ModelAdapterError(
+      "MISSING_API_KEY",
+      `environment variable "${config.apiKeyEnvVar}" is not set — set it before running`,
+    );
+  }
+  return value;
+}
+
+/**
  * The provider routing table (Story 6.3 decision 4) and wiring-time validation
  * (decision 5): `jev` builds the Jev adapter; `openai` and `custom` (custom
  * self-hosted providers universally speak the OpenAI protocol, with
@@ -90,10 +106,13 @@ export function createModelAdapter(config: ModelConfig, deps: ModelAdapterDeps):
         `provider ${JSON.stringify(String(config.provider))} is not one of "jev" | "openai" | "anthropic" | "custom" — fix the config's provider field`,
       );
   }
-  if (resolveEnvApiKey(config) === undefined) {
+  requireEnvApiKey(config);
+  // Without an explicit endpoint the OpenAI client would target api.openai.com with
+  // the user's custom key — a wiring-time fault, not a silent mis-direction.
+  if (config.provider === "custom" && typeof config.extraParams?.baseURL !== "string") {
     throw new ModelAdapterError(
-      "MISSING_API_KEY",
-      `environment variable "${config.apiKeyEnvVar}" is not set — set it before running`,
+      "UNSUPPORTED_PROVIDER",
+      'provider "custom" requires extraParams.baseURL naming the OpenAI-compatible endpoint',
     );
   }
   if (config.provider === "jev") {

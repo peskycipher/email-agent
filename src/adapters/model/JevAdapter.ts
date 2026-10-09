@@ -3,7 +3,7 @@ import type { Taxonomy } from "../../core/dto/Taxonomy.js";
 import type { LogPort } from "../../core/ports/LogPort.js";
 import type { ModelPort } from "../../core/ports/ModelPort.js";
 import type { PromptParts } from "../../core/skill/prompt.js";
-import { ModelAdapterError, resolveEnvApiKey } from "./modelAdapterFactory.js";
+import { requireEnvApiKey } from "./modelAdapterFactory.js";
 
 /** The threshold cutting per-label probabilities into the label set (decision 3). */
 const DEFAULT_LABEL_THRESHOLD = 0.5;
@@ -57,6 +57,11 @@ export interface JevAdapterDeps {
   createJevClient(options: JevClientOptions): JevClient;
 }
 
+/** Defensive object check for untrusted reply members (Story 6.3's Always rule). */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 /** A label's probability as read from one untrusted answer; `null` when absent or non-numeric. */
 function readNoul(answer: unknown): number | null {
   if (typeof answer !== "object" || answer === null) return null;
@@ -73,7 +78,9 @@ function readNoul(answer: unknown): number | null {
  * at debug per message so the threshold can be re-judged from spot-check evidence
  * (SM-C2); token usage is info-logged once per call. `temperature`/`maxTokens` are
  * not sent to Jev — the API rejects unknown request fields — and `extraParams`
- * route to the client constructor instead. Provider rejections propagate unwrapped
+ * route to the client constructor instead. The whole reply is untrusted: a missing
+ * or non-object `answers`/`usage` degrades (nulls in `labelProbs`, 0 usage) instead
+ * of throwing. Provider rejections propagate unwrapped
  * to the orchestrator (PRD FR-1); only the env fault gets a typed adapter code.
  */
 export class JevAdapter implements ModelPort {
@@ -82,13 +89,7 @@ export class JevAdapter implements ModelPort {
   async complete(prompt: PromptParts, taxonomy: Taxonomy, config: ModelConfig): Promise<unknown> {
     // The call-time re-check (decision 5): an env that changed between construction
     // and call throws here, before any transport call — never a silent empty label set.
-    const apiKey = resolveEnvApiKey(config);
-    if (apiKey === undefined) {
-      throw new ModelAdapterError(
-        "MISSING_API_KEY",
-        `environment variable "${config.apiKeyEnvVar}" is not set — set it before running`,
-      );
-    }
+    const apiKey = requireEnvApiKey(config);
 
     // `extraParams` are client-constructor options (baseURL, timeout, headers, retry);
     // `apiKey` is set after the spread so the validated env channel always wins.
@@ -112,21 +113,30 @@ export class JevAdapter implements ModelPort {
       model: config.model,
     });
 
-    const threshold = config.labelThreshold ?? DEFAULT_LABEL_THRESHOLD;
+    // A non-finite threshold (e.g. NaN from a bad config parse) would make every
+    // `>=` comparison false — a silent all-empty set — so it falls back to 0.5.
+    const configured = config.labelThreshold;
+    const threshold =
+      typeof configured === "number" && Number.isFinite(configured)
+        ? configured
+        : DEFAULT_LABEL_THRESHOLD;
+    const answers = isRecord(result.answers) ? result.answers : {};
     const labelProbs: Record<string, number | null> = {};
     const labels: string[] = [];
     for (const label of taxonomy) {
-      const probability = readNoul(result.answers[label.name]);
+      const probability = readNoul(answers[label.name]);
       labelProbs[label.name] = probability;
       if (probability !== null && probability >= threshold) labels.push(label.name);
     }
 
     this.deps.log.debug("Jev returned per-label probabilities for the message.", { labelProbs });
+    // Missing/non-numeric usage fields log 0 — never a TypeError on the untrusted reply.
+    const usage: Readonly<Record<string, unknown>> = isRecord(result.usage) ? result.usage : {};
     this.deps.log.info("Model call usage.", {
       provider: "jev",
       model: result.model,
-      inputTokens: result.usage.input_tokens,
-      outputTokens: result.usage.output_tokens,
+      inputTokens: typeof usage.input_tokens === "number" ? usage.input_tokens : 0,
+      outputTokens: typeof usage.output_tokens === "number" ? usage.output_tokens : 0,
     });
 
     return { labels };

@@ -3,7 +3,7 @@ import type { Taxonomy } from "../../core/dto/Taxonomy.js";
 import type { LogPort } from "../../core/ports/LogPort.js";
 import type { ModelPort } from "../../core/ports/ModelPort.js";
 import type { PromptParts } from "../../core/skill/prompt.js";
-import { ModelAdapterError, resolveEnvApiKey } from "./modelAdapterFactory.js";
+import { requireEnvApiKey } from "./modelAdapterFactory.js";
 
 /**
  * A chat-completion request as the adapter builds it. `schema` values are plain
@@ -82,13 +82,7 @@ export class OpenAIAdapter implements ModelPort {
   async complete(prompt: PromptParts, taxonomy: Taxonomy, config: ModelConfig): Promise<unknown> {
     // The call-time re-check (decision 5): an env that changed between construction
     // and call throws here, before any transport call.
-    const apiKey = resolveEnvApiKey(config);
-    if (apiKey === undefined) {
-      throw new ModelAdapterError(
-        "MISSING_API_KEY",
-        `environment variable "${config.apiKeyEnvVar}" is not set — set it before running`,
-      );
-    }
+    const apiKey = requireEnvApiKey(config);
 
     // `extraParams` are client-constructor options (baseURL, timeout, headers);
     // `apiKey` is set after the spread so the validated env channel always wins.
@@ -116,14 +110,15 @@ export class OpenAIAdapter implements ModelPort {
     });
 
     const content = completion.choices[0]?.message?.content ?? null;
-    const parsed = content === null ? null : JSON.parse(content);
-
+    // The usage log precedes the parse so even a malformed-content reply is
+    // usage-logged; undecodable content propagates the SyntaxError unwrapped after.
     this.deps.log.info("Model call usage.", {
       provider: "openai",
       model: config.model,
       inputTokens: completion.usage?.prompt_tokens,
       outputTokens: completion.usage?.completion_tokens,
     });
+    const parsed = content === null ? null : JSON.parse(content);
 
     return parsed;
   }

@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { afterEach, expect, test } from "vitest";
 import {
   OpenAIAdapter,
   buildLabelSetResponseSchema,
@@ -99,6 +99,14 @@ const HAPPY_COMPLETION: OpenAIChatCompletion = {
   usage: { prompt_tokens: 42, completion_tokens: 7 },
 };
 
+function infoEntries(entries: LogEntry[]): LogEntry[] {
+  return entries.filter((entry) => entry.level === "info");
+}
+
+afterEach(() => {
+  delete process.env[KEY_ENV];
+});
+
 test("SCHEMA: the internal strict schema covers the taxonomy's names", () => {
   const schema = buildLabelSetResponseSchema(TAXONOMY) as {
     properties: { labels: { items: { enum: string[] } } };
@@ -173,6 +181,69 @@ test("EXTRAPARAMS: extraParams.baseURL reaches the client constructor (custom pr
   expect(clientOptions[0].options).toEqual({
     baseURL: "https://self-hosted.example.com/v1",
     apiKey: "env-key",
+  });
+});
+
+test("DECODE: empty choices resolve null, with the usage info log still emitted", async () => {
+  const client = stubOpenAIClient({ choices: [], usage: { prompt_tokens: 1, completion_tokens: 2 } });
+  const { logPort, entries } = recordingLogPort();
+  const adapter = makeAdapter(client, logPort);
+
+  process.env[KEY_ENV] = "key";
+  const reply = await adapter.complete(PROMPT, TAXONOMY, CONFIG);
+
+  expect(reply).toBeNull();
+  const info = infoEntries(entries);
+  expect(info).toHaveLength(1);
+  expect(info[0].context).toMatchObject({
+    provider: "openai",
+    model: "gpt-4o-mini",
+    inputTokens: 1,
+    outputTokens: 2,
+  });
+});
+
+test("DECODE: null message content resolves null, with the usage info log still emitted", async () => {
+  const client = stubOpenAIClient({
+    choices: [{ message: { content: null } }],
+    usage: { prompt_tokens: 3, completion_tokens: 4 },
+  });
+  const { logPort, entries } = recordingLogPort();
+  const adapter = makeAdapter(client, logPort);
+
+  process.env[KEY_ENV] = "key";
+  const reply = await adapter.complete(PROMPT, TAXONOMY, CONFIG);
+
+  expect(reply).toBeNull();
+  const info = infoEntries(entries);
+  expect(info).toHaveLength(1);
+  expect(info[0].context).toMatchObject({
+    provider: "openai",
+    model: "gpt-4o-mini",
+    inputTokens: 3,
+    outputTokens: 4,
+  });
+});
+
+test("DECODE: non-JSON string content propagates the SyntaxError, after the usage log has run", async () => {
+  const client = stubOpenAIClient({
+    choices: [{ message: { content: "not json at all" } }],
+    usage: { prompt_tokens: 5, completion_tokens: 6 },
+  });
+  const { logPort, entries } = recordingLogPort();
+  const adapter = makeAdapter(client, logPort);
+
+  process.env[KEY_ENV] = "key";
+  // PRD FR-1: a provider fault propagates unwrapped — not a ModelAdapterError.
+  await expect(adapter.complete(PROMPT, TAXONOMY, CONFIG)).rejects.toBeInstanceOf(SyntaxError);
+  // The usage log precedes the parse, so the faulted call is still usage-logged.
+  const info = infoEntries(entries);
+  expect(info).toHaveLength(1);
+  expect(info[0].context).toMatchObject({
+    provider: "openai",
+    model: "gpt-4o-mini",
+    inputTokens: 5,
+    outputTokens: 6,
   });
 });
 

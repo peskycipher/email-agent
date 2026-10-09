@@ -2,7 +2,7 @@
 title: 'Story 6.3: Model Abstraction Layer (ModelPort)'
 type: 'feature'
 created: '2026-10-09'
-status: 'in-progress'
+status: 'in-review'
 route: 'dispatch'
 review_loop_iteration: 0
 baseline_commit: '5764b91a4a2cf54642f3f73b1c9e05d57e7c740b'
@@ -104,6 +104,7 @@ _None yet — appended during implementation._
 - The OpenAI adapter JSON-parses `choices[0].message.content`; `null` content passes through as `null` so 6.2's retry budget consumes it as an invalid reply, while undecodable string content propagates the `SyntaxError` unwrapped (a provider fault, not an orchestrator retry).
 - `ModelAdapterError` + `resolveEnvApiKey` live in `modelAdapterFactory.ts` and the adapters import them from there while the factory imports the adapters — a benign ESM cycle: every use is function-scoped, evaluated only after both modules finish loading (verified by build + suites).
 - The factory's `default` arm catches provider values outside the ratified union (e.g. an unvalidated YAML-parsed string) and throws `UNSUPPORTED_PROVIDER` rather than silently routing to the OpenAI adapter; `"anthropic"` still gets the dedicated remedy message.
+- Hardening (2026-10-09, loop-0 patches): adapters treat the **whole reply** as untrusted — Jev degrades a missing/non-object `answers` (nulls in `labelProbs`, nothing joins the set) and missing/non-numeric `usage` fields (logged as 0), and a non-finite `labelThreshold` (e.g. NaN from a bad config parse) falls back to the 0.5 default instead of silently emptying every set. The OpenAI usage log runs **before** `JSON.parse(content)`, so a malformed-content reply is still usage-logged before its `SyntaxError` propagates unwrapped. The `MISSING_API_KEY` check+message live once in `requireEnvApiKey` (`modelAdapterFactory.ts`), shared by the factory's wiring-time check and both adapters' call-time re-check. `provider: "custom"` without `extraParams.baseURL` throws `UNSUPPORTED_PROVIDER` at wiring time (it would otherwise silently target api.openai.com with the user's own custom key) — explicit `baseURL` still routes the OpenAI adapter; `"openai"` routing is unchanged.
 
 ## Spec Change Log
 
@@ -111,7 +112,33 @@ _Empty until the first bad_spec loopback._
 
 ## Review Triage Log
 
-_Empty until the first review pass._
+**Loop iteration 0 (2026-10-09).** Three layers ran (blind-hunter, edge-case-hunter, verification-gap) over `5764b91..3996f1c`. Verdicts are mine, re-verified against the source. B = blind hunter, E = edge-case hunter, VG = verification-gap.
+
+| # | Finding (layer) | Verdict | Evidence | Route |
+|---|---|---|---|---|
+| 1 | Frozen Boundaries contradict themselves on the core-file count (B) | false | Spec-prose inconsistency (two core-edit bullets, both list the same files in different order); the fix is editing this build's spec. | reject (spec-edit) |
+| 2 | Planning reconcile ticked `[x]` but absent from the diff (B) | false | The reconcile is commit `5764b91` — the diff's baseline itself; it predates the story diff by design (`git log 5764b91 -1`). | reject (false) |
+| 3 | Missing trailing newlines on 7 new files (B) | low | Verified: `\ No newline at end of file` on JevAdapter.ts, OpenAIAdapter.ts, modelAdapterFactory.ts, jev-adapter.test.ts, openai-adapter.test.ts, model-adapter-factory.test.ts (spec trailing newline also absent). | patch |
+| 4 | `MISSING_API_KEY` check + message duplicated 3× (B) | low | Verified: identical `resolveEnvApiKey === undefined → throw` blocks in JevAdapter.ts, OpenAIAdapter.ts and modelAdapterFactory.ts — three copies can drift. Extract one helper. | patch |
+| 5 | JevAdapter dereferences `result.usage.input_tokens` unguarded (B + E) | medium | Verified at JevAdapter.ts:128-130: the untrusted rule says the reply is untrusted, but a missing/non-object `usage` throws `TypeError` after a successful transport response — diverges from `readNoul`'s defensive stance. | patch |
+| 6 | JevAdapter reads `result.answers` without a non-object guard (E) | medium | Same root as #5: an `answers` that is missing/non-object throws instead of degrading gracefully. | patch (grouped with #5) |
+| 7 | OpenAIAdapter `JSON.parse(content)` runs before the usage info log (B) | medium | Verified at OpenAIAdapter.ts:118-127: undecodable content throws before the log executes, violating the "usage info-logged once per call" contract the tests assert. | patch |
+| 8 | OpenAI decode path (null content / empty choices / non-JSON content) untested (B + VG) | medium | Pre-verified by VG (mutation: dropping `?.`/`?? null` breaks no test); grep found no stub with null content, empty choices or non-JSON content. | patch (test) |
+| 9 | `readNoul`'s null branch (omitted/non-numeric answer) untested (VG, pre-verified) | medium | Demonstrated: mutating `readNoul` to `return 1` makes omitted answers join the set with zero failing tests — an unanswered label silently classified. | patch (test) |
+| 10 | No NaN/non-finite guard on `labelThreshold` (E) | medium | Real: a `NaN` threshold makes every `>=` comparison false — silent all-empty sets, the known-bad "empty classification" class. One `Number.isFinite` guard. | patch |
+| 11 | Duplicate taxonomy label names: Jev collapses, OpenAI silently dedups (B + E) | false | Unreachable: `loadTaxonomy`'s `validateLabels` throws `DUPLICATE_LABEL_NAME` (`src/adapters/config/taxonomy.ts:233-239`) before freezing; adapters only ever see the loader's output. | reject (false) |
+| 12 | `provider: "custom"` without `extraParams.baseURL` silently targets api.openai.com with the user's key (E) | medium | Verified: routing sends the custom key to OpenAI's endpoint — a credential misdirection plus a confusing 401 re-queue loop. One wiring-time branch. | patch |
+| 13 | No empty-taxonomy row/guard (B) | false | Unreachable: `loadTaxonomy` enforces 1–50 labels (`MIN_LABELS` throws at `src/adapters/config/taxonomy.ts:216-220`); adapters receive the frozen loader output only. | reject (false) |
+| 14 | OpenAI adapter drops label descriptions while Jev gets them (B) | false | The Design Notes scope the descriptions win to Jev explicitly; surfacing them to OpenAI's schema is new surface beyond the frozen wire-format decision, not a defect of this diff. | reject (false) |
+| 15 | `max_tokens` deprecated vs `max_completion_tokens` (B) | low | Compat note: current config (`gpt-4o-mini`, openai 6.49) supports `max_tokens`; the fix adds per-provider param branching with no demonstrated failure. | reject (low) |
+| 16 | Seam types don't match the trust posture (`usage` required, `model` optional-but-always-sent) (B) | false | The seam documents the provider's documented contract; untrusted reading is defensive at runtime (patches #5-#8 cover the real anomalies). | reject (false) |
+| 17 | Test env leak: jev/openai suites set `process.env` mid-test without `afterEach` (B) | low | Files run in isolated workers so cross-file poisoning doesn't occur, but within-file symmetry with the factory suite's `afterEach` is one line each. | patch |
+| 18 | `defaultModelClientFactories` untested; double `as unknown as` casts could hide a seam/SDK mismatch (VG note) | medium (unverified harm) | Pre-verified correct *today* against installed typings (`@typesafe-ai/sdk` d.mts; openai 6.49 `max_tokens` + `json_schema` both present). Production wiring lands in 6.4/Epic-11. | defer |
+| 19 | `JevClientOptionsRecord` single-field wrapper; two-directions docstring (B) | low | Cosmetic; the direct fix (push options, state the trimming rationale) is below the everyday-use bar. | reject (low) |
+
+**Grouping (survivors → root causes):** #5+#6 (untrusted Jev reads); #7+#8 (OpenAI reply decode: ordering + coverage); #9 (Jev omitted-answer coverage); #10 (threshold guard); #12 (custom baseURL guard); #4 (env-check helper); #3 (trailing newlines); #17 (test env symmetry).
+
+**Outcome:** nine patch entries (highest verdicts medium) and one defer — no `intent_gap`, no `bad_spec`, so no loopback; `review_loop_iteration` stays 0.
 
 ## Design Notes
 
@@ -129,3 +156,4 @@ _Empty until the first review pass._
 - `mise exec node@20 -- bun run test` — expected: vitest green incl. the three new adapter suites, then `tsc --noEmit` green.
 - `mise exec node@20 -- bun run lint` — expected: oxlint + `check-core-external-imports.mjs` exit 0 (AD-10 intact after the core edit).
 - `mise exec node@20 -- bun run build` — expected: `tsc -b` exit 0.
+
