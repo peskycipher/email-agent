@@ -1,5 +1,5 @@
 export type { MailPort } from "./ports/MailPort.js";
-export type { JsonSchema, ModelPort } from "./ports/ModelPort.js";
+export type { ModelPort } from "./ports/ModelPort.js";
 export type { TokenPort } from "./ports/TokenPort.js";
 export type { IdempotencyPort } from "./ports/IdempotencyPort.js";
 export type { SchedulerPort } from "./ports/SchedulerPort.js";

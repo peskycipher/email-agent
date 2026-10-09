@@ -3,7 +3,8 @@ import type { LabelSet } from "../../core/dto/LabelSet.js";
 import type { ModelConfig } from "../../core/dto/ModelConfig.js";
 import type { Taxonomy } from "../../core/dto/Taxonomy.js";
 import type { LogContext, LogPort } from "../../core/ports/LogPort.js";
-import type { JsonSchema, ModelPort } from "../../core/ports/ModelPort.js";
+import type { PromptParts } from "../../core/skill/prompt.js";
+import type { ModelPort } from "../../core/ports/ModelPort.js";
 
 /**
  * The initial call plus at most two retries — the retry budget fixed by the Story 6.2
@@ -68,10 +69,8 @@ export function validateLabelSet(raw: unknown, taxonomy: Taxonomy): LabelSetVali
 export interface CompleteWithRetryOptions {
   /** The configured model adapter. Re-issued unchanged on every retry. */
   model: ModelPort;
-  /** The rendered request — Story 6.1's `buildPrompt` output — passed through unchanged. */
-  prompt: string;
-  /** The structural schema the adapter hands the provider. */
-  schema: JsonSchema;
+  /** The rendered request — Story 6.1's `buildPrompt` halves — passed through unchanged. */
+  prompt: PromptParts;
   /** The run's model config; `temperature` is passed through unchanged on every attempt. */
   config: ModelConfig;
   /** The active (merged, frozen) taxonomy that defines the label universe. */
@@ -94,12 +93,12 @@ export interface CompleteWithRetryOptions {
  * for the next cycle (PRD FR-1) — an outage must not read as a valid empty classification.
  */
 export async function completeWithRetry(options: CompleteWithRetryOptions): Promise<LabelSet> {
-  const { model, prompt, schema, config, taxonomy, log, context } = options;
+  const { model, prompt, config, taxonomy, log, context } = options;
   let raw: unknown;
   let reason = "the model returned no response";
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    raw = await model.complete(prompt, schema, config);
+    raw = await model.complete(prompt, taxonomy, config);
     const verdict = validateLabelSet(raw, taxonomy);
     if (verdict.ok) {
       return { labels: verdict.labels };

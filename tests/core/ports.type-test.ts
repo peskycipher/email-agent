@@ -3,7 +3,6 @@ import type {
   ConfigPort,
   FetchOpts,
   IdempotencyPort,
-  JsonSchema,
   LabelDef,
   LabelSet,
   LogContext,
@@ -12,6 +11,7 @@ import type {
   MessageDTO,
   ModelConfig,
   ModelPort,
+  PromptParts,
   SchedulerPort,
   Taxonomy,
   TokenPort,
@@ -59,7 +59,6 @@ type _BarrelContracts = [
   Config,
   ConfigPort,
   IdempotencyPort,
-  JsonSchema,
   LabelDef,
   LabelSet,
   LogContext,
@@ -67,22 +66,27 @@ type _BarrelContracts = [
   MessageDTO,
   ModelConfig,
   ModelPort,
+  PromptParts,
   SchedulerPort,
   Taxonomy,
   TokenSet,
 ];
 
-// Positive: JsonSchema.type is the JSON-Schema keyword union and
-// `additionalProperties` accepts the boolean-or-schema form (Story 1.3 follow-up).
-const _narrowedSchema: JsonSchema = {
-  type: "object",
-  properties: { name: { type: "string", enum: ["a", "b"] } },
-  additionalProperties: { type: "string" },
-};
-void _narrowedSchema;
-// @ts-expect-error `type` is narrowed to the keyword union, not any string
-const _badType: JsonSchema = { type: "stringly" };
-void _badType;
-// @ts-expect-error `additionalProperties` must be a boolean or a schema, not a number
-const _badAddl: JsonSchema = { type: "object", additionalProperties: 42 };
-void _badAddl;
+// Positive: `ModelPort` is the classification seam (Story 6.3 decision 1). A drift to
+// the superseded `(prompt, schema, config)` shape fails here — no schema crosses the port.
+declare const modelPort: ModelPort;
+declare const promptParts: PromptParts;
+declare const modelConfig: ModelConfig;
+const pendingReply: Promise<unknown> = modelPort.complete(promptParts, taxonomy, modelConfig);
+void pendingReply;
+// @ts-expect-error `complete` requires the taxonomy argument
+void modelPort.complete(promptParts, modelConfig);
+// @ts-expect-error `prompt` is `PromptParts`, not a flattened string
+void modelPort.complete("Subject: hi", taxonomy, modelConfig);
+
+// Positive: `labelThreshold` is the user-tunable Jev cut (Story 6.3 decision 3).
+const thresholdConfig: ModelConfig = { ...modelConfig, labelThreshold: 0.7 };
+void thresholdConfig;
+// @ts-expect-error `labelThreshold` must be a number
+const badThreshold: ModelConfig = { ...modelConfig, labelThreshold: "0.7" };
+void badThreshold;
