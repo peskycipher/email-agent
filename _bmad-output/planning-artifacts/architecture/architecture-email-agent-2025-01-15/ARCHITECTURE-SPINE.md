@@ -245,7 +245,7 @@ email-classify/
 
 | Capability / Area | Lives in | Governed by |
 | --- | --- | --- |
-| Classification (FR-10, FR-11, FR-12) | `core/skill/classify.ts` | AD-1, AD-2, AD-3 |
+| Classification (FR-10, FR-11, FR-12) — engine logic (`buildPrompt`) in `core/skill/prompt.ts`, composition (`classify`) in `orch/classify.ts` (Story 6.4 decision 6; the composed unit composes core prompt-build with the adapter-layer conversation per 6.2's schema-home) | `orch/classify.ts` + `core/skill/prompt.ts` | AD-1, AD-2, AD-3 |
 | M365 Auth (FR-1, multi-account) | `adapters/m365/M365AuthAdapter.ts` (one per account) | AD-4, AD-8 |
 | Gmail Auth (FR-2, multi-account) | `adapters/gmail/GmailAuthAdapter.ts` (one per account) | AD-4, AD-8 |
 | Taxonomy load + user overrides | `adapters/config/taxonomy.ts` | AD-9 |
