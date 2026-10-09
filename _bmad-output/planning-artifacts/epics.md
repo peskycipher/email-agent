@@ -30,11 +30,11 @@ FR5: Gmail Label Sync (per account) - On startup (any mode), for each enabled Gm
 
 FR6: M365 Message Fetch (Backfill, per account) - In backfill mode, for each enabled M365 account, fetches messages from configured folders using `GET /me/messages` with `$top=100`, `$select=id,internetMessageId,subject,bodyPreview,receivedDateTime,categories,isRead`, and pagination via `@odata.nextLink`. Per-account batch size (default 50, max 100). Returns message DTOs with `internetMessageId`, `categories`, `isRead`, `accountId`. Account failures isolated.
 
-FR7: M365 Message Fetch (Cron/Incremental, per account) - In cron mode, for each enabled M365 account, fetches only messages received since last successful cycle using `$filter=receivedDateTime ge {lastRunTimestamp}` and `$orderby=receivedDateTime asc`. Per-account state at `~/.config/email-classify/state/<accountName>.json` stores `lastRunTimestamp` (ISO 8601) and `lastProcessedMessageId`.
+FR7: M365 Message Fetch (Cron/Incremental, per account) - In cron mode, for each enabled M365 account, fetches only messages received since last successful cycle using `$filter=receivedDateTime ge {lastRunTimestamp}` and `$orderby=receivedDateTime asc`. The m365 cycle reads and writes its own cursor file `~/.config/email-classify/state/m365-<accountName>.json`, which stores `lastRunTimestamp` (ISO 8601) and `lastProcessedMessageId`.
 
 FR8: Gmail Message Fetch (Backfill, per account) - In backfill mode, for each enabled Gmail account, fetches all messages from INBOX using `users.messages.list` with `labelIds=INBOX`, `maxResults=100`, page tokens, then `users.messages.batchGet` for `internetMessageId`, `labelIds`, `snippet`, `internalDate`. Per-account batch size (default 50, max 100). Returns DTOs with `internetMessageId`, `labelIds`, `internalDate`, `accountId`.
 
-FR9: Gmail Message Fetch (Cron/Incremental, per account) - In cron mode, for each enabled Gmail account, fetches only messages since last cycle using `users.history.list` with that account's `startHistoryId` and `labelId=INBOX`. Per-account state stores `lastHistoryId`. On history-expiry detection (returned `historyId` < requested `startHistoryId`), fall back to a full INBOX list with `$since=lastRunTimestamp`; log a warn event with the account name.
+FR9: Gmail Message Fetch (Cron/Incremental, per account) - In cron mode, for each enabled Gmail account, fetches only messages since last cycle using `users.history.list` with that account's `startHistoryId` and `labelId=INBOX`. The Gmail cycle writes its own cursor file `~/.config/email-classify/state/gmail-<accountName>.json`, storing `lastHistoryId` (the history response's top-level history id, or the pre-walk `users.getProfile` id on a list-path cycle) and the cycle-start `lastRunTimestamp`. On history expiry (Gmail answers `users.history.list` with HTTP 404), the cycle logs a `warn` naming the account and falls back to an INBOX list bounded on the wire by `q=after:<epoch of lastRunTimestamp>`; a purged message's 404 hydration is a per-message skip with a warn naming the id, never the account's failure.
 
 FR10: Classification Prompt & Schema - The skill defines a prompt template (system + user) and a strict JSON output schema: `{ "labels": ["label1", "label2", ...] }` where each label must be from the Taxonomy. Empty array valid. Prompt includes taxonomy list with descriptions, few-shot examples (3–5), instruction to return only valid JSON. Output schema validated via Zod; invalid responses rejected and retried (max 2 retries). Model temperature set to 0.1 (configurable).
 
@@ -68,7 +68,7 @@ NFR2: Hexagonal architecture - Skill Core (classification) is pure function with
 
 NFR3: Single shared MessageDTO - All adapters map to/from one canonical shape (carries `accountId`); prevents translation drift.
 
-NFR4: Dependency direction enforced - core/ (zero deps) ← adapters/ (depend on core ports) ← cli/ (wires all). Enforced via tsconfig project references and the `no-restricted-imports` rule in `.oxlintrc.json` (`bun run lint`).
+NFR4: Dependency direction enforced - core/ (zero deps) ← adapters/ and orch/ (depend on core ports) ← cli/ (wires all). Enforced via tsconfig project references and the `no-restricted-imports` rule in `.oxlintrc.json` (`bun run lint`).
 
 NFR5: Multi-label by default - Classification returns a set of labels from the (possibly user-edited) taxonomy; empty set valid.
 
@@ -107,7 +107,7 @@ NFR16: User-configurable taxonomy - The 11-label taxonomy is the default but use
 - Structured JSON logging with pino (stdout + rotating file); per-account context via `accountId` field
 - SQLite idempotency store at `~/.config/email-classify/idempotency.db` (single store, `accountId`-prefixed keys)
 - OS keychain (keytar) with encrypted file fallback (age) for token storage — per-account entries and per-account fallback files
-- Per-account cron state files at `~/.config/email-classify/state/<accountName>.json`
+- Per-provider per-account cron state files at `~/.config/email-classify/state/m365-<accountName>.json` and `gmail-<accountName>.json`; a legacy `<accountName>.json` is read back for m365 only, never written again
 - Process-level file lock (flock or SQLite `BEGIN IMMEDIATE`) on the idempotency store and per-account state files to prevent concurrent invocations
 - Per-account YAML files at mode 0600; `accounts/<provider>/` directories at mode 0700
 - Idempotency store has no retention/GC in v1; size bounded by user message volume (deferred to v1.5+)
@@ -416,7 +416,7 @@ So that **ongoing classification is efficient across all accounts**.
 **When** it fetches messages
 **Then** it processes each account sequentially
 **And** for each account, it uses `$filter=receivedDateTime ge {lastRunTimestamp}` with that account's timestamp
-**And** it reads `lastRunTimestamp` from per-account state file `~/.config/email-classify/state/<accountName>.json`
+**And** it reads `lastRunTimestamp` from the account's m365 cursor file `~/.config/email-classify/state/m365-<accountName>.json`
 **And** it only returns messages newer than the timestamp per account
 **And** on successful cycle, that account's `lastRunTimestamp` is updated
 
@@ -450,7 +450,8 @@ So that **ongoing Gmail classification is efficient across all accounts and neve
 **And** for each account, it uses `users.history.list` with that account's `startHistoryId` and `labelId=INBOX`
 **And** it only returns messages with history ID > `lastHistoryId` per account
 **And** on successful cycle, that account's `lastHistoryId` is updated
-**And** on history-expiry detection (Gmail returns `historyId` < requested `startHistoryId`), the adapter falls back to a full INBOX list with `$since=lastRunTimestamp` for that account and logs a `warn` event with the account name and the gap
+**And** on history expiry (Gmail answers `users.history.list` with HTTP 404), the cycle logs a `warn` naming the account and falls back to an INBOX list bounded by `q=after:<epoch of lastRunTimestamp>`, recording the pre-walk profile history id on a successful cycle
+**And** a purged message's 404 hydration is skipped with a warn naming the id, without failing the account
 
 ---
 

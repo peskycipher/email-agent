@@ -17,8 +17,8 @@ This epic delivers the message-fetching layer: full historical backfill across e
 
 - **Backfill completeness.** M365 backfill walks configured folders (default Inbox) via `GET /me/messages` with `$top=100` and `@odata.nextLink` pagination until exhausted per account. Gmail backfill walks the configured label set (default INBOX) via `users.messages.list` (`labelIds=INBOX`, `maxResults=100`, page tokens), then hydrates details with `users.messages.batchGet`.
 - **Incremental efficiency.** M365 cron fetches only messages with `$filter=receivedDateTime ge {lastRunTimestamp}`, ascending by received time. Gmail cron uses `users.history.list` with the account's `startHistoryId` and `labelId=INBOX`, returning only messages newer than the stored history ID.
-- **Never silently miss messages.** When Gmail reports a history ID older than the requested `startHistoryId` (history expired, e.g. cron idle >~7 days), fall back to a full INBOX list since `lastRunTimestamp` for that account and emit a `warn` event naming the account and the gap.
-- **Per-account state.** State lives at `~/.config/email-classify/state/<accountName>.json`. M365 persists `lastRunTimestamp` (ISO 8601) and `lastProcessedMessageId`; Gmail persists `lastHistoryId`. State updates only after a successful cycle for that account, using the cycle start time (M365) or latest processed message (Gmail).
+- **Never silently miss messages.** Gmail answers `users.history.list` with HTTP 404 when a stored `startHistoryId` has aged out (cron idle >~7 days): the cycle warns naming the account, then falls back to an INBOX list bounded on the wire by `q=after:<epoch of lastRunTimestamp>`; a purged message's 404 hydration is a per-message skip with a warn naming the id, never the account's failure.
+- **Per-account state.** Cursor files are per provider: `~/.config/email-classify/state/m365-<accountName>.json` and `gmail-<accountName>.json` (decisions EC2/2-A, 2026-10-09; the legacy single `<accountName>.json` is read back for m365 only and never written again). M365 persists `lastRunTimestamp` (ISO 8601); a Gmail cycle persists both `lastHistoryId` and the cycle-start `lastRunTimestamp`, recording only after a successful cycle.
 - **Account isolation.** One account's fetch failure must not abort other accounts; errors are caught and logged per account.
 - **Batching.** Fetch batch size is configurable per account, default 50, max 100 (per provider API limits). Folder/label selection is per account.
 - **Account selection.** `--account <name|all>` selects accounts, defaulting to `all`; accounts are processed sequentially.
@@ -35,7 +35,7 @@ This epic delivers the message-fetching layer: full historical backfill across e
 
 ## UX & Interaction Patterns
 
-- Backfill reports progress every 100 messages per account (processed / labeled / skipped / errors); cron reports per-account cycle start, fetched, classified, labeled, duration, and next run.
+- Epic 5's fetch layer reports one line per account (fetched count, counted failures); the every-100-messages progress contract (processed / labeled / skipped / errors) belongs to Epic 8's backfill/cron command layer (UX-DR2, FR15) and is not Epic 5 debt.
 - Operator-facing failures use clear messages naming the offending account; history-expiry produces a warning-level log rather than a silent skip or crash.
 
 ## Cross-Story Dependencies
