@@ -66,7 +66,7 @@ development_status:
   6-1-classification-prompt-template: done
   6-2-output-schema-validation-zod: done
   6-3-model-abstraction-layer-modelport: done
-  6-4-single-call-classification-function: backlog
+  6-4-single-call-classification-function: in-progress
   epic-6-retrospective: optional
 
   epic-7: backlog
