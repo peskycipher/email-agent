@@ -41,16 +41,41 @@ test("SYSTEM presents every label name and description plus the output contract"
   const taxonomy = [label("Invoice", "A bill that needs paying."), label("Family", "Personal mail.")];
   const { system } = buildPrompt(message(), taxonomy);
 
-  expect(system).toContain("Invoice");
-  expect(system).toContain("A bill that needs paying.");
-  expect(system).toContain("Family");
-  expect(system).toContain("Personal mail.");
+  // The taxonomy list itself — not the few-shot example bodies that repeat these strings.
+  expect(system).toContain("- Invoice: A bill that needs paying.");
+  expect(system).toContain("- Family: Personal mail.");
   // The exact JSON shape and the instruction to return only JSON.
   expect(system).toContain('{"labels":["<label>"]}');
   expect(system).toMatch(/only valid JSON/i);
   // An empty answer is explicitly valid.
   expect(system).toContain('{"labels":[]}');
   expect(system).toMatch(/empty array is valid/i);
+  // The precision-over-recall guardrail.
+  expect(system).toMatch(/precision beats recall/i);
+});
+
+test("SYSTEM lists every label, including those past the example window", () => {
+  const taxonomy = Array.from({ length: 7 }, (_, index) =>
+    label(`Label ${index + 1}`, `Description number ${index + 1}.`),
+  );
+  const { system } = buildPrompt(message(), taxonomy);
+
+  for (const entry of taxonomy) {
+    expect(system).toContain(`- ${entry.name}: ${entry.description}`);
+  }
+  // Only the first five labels can be illustrated, so the list is not merely the examples.
+  expect(exampleBlocks(system)).toHaveLength(5);
+  expect(system).toContain("- Label 6: Description number 6.");
+  expect(system).toContain("- Label 7: Description number 7.");
+});
+
+test("a multi-line label description collapses to a single line", () => {
+  const { system } = buildPrompt(message(), [label("Invoice", "A bill\nthat needs\n  paying.")]);
+
+  expect(system).toContain("- Invoice: A bill that needs paying.");
+  expect(system).toContain("Body: A bill that needs paying.");
+  // The block layout holds: subject, one body line, answer.
+  expect(system).toMatch(/^Subject: Invoice\nBody: A bill that needs paying\.\nAnswer: /m);
 });
 
 test("FEW-SHOT gives 3-5 examples and every named label belongs to the taxonomy", () => {

@@ -26,6 +26,16 @@ const OUTPUT_SHAPE = '{"labels":["<label>"]}';
 const EMPTY_ANSWER = '{"labels":[]}';
 
 /**
+ * One-line rendering of a description. `taxonomy.yaml` is user-editable and the config
+ * schema constrains `description` only as a string, so a folded or multi-line value must
+ * be collapsed here — interpolated raw it would break the line-oriented label list and
+ * the example block layout.
+ */
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/**
  * A one-line synthetic email built from a single label's name and description,
  * paired with the answer that names it. Few-shot examples are synthesised from the
  * passed taxonomy (human decision, 2026-10-09) so a user who drops or renames a
@@ -35,14 +45,14 @@ function renderFewShot(label: LabelDef, index: number): string {
   return [
     `Example ${index + 1}:`,
     `Subject: ${label.name}`,
-    `Body: ${label.description}`,
+    `Body: ${oneLine(label.description)}`,
     `Answer: ${JSON.stringify({ labels: [label.name] })}`,
   ].join("\n");
 }
 
 function buildSystem(taxonomy: Taxonomy): string {
   const labelList = taxonomy
-    .map((label) => `- ${label.name}: ${label.description}`)
+    .map((label) => `- ${label.name}: ${oneLine(label.description)}`)
     .join("\n");
   const examples = taxonomy
     .slice(0, MAX_FEW_SHOT_EXAMPLES)
@@ -85,6 +95,10 @@ function buildUser(message: MessageDTO): string {
  * Renders the system and user prompt halves for one message against the merged,
  * frozen taxonomy. Pure: no I/O, no clock, no randomness, and neither argument is
  * mutated, so repeated calls yield identical text.
+ *
+ * `taxonomy` is expected to hold 1–50 labels — the range `loadTaxonomy` enforces before
+ * it freezes the array. An empty or oversized taxonomy is outside this contract and is
+ * not guarded here.
  */
 export function buildPrompt(message: MessageDTO, taxonomy: Taxonomy): PromptParts {
   // Truncating `bodyPreview` is the builder's job — no adapter truncates it today.

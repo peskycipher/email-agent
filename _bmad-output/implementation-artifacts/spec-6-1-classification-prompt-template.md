@@ -65,6 +65,26 @@ context:
 - Given the same inputs, when the builder runs twice, then the output is identical and neither the message nor the taxonomy was modified.
 - Given the mise-pinned Node 20, when `bun run test` and `bun run lint` run, then both exit 0.
 
+### Review Findings
+
+_Adversarial code review of `b365de8`, 2026-10-09. All four layers reported — blind hunter, edge case hunter, verification gap, acceptance auditor — and the acceptance auditor found no acceptance-criterion, intent or boundary violation._
+
+- [x] [Review][Patch] The taxonomy list is not independently pinned, so labels past the example window can vanish silently [tests/core/prompt.test.ts:40]
+- [x] [Review][Patch] A multi-line label description reaches the prompt unnormalised and breaks its line structure [src/core/skill/prompt.ts:40]
+- [x] [Review][Patch] The "precision beats recall" instruction is rendered but never asserted [tests/core/prompt.test.ts:40]
+- [x] [Review][Patch] `buildPrompt`'s 1–50 label domain is neither documented nor enforced [src/core/skill/prompt.ts:85]
+
+**Rejected**
+
+- `false` — "the spec frontmatter says `done` while the board says `review`" (blind hunter): that pairing is exactly what the build workflow's final step prescribes — the spec's own lifecycle ends at `done` while the story enters `review` — and the proposed fix would edit the spec under review.
+- `false` — "the 3–5 example contract is under-pinned; always emitting 3 would pass" (blind hunter): 3 is inside the specified 3–5 range, so emitting 3 is compliant rather than a regression, and the test pins that contract faithfully.
+- `false` — "an empty taxonomy renders dangling headers" (edge case hunter): carried — see Review Triage Log row 8.
+- `low` — "`bodyPreview.slice(0, 2000)` truncates by UTF-16 code unit while the limit's doc says 'characters'" (blind hunter + edge case hunter): carried — see Review Triage Log row 9.
+- `low` — "empty `bodyPreview`, empty `subject`, or a missing sender has no defined rendering and no test" (blind hunter): the harm is a cosmetically blank line in a preview that is itself truncated, and covering it means adding rows and branches for states the adapters only produce when a message genuinely lacks them.
+- `low` — "`From: ${senderName} <${senderEmail}>` is malformed when `senderName` is empty but `senderEmail` is set" (blind hunter): same line and same defect as the bullet above, and the fix is the same conditional-rendering branch.
+- `low` — "an empty label description renders a blank list entry and example body" (edge case hunter): the line structure survives, the harm is negligible, and the fix adds a fallback branch.
+- `low` — "every few-shot example answers with exactly one label; none shows a multi-label or empty answer" (blind hunter): the single-label construction is the direct consequence of the frozen few-shot decision — one example per taxonomy label — and the prompt states zero-or-more and empty-is-valid in prose. Whether an extra multi-label exemplar lifts accuracy is a question for the 50-message spot check, not a code defect.
+
 ## Implementation Notes
 
 - 2026-10-09 (implementation): `src/core/skill/prompt.ts` (new, 92 lines) exports `buildPrompt(message, taxonomy): PromptParts`, plus the type-only `PromptParts`; `tests/core/prompt.test.ts` (new, 140 lines) adds 8 tests, one per I/O matrix row; `src/core/index.ts` gains one type-only re-export, so the barrel keeps zero runtime keys. Few-shot examples are synthesised from the first 3–5 taxonomy labels (name → example subject, description → example body, that label → answer), per the frozen human decision.
@@ -82,7 +102,14 @@ context:
 | 2 | `bodyPreview.slice(0, 2000)` truncates by UTF-16 code unit, so an astral character straddling the boundary leaves a lone surrogate (`src/core/skill/prompt.ts:80`) (edge case hunter) | `low` | — | Real but negligible and rare: the trigger is a surrogate pair landing exactly on index 2000, and the harm is a single replacement character at the tail of an already-truncated preview. Not fixed because the correct behaviour is not unambiguous — the criterion says "2000 chars" without settling code units against code points — so pinning it belongs to whoever owns the prompt budget rather than to a silent one-line swap. |
 | 3 | The few-shot example `Body:` line (the label's description) is never asserted, so deleting it keeps every test green (verification gap) | `medium` | patch | Pre-verified gap; confirmed by reading the test, whose FEW-SHOT case checked only block count, `Answer:` JSON and `Subject:` lines. Fixed by asserting that each example block carries its label's description — verified it fails when that `Body:` line is removed. |
 
-Layers: edge case hunter and verification gap reported; **blind-hunter returned no findings** (recorded as a failed layer), so this review may be incomplete. No `intent_gap` or `bad_spec` entries — `review_loop_iteration` stays `0`.
+| 4 | The taxonomy list is not independently pinned: the SYSTEM test's `toContain` assertions also match the few-shot `Body:` lines, and no fixture exceeds 5 labels, so labels past the example window — every one of them in this repo's 11-label taxonomy — are uncovered (blind hunter + verification gap) | `medium` | patch | Verified: `tests/core/prompt.test.ts:45,47` assert bare description strings that the example bodies also contain, and the fixtures use 1, 2 and 5 labels. Fixed with a >5-label case asserting `- ${name}: ${description}` for every label. |
+| 5 | A multi-line `LabelDef.description` reaches the prompt unnormalised, breaking the `- name: description` line and the example block layout (edge case hunter) | `medium` | patch | Reachable: `adapters/config/taxonomy.ts` validates `description` with a bare `z.string()` — no length or newline constraint — and `taxonomy.yaml` is user-editable, so a folded/multi-line description is accepted and then interpolated raw. Fixed by normalising whitespace at render time, with a test. |
+| 6 | The "precision beats recall" line is rendered but never asserted (blind hunter + verification gap) | `low` | patch | Pre-verified gap; `grep` over `tests/` finds no reference to it, so the guardrail could be dropped silently. Fixed with one assertion. |
+| 7 | `buildPrompt`'s 1–50 label domain is neither documented nor enforced (blind hunter) | `low` | patch | Real but doc-only: the JSDoc says only "merged, frozen taxonomy". Fixed by stating the precondition — row 8's refutation shows a guard would be dead code. |
+| 8 | _(carried)_ an empty taxonomy renders dangling `Taxonomy:`/`Examples:` headers (edge case hunter) | `false` | — | carried from row 1: same location, same claim, and the code still reads exactly as row 1 describes. Not re-patched. |
+| 9 | _(carried)_ `bodyPreview` truncation is code-unit based and the limit's doc says "characters" (blind hunter + edge case hunter) | `low` | — | carried from row 2: same location and trigger, same negligible harm. Not re-patched. |
+
+Layers: all four reported in this pass — blind hunter, edge case hunter, verification gap and acceptance auditor — and the acceptance auditor found no AC, intent or boundary violation. Rows 8 and 9 are carried from rows 1 and 2 (same location, same claim, code unchanged), so their verdicts stand untouched. No `intent_gap` or `bad_spec` entries — `review_loop_iteration` stays `0`.
 
 ## Design Notes
 
