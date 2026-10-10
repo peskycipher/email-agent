@@ -352,6 +352,91 @@ test("--cron --account all with no enabled m365 account exits 1 with the setup h
   await expect(readFile(statePath("work"), "utf8")).rejects.toThrow();
 });
 
+test("a start blocked by another invocation leaves no empty idempotency.db behind (STORE_ORDER)", async () => {
+  await writeAccount("work");
+  await writeState("work", { lastRunTimestamp: STORED_ISO });
+  const { fetchFn, requests } = recordingFetch([]);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  // A live run holds the lock before this invocation's first cycle can take it.
+  acquireRunLock({ configDir, pid: process.pid });
+
+  const code = await runCron(
+    { source: "m365", account: "all", intervalMinutes: 15 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler: loopScheduler(0).scheduler,
+    },
+  );
+
+  expect(code).toBe(1);
+  expect(requests).toHaveLength(0);
+  // The store opens only once a cycle holds the lock: nothing was created for a blocked start.
+  await expect(readFile(join(configDir, "idempotency.db"), "utf8")).rejects.toThrow();
+  await releaseRunLock({ configDir, pid: process.pid });
+});
+
+test("a fault escaping the first cycle is one line and exit 1, never a stack trace (CYCLE_FAULT)", async () => {
+  await writeAccount("work");
+  await writeState("work", { lastRunTimestamp: STORED_ISO });
+  const { fetchFn } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  // No token: the account's cycle fails, earns its one retry, and the throwing sleep escapes
+  // `runCronCycle` — which is the wiring-fault contract the CLI must catch.
+  const { scheduler } = loopScheduler(0);
+
+  const code = await runCron(
+    { source: "m365", account: "all", intervalMinutes: 15 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({}),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+      sleep: async () => {
+        throw new Error("sleep exploded");
+      },
+    },
+  );
+
+  expect(code).toBe(1);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("sleep exploded");
+  // The escape is one actionable line — never a stack trace crossing the CLI.
+  expect(errors).not.toContain("at ");
+});
+
+test("a gmail account with labels configured is told the cron window ignores them (LABELS_IGNORED)", async () => {
+  await writeGmailAccount("personal", "labels: [Label_5]\n");
+  const { fetchFn } = recordingFetch([gmailProfile("H1"), gmailListPage([]), gmailLabelsList()]);
+  vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
+
+  const code = await runCron(
+    { source: "gmail", account: "all", intervalMinutes: 15 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+    },
+  );
+
+  expect(code).toBe(0);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("warn personal: ");
+  expect(errors).toContain("the cron window is the account's INBOX only");
+  expect(errors).toContain("--backfill");
+});
+
 test("--cron --account <name> targets that one account only", async () => {
   await writeAccount("work");
   await writeAccount("other");

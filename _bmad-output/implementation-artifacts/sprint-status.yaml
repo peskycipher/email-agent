@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-08-2026 10:25
-last_updated: 10-11-2026 01:21
+last_updated: 10-11-2026 02:15
 project: email-agent
 project_key: NOKEY
 tracking_system: file-system
@@ -74,11 +74,11 @@ development_status:
   7-2-gmail-label-write-multi-account: done
   epic-7-retrospective: done
 
-  epic-8: in-progress
+  epic-8: done
   8-1-backfill-mode-execution-multi-account: done
   8-2-idempotency-resume-multi-account: done
-  8-3-cron-mode-loop-multi-account: review
-  epic-8-retrospective: optional
+  8-3-cron-mode-loop-multi-account: done
+  epic-8-retrospective: done
 
   epic-9: backlog
   9-1-rate-limit-handling-multi-account: backlog
@@ -275,3 +275,65 @@ action_items:
     owner: "Loki + Epic 8"
     status: open
     ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-10-09.md"
+  - id: "epic-8-retro-item-26-bound-the-implementation-dispatch-two-of"
+    epic: 8
+    action: "Bound the implementation dispatch: two of epic 8's three implementation
+      runs hit the 15-minute cap (8.3 killed mid-investigation, finished inline);
+      pass an explicit dispatch timeout or split deep-investigation from implementation
+      handoffs"
+    owner: "BMad workflow author"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"
+  - id: "epic-8-retro-item-27-reconcile-the-epic-text-the-epic-outgrew"
+    epic: 8
+    action: "Reconcile the epic text the epic outgrew (epics.md): 8.1 AC advertises
+      --backfill --source all (rejected as-built), the dropped reconcile-promise,
+      the superseded per-account classified counter, the account-list syntax vs name|all
+      as-built"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"
+  - id: "epic-8-retro-item-28-account-accept-the-name-all-narrowing-in"
+    epic: 8
+    action: "--account: accept the name|all narrowing in epics.md or add the promised
+      list form (subsets are inexpressible; a repeated flag silently keeps the last)"
+    owner: "Epic 11"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"
+  - id: "epic-8-retro-item-29-one-walk-one-commit-one-accounting-conve"
+    epic: 8
+    action: "One walk, one commit, one accounting convention before Epic 11: three
+      near-identical folder walks, two commit paths, the dead committing orchestrator
+      keeping the opposite PARTIAL_FOLDER convention"
+    owner: "Epic 11"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"
+  - id: "epic-8-retro-item-30-extend-the-ad-10-guard-to-orch-the-orch"
+    epic: 8
+    action: "Extend the AD-10 guard to orch: the orch to adapters edge (src/orch/classify.ts:1)
+      is real and unenforced at both range ends"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"
+  - id: "epic-8-retro-item-31-land-the-backfill-half-of-the-gmail-cach"
+    epic: 8
+    action: "Land the backfill half of the Gmail cache fact: cron self-heals per cycle,
+      backfill still requires a prior --sync-categories and a fresh Gmail backfill
+      pays full model cost writing nothing"
+    owner: "Epic 11 or later story"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"
+  - id: "epic-8-retro-item-32-stamp-a-schema-version-on-the-idempotenc"
+    epic: 8
+    action: "Stamp a schema version on the idempotency store: PRAGMA user_version
+      on create + check on open closes the schema-never-changes bet"
+    owner: "Epic 11"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"
+  - id: "epic-8-retro-item-33-reproduce-the-comma-key-collision-in-a-t"
+    epic: 8
+    action: "Reproduce the comma-key collision in a test: it is reasoned and never
+      reproduced; a reproduction sizes the real risk before the frozen AC is renegotiated"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"

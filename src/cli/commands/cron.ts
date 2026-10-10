@@ -69,6 +69,8 @@ interface EnabledAccountSettings {
   name: string;
   /** m365's configured folders (Story 5.1). */
   folders?: string[];
+  /** Gmail labels configured per account (Story 5.3) — a backfill key; the cron window is INBOX only. */
+  labels?: string[];
   batchSize?: number;
 }
 
@@ -236,6 +238,19 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
       if (relevantErrors.length === 0) process.stderr.write(`${noAccountsHint(plan, account)}\n`);
       continue;
     }
+    if (plan.provider === "gmail") {
+      // The cron window is Gmail's INBOX only (Story 5.4): a configured `labels` list is a backfill
+      // key and is not honoured here — said once per configured account, not silently ignored.
+      for (const entry of selected) {
+        const configured = (entry as { labels?: string[] }).labels;
+        if (Array.isArray(configured) && configured.length > 0) {
+          logPort.warn(
+            `Account "${entry.name}" has \`labels:\` configured — the cron window is the account's INBOX only; labels are honoured by --backfill.`,
+            { accountId: entry.name },
+          );
+        }
+      }
+    }
     // Per-provider state files (Story 5.4 decision 2-A): each provider only reads and writes its
     // own `state/<provider>-<name>.json`, so same-named accounts never share a cursor.
     const stateOptions: StateFileOptions = { ...configDir, provider: plan.provider };
@@ -255,31 +270,28 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
     return 1;
   }
 
-  let store: IdempotencyStore;
-  try {
-    // Opened only once the selection is known, so a typo'd account name never leaves an empty
-    // `idempotency.db` behind (Story 8.2); the per-cycle lock below serialises every write
-    // through it, so the handle may stay open across the whole loop.
-    store = new IdempotencyStore(configDir);
-  } catch (error) {
-    process.stderr.write(`${errorLine(error)}\n`);
-    return 1;
-  }
-
   const lock: RunLockOptions = { ...configDir, pid: process.pid };
   const scheduler = runtime.scheduler ?? createScheduler();
   const now = runtime.now ?? (() => new Date());
   const intervalMs = options.intervalMinutes * 60_000;
   const totalAccounts = providers.reduce((total, provider) => total + provider.accounts.length, 0);
-  // Whether the cycle just run was blocked by another invocation's lock; only the first cycle's
-  // value is read, to decide whether the loop may start at all.
+  // The store opens only once a cycle actually holds the lock — the same lock→store order the
+  // backfill runs — so a start blocked by another invocation never leaves an empty `idempotency.db`
+  // behind (Story 8.2's promise, which a whole-loop store open would have broken). It then stays
+  // open for the daemon's lifetime: after the loop starts there is no exit path through this
+  // command, only ticks.
+  let store: IdempotencyStore | undefined;
+  // Whether the cycle just run was blocked by another invocation's lock or escaped as a fault;
+  // only the first cycle's value is read, to decide whether the loop may start at all.
   let blockedByLock = false;
+  let firstCycleFailed = false;
 
   /**
-   * One cycle: take the 8.2 lock, run `runCronCycle` over the selection, release the lock on every
-   * path, then write the AC's one line — the cycle's start, its counters, its duration and the next
-   * cycle's time. A cycle that cannot take the lock (a backfill in a gap) logs the 8.2 line, skips
-   * its tick and lets the loop carry on; the account failures are named in their own line.
+   * One cycle: take the 8.2 lock, open the store on first success, run `runCronCycle` over the
+   * selection, release the lock on every path, then write the AC's one line — the cycle's start,
+   * its counters, its duration and the next cycle's time. A cycle that cannot take the lock (a
+   * backfill in a gap) logs the 8.2 line, skips its tick and lets the loop carry on; a cycle that
+   * faults surfaces one line, never a stack (AD-4), and the first one is terminal.
    */
   const runCycle = async (): Promise<void> => {
     try {
@@ -290,6 +302,16 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
       return;
     }
     blockedByLock = false;
+    if (store === undefined) {
+      try {
+        store = new IdempotencyStore(configDir);
+      } catch (error) {
+        releaseLock(lock);
+        firstCycleFailed = true;
+        process.stderr.write(`${errorLine(error)}\n`);
+        return;
+      }
+    }
     let report: CronCycleResult;
     try {
       report = await runCronCycle({
@@ -302,6 +324,12 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
         ...(runtime.now === undefined ? {} : { now: runtime.now }),
         ...(runtime.sleep === undefined ? {} : { sleep: runtime.sleep }),
       });
+    } catch (error) {
+      // A fault outside the cycle's per-account isolation (its wiring-fault contract): one line,
+      // never a stack trace; the first cycle's is terminal, later ones log and loop on.
+      firstCycleFailed = true;
+      process.stderr.write(`${errorLine(error)}\n`);
+      return;
     } finally {
       // The lock covers the store and the per-account state files this cycle writes; every exit
       // path releases it, so the gap before the next cycle stays free for `--backfill`.
@@ -323,8 +351,8 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
   // The first cycle runs inline through `runOnce`, so a lock held by another invocation exits 1
   // with the 8.2 line and fetches nothing, before any interval exists.
   await scheduler.runOnce(runCycle);
-  if (blockedByLock) {
-    store.close();
+  if (blockedByLock || firstCycleFailed) {
+    store?.close();
     return 1;
   }
   // The loop: the interval keeps the process alive; Ctrl+C kills it with no handler (Story 9.2

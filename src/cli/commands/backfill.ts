@@ -180,7 +180,9 @@ export async function runBackfill(
       // the orchestrator's m365 default ("Inbox") would be read as a user label.
       planFor: (entry) => ({
         accountId: entry.name,
-        folders: entry.labels ?? ["INBOX"],
+        // An explicitly empty `labels:` list is "unset", not "walk nothing" — an empty plan would
+        // fall through to the orchestrator's m365 default ("Inbox"), which Gmail reads as a user label.
+        folders: entry.labels && entry.labels.length > 0 ? entry.labels : ["INBOX"],
         ...(entry.batchSize === undefined ? {} : { batchSize: entry.batchSize }),
       }),
       port: new GmailAdapter({
