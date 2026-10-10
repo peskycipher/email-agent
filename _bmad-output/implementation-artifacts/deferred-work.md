@@ -138,3 +138,9 @@
 - source_spec: `spec-8-3-cron-mode-loop-multi-account.md`
   summary: Interval drift — after a cycle slower than the interval, the next cycle starts sooner than the promised gap.
   evidence: Real (2026-10-11): setInterval fires on schedule and skips a still-running cycle, so the between-cycle sleep is not honoured after a slow cycle. The scheduler adapter deliberately scopes drift correction (catch-up/jitter) to Epic 9/10; own it there.
+
+## Deferred from: code review of spec-9-1-rate-limit-handling-multi-account.md (2026-10-11)
+
+- `isRateLimitBody` matches only `reason === "rateLimitExceeded"` (`src/adapters/gmail/gmailWire.ts:101`). Gmail's sibling throttling reasons (`userRateLimitExceeded`, `quotaExceeded`/`RESOURCE_EXHAUSTED`) are not matched, so such a response takes the FLAT_KEEP path and fails the batch with no ladder. Unverified against provider behaviour — settle with the Gmail API error-reason reference or a live probe before widening the predicate.
+- Spec/context statements contradict the code or each other: the Implementation Notes claim the cron loop's flat retry now handles non-429 failures only, but the story's own GIVE_UP test asserts a given-up 429 retires through it; `epic-9-context.md:17` still freezes "one account in backoff never pauses the others" while the spec's Decisions reconciles the wording away; the Verification block and the Kill/recovery note disagree on how many lint warnings this change introduced. Fix edits spec/agent-context files, so it is deferred.
+- The proxy for the epic's 8000+ success metric is not pinned and the I/O matrix's LADDER_VS_INTERVAL row has no test. No test keeps a multi-batch account walk completing under repeated 429s, and no aggregate throttle-wait bound is recorded per account for Epic 10. The scheduler's interval drift after a slow cycle is pre-existing and already filed.
