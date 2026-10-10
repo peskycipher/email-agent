@@ -365,6 +365,56 @@ test("a fetch failure backs off 30 seconds, retries once, and a second failure c
   expect(state.timestampWrites).toEqual([{ accountName: "home", date: CYCLE_START }]);
 });
 
+test("a given-up throttled batch retires through the flat retry, and a later account is never aborted or skipped (GIVE_UP)", async () => {
+  const log = recordingLogPort();
+  const state = memoryState({ work: { lastRunTimestamp: "2026-10-10T08:00:00.000Z" } });
+  let workFetches = 0;
+  const port = portDouble({
+    fetchMessages: (opts) => {
+      if (opts.accountId !== "work") return [message("home-m1", opts.accountId)];
+      workFetches += 1;
+      // The adapter already walked its five-retry ladder per call and gave up; what reaches the
+      // cycle is one typed line naming the account — which the cycle treats like any other
+      // fetch failure: the flat retry, never a ladder of its own (FLAT_KEEP / the two-mechanisms rule).
+      // A local error object, not a provider's class: the orch layer is provider-agnostic.
+      throw Object.assign(
+        new Error(`Gmail kept throttling account "${opts.accountId}" — the call was abandoned after 5 backoff retries (HTTP 429).`),
+        { code: "RATE_LIMIT_GAVE_UP", status: 429 },
+      );
+    },
+  });
+  const store = memoryStore();
+  const { sleeps, sleep } = sleepRecorder();
+
+  const result = await runCronCycle({
+    providers: [m365Provider(port.port, state, ["work", "home"])],
+    store: store.store,
+    taxonomy: TAXONOMY,
+    model: modelDouble().model,
+    config: MODEL_CONFIG,
+    logPort: log.logPort,
+    now: () => CYCLE_START,
+    sleep,
+  });
+
+  // The given-up batch's account ran its attempt and its one flat retry, then failed for the cycle.
+  expect(workFetches).toBe(2);
+  // Exactly the one flat wait — the 30s backoff. The same recorder also serves the adapters'
+  // ladder seam, but this double throws before any adapter sleeps, so the single entry is the flat retry.
+  expect(sleeps).toEqual([RETRY_BACKOFF_MS]);
+  expect(result.failures).toBe(1);
+  expect(result.failedAccounts).toEqual(["work"]);
+  // The throttled account's failure did not abort or skip the account after it.
+  expect(result.fetched).toBe(1);
+  expect(result.labeled).toBe(1);
+  expect(log.entries).toContainEqual({
+    level: "error",
+    message: 'Account "work" failed again after one retry — its cursor is held; the next cycle re-fetches the window.',
+    context: { accountId: "work" },
+  });
+  expect(state.timestampWrites).toEqual([{ accountName: "home", date: CYCLE_START }]);
+});
+
 test("a fetch failure that recovers on its one retry commits the state and counts no failure (FETCH_RETRY_RECOVERS)", async () => {
   const log = recordingLogPort();
   const state = memoryState();

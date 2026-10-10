@@ -24,8 +24,13 @@ interface RecordedRequest {
   authorization: string | undefined;
 }
 
-function jsonResponse(body: unknown, ok = true, status = 200): FetchResponseLike {
-  return { ok, status, json: async () => body };
+function jsonResponse(body: unknown, ok = true, status = 200, headers?: Record<string, string>): FetchResponseLike {
+  return {
+    ok,
+    status,
+    ...(headers === undefined ? {} : { headers: { get: (name: string) => headers[name.toLowerCase()] ?? null } }),
+    json: async () => body,
+  };
 }
 
 function graphPage(ids: string[]): FetchResponseLike {
@@ -674,6 +679,49 @@ test("--cron --source gmail with no state reads the profile first and walks the 
     lastRunTimestamp: CYCLE_START.toISOString(),
   });
   expect(capturedLines(stdout).join("")).toContain("1 fetched, 1 labeled");
+});
+
+test("a throttled gmail cycle waits through the adapters' injected sleep and still commits (THROTTLED)", async () => {
+  await writeGmailAccount("personal");
+  await writeState("personal", { lastHistoryId: "H1" }, "gmail");
+  const { fetchFn, requests } = recordingFetch([
+    jsonResponse({ error: { code: 429, message: "Rate Limited" } }, false, 429, { "retry-after": "3" }),
+    gmailHistoryPage("H2", ["m1"]),
+    gmailBatchResponse(["m1"]),
+    gmailLabelsList(),
+    ...gmailWriteResponses(["m1"]),
+  ]);
+  const sleeps: number[] = [];
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
+
+  const code = await runCron(
+    { source: "gmail", account: "personal", intervalMinutes: 15 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+      sleep: async (ms) => { sleeps.push(ms); },
+    },
+  );
+
+  expect(code).toBe(0);
+  // The adapter's backoff wait arrived through the same injected seam — recorded, never really waited.
+  expect(sleeps).toEqual([3_000]);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain('is throttled by Gmail — waiting 3s before retry 1 of 5');
+  expect(errors).not.toContain("failed");
+  expect(JSON.parse(await readFile(statePath("personal", "gmail"), "utf8"))).toEqual({
+    lastHistoryId: "H2",
+    lastRunTimestamp: CYCLE_START.toISOString(),
+  });
+  expect(capturedLines(stdout).join("")).toContain("1 fetched, 1 labeled");
+  // history (429) + the same history GET re-issued + batch + label ensure + the write's read + modify.
+  expect(requests).toHaveLength(6);
 });
 
 test("--cron --source gmail on an expired history warns by name and falls back to the INBOX walk (HISTORY_EXPIRED)", async () => {

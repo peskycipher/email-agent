@@ -28,6 +28,8 @@ export interface GmailAdapterDeps {
   getAccessToken: GmailGetAccessToken;
   /** Epic 7's 404 warning for moved messages; the caller supplies the orchestration log seam. */
   logPort: LogPort;
+  /** Story 9.1's backoff seam, threaded from the CLI; defaults to a real `setTimeout` sleep. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -52,6 +54,7 @@ export class GmailAdapter {
       fetchFn: deps.fetchFn,
       getAccessToken: deps.getAccessToken,
       logPort: deps.logPort,
+      ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
       labelIdsByAccount: this.labelIdsByAccount,
       returnedIdsByAccount: this.returnedIdsByAccount,
     };

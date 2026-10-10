@@ -201,10 +201,10 @@ test("a non-2xx create is a typed error naming the label and status, with the ex
   expect(requests).toHaveLength(2);
 });
 
-test("a throttled create surfaces as a typed error with no retry (THROTTLED)", async () => {
+test("a 503 create surfaces as a typed error with the ladder untouched (FLAT_KEEP)", async () => {
   const { fetchFn, requests } = scriptedFetch([
     labelList([]),
-    jsonResponse({ error: { message: "SECRET-PAYLOAD" } }, false, 429),
+    jsonResponse({ error: { message: "SECRET-PAYLOAD" } }, false, 503),
   ]);
   const adapter = new GmailAdapter({ logPort: makeLogPort(), fetchFn, getAccessToken: tokenSource().getAccessToken });
 
@@ -212,8 +212,29 @@ test("a throttled create surfaces as a typed error with no retry (THROTTLED)", a
 
   expect(error).toBeInstanceOf(GmailAdapterError);
   expect(error.code).toBe("CREATE_LABEL_FAILED");
-  expect(error.status).toBe(429);
+  expect(error.status).toBe(503);
   expect(requests).toHaveLength(2);
+});
+
+test("a 429 on create walks the ladder and then creates (THROTTLED_CREATE)", async () => {
+  const sleeps: number[] = [];
+  const { fetchFn, requests } = scriptedFetch([
+    labelList([]),
+    jsonResponse({ error: { code: 429, message: "Rate Limited" } }, false, 429),
+    created("Label_1"),
+  ]);
+  const adapter = new GmailAdapter({
+    logPort: makeLogPort(),
+    fetchFn,
+    getAccessToken: tokenSource().getAccessToken,
+    sleep: async (ms) => { sleeps.push(ms); },
+  });
+
+  await adapter.ensureCategories("personal", [LABELS[0] as LabelDef]);
+
+  expect(sleeps).toEqual([2_000]);
+  expect(requests).toHaveLength(3);
+  expect(adapter.labelIdsFor("personal")?.get("Action Needed")).toBe("Label_1");
 });
 
 test("a list response without a label list is a typed error, never a mass-create", async () => {

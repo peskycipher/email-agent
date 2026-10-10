@@ -7,7 +7,7 @@ import {
   postRequest,
   readJsonObject,
   readString,
-  send,
+  sendThrottled,
   GmailAdapterError,
   type GmailAdapterServices,
 } from "./gmailWire.js";
@@ -47,8 +47,8 @@ async function listLabels(
   accountId: string,
   token: string,
 ): Promise<Map<string, string>> {
-  const response = await send(
-    services.fetchFn,
+  const response = await sendThrottled(
+    services,
     LABELS_URL,
     getRequest(authorizationHeader(token)),
     accountId,
@@ -93,8 +93,8 @@ async function createLabel(
   // Google accepts only its documented palette, so the taxonomy's hex is the intent and
   // the nearest allowed pair is what actually goes on the wire.
   const backgroundColor = nearestGmailColor(label.gmailColor);
-  const response = await send(
-    services.fetchFn,
+  const response = await sendThrottled(
+    services,
     LABELS_URL,
     postRequest(authorizationHeader(token), {
       name: label.name,

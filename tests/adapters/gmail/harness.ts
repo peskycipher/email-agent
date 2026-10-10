@@ -28,8 +28,19 @@ export interface RecordedRequest {
   signal: boolean;
 }
 
-export function jsonResponse(body: unknown, ok = true, status = 200): FetchResponseLike {
-  return { ok, status, json: async () => body };
+/** A JSON response; `headers` carries `Retry-After` for the Story 9.1 throttle suites. */
+export function jsonResponse(
+  body: unknown,
+  ok = true,
+  status = 200,
+  headers?: Record<string, string>,
+): FetchResponseLike {
+  return {
+    ok,
+    status,
+    ...(headers === undefined ? {} : { headers: { get: (name: string) => headers[name.toLowerCase()] ?? null } }),
+    json: async () => body,
+  };
 }
 
 export function scriptedFetch(responses: FetchResponseLike[]): {

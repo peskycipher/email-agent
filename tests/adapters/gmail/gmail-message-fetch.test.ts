@@ -366,8 +366,8 @@ test("a 200 without a messages array is a typed error, never an empty result (MA
   expect(requests).toHaveLength(1);
 });
 
-test("a 429 on a list page is a typed failure with no retry (THROTTLED)", async () => {
-  const { fetchFn, requests } = scriptedFetch([jsonResponse({}, false, 429)]);
+test("a 503 on a list page is a typed failure with the ladder untouched (FLAT_KEEP)", async () => {
+  const { fetchFn, requests } = scriptedFetch([jsonResponse({}, false, 503)]);
   const adapter = new GmailAdapter({ logPort: makeLogPort(), fetchFn, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter
@@ -375,13 +375,13 @@ test("a 429 on a list page is a typed failure with no retry (THROTTLED)", async 
     .catch((err: unknown) => err)) as GmailAdapterError;
 
   expect(error.code).toBe("LIST_MESSAGES_FAILED");
-  expect(error.status).toBe(429);
-  // No retry: exactly one request, the throttled one.
+  expect(error.status).toBe(503);
+  // No retry: exactly one request, the failed one.
   expect(requests).toHaveLength(1);
 });
 
-test("a 429 on a detail batch is a typed failure with no retry (THROTTLED)", async () => {
-  const { fetchFn, requests } = scriptedFetch([messageListPage(["m1"]), jsonResponse({}, false, 429)]);
+test("a 503 on a detail batch is a typed failure with the ladder untouched (FLAT_KEEP)", async () => {
+  const { fetchFn, requests } = scriptedFetch([messageListPage(["m1"]), jsonResponse({}, false, 503)]);
   const adapter = new GmailAdapter({ logPort: makeLogPort(), fetchFn, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter
@@ -389,8 +389,52 @@ test("a 429 on a detail batch is a typed failure with no retry (THROTTLED)", asy
     .catch((err: unknown) => err)) as GmailAdapterError;
 
   expect(error.code).toBe("BATCH_GET_MESSAGES_FAILED");
-  expect(error.status).toBe(429);
+  expect(error.status).toBe(503);
   expect(requests).toHaveLength(2);
+});
+
+test("a throttled part inside a 200 batch re-issues the batch through the ladder (PART_THROTTLED)", async () => {
+  const sleeps: number[] = [];
+  const { fetchFn, requests } = scriptedFetch([
+    messageListPage(["m1"]),
+    batchResponse([{ status: 429, body: { error: { errors: [{ reason: "rateLimitExceeded" }] } } }]),
+    batchResponse([{ body: gmailDetail("m1") }]),
+  ]);
+  const adapter = new GmailAdapter({
+    logPort: makeLogPort(),
+    fetchFn,
+    getAccessToken: tokenSource().getAccessToken,
+    sleep: async (ms) => { sleeps.push(ms); },
+  });
+
+  const messages = await adapter.fetchMessages({ source: "gmail", accountId: "personal" });
+
+  expect(messages.map((message) => message.id)).toEqual(["m1"]);
+  expect(sleeps).toEqual([2_000]);
+  expect(requests).toHaveLength(3);
+});
+
+test("five throttled parts exhaust the ladder and give up with a typed RATE_LIMIT_GAVE_UP (PART_GIVE_UP)", async () => {
+  const sleeps: number[] = [];
+  const throttledPart = { status: 429, body: { error: { errors: [{ reason: "rateLimitExceeded" }] } } };
+  const { fetchFn } = scriptedFetch([
+    messageListPage(["m1"]),
+    ...Array.from({ length: 6 }, () => batchResponse([throttledPart])),
+  ]);
+  const adapter = new GmailAdapter({
+    logPort: makeLogPort(),
+    fetchFn,
+    getAccessToken: tokenSource().getAccessToken,
+    sleep: async (ms) => { sleeps.push(ms); },
+  });
+
+  const error = (await adapter
+    .fetchMessages({ source: "gmail", accountId: "personal" })
+    .catch((err: unknown) => err)) as GmailAdapterError;
+
+  expect(error.code).toBe("RATE_LIMIT_GAVE_UP");
+  expect(error.status).toBe(429);
+  expect(sleeps).toEqual([2_000, 4_000, 8_000, 16_000, 32_000]);
 });
 
 test("a batch whose body has no parseable parts fails the account (BATCH_MALFORMED)", async () => {

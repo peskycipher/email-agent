@@ -7,13 +7,16 @@ import {
   batchRequestBody,
   contentIdIndexOf,
   getRequest,
+  isRateLimitBody,
   messagesListUrl,
   parseBatchPart,
   readJsonObject,
   readResponseText,
   readString,
-  send,
+  sendThrottled,
   splitBatchParts,
+  throttleGiveUpError,
+  throttlePartBackoff,
   unreadableBatchError,
   BATCH_BOUNDARY,
   BATCH_URL,
@@ -46,8 +49,8 @@ export async function fetchMessages(services: GmailAdapterServices, opts: FetchO
   const seenTokens = new Set<string>();
   let pageToken: string | undefined;
   do {
-    const response = await send(
-      services.fetchFn,
+    const response = await sendThrottled(
+      services,
       messagesListUrl(opts, pageToken),
       getRequest(authorizationHeader(token)),
       opts.accountId,
@@ -132,7 +135,9 @@ export async function fetchMessages(services: GmailAdapterServices, opts: FetchO
  * hydration. A part that answers 404 is a purged message's answer (Story 5.4 decision EC1):
  * only in a history walk (`allowPurged`) that id is skipped and named in the outcome — failing
  * the whole cycle instead would re-fail every run until history expiry — while a POST-level
- * failure of any other kind, or a malformed part, still fails the account.
+ * failure of any other kind, or a malformed part, still fails the account. A part that is *throttled*
+ * while the envelope answers 200 (Story 9.1, RATE_LIMIT_BODY) re-issues the whole batch through the
+ * ladder instead of failing, so an unattended backfill survives a mid-batch 429.
  */
 export async function fetchBatchParts(
   services: GmailAdapterServices,
@@ -141,34 +146,51 @@ export async function fetchBatchParts(
   ids: string[],
   allowPurged: boolean,
 ): Promise<{ messages: MessageDTO[]; skippedIds: string[] }> {
-  const response: MultipartResponseLike = await send(
-    services.fetchFn,
-    BATCH_URL,
-    {
-      method: "POST",
-      headers: {
-        ...authorizationHeader(token),
-        "content-type": `multipart/mixed; boundary=${BATCH_BOUNDARY}`,
-      },
-      body: batchRequestBody(ids),
-    } as FetchInit,
-    accountId,
-    "BATCH_GET_MESSAGES_FAILED",
-  );
-  if (!response.ok) {
-    throw new GmailAdapterError(
-      "BATCH_GET_MESSAGES_FAILED",
+  let parts: string[] = [];
+  let throttleRetries = 0;
+  // Re-issue the whole batch while a part is throttled (an envelope-level 429 is already retried by
+  // `sendThrottled`); the budget is the same five rungs, and exhausting it gives up typed.
+  for (;;) {
+    const response: MultipartResponseLike = await sendThrottled(
+      services,
+      BATCH_URL,
+      {
+        method: "POST",
+        headers: {
+          ...authorizationHeader(token),
+          "content-type": `multipart/mixed; boundary=${BATCH_BOUNDARY}`,
+        },
+        body: batchRequestBody(ids),
+      } as FetchInit,
       accountId,
-      `Gmail refused to fetch message details for account "${accountId}" (HTTP ${response.status}).`,
-      response.status,
+      "BATCH_GET_MESSAGES_FAILED",
     );
-  }
-  const body = await readResponseText(response);
-  const boundary = batchBoundary(response.headers?.get("content-type"));
-  const parts = body === undefined || boundary === undefined ? undefined : splitBatchParts(body, boundary);
-  if (parts === undefined || parts.length !== ids.length) {
-    // Without one parseable part per id, some message's details would be silently dropped.
-    throw unreadableBatchError(accountId);
+    if (!response.ok) {
+      throw new GmailAdapterError(
+        "BATCH_GET_MESSAGES_FAILED",
+        accountId,
+        `Gmail refused to fetch message details for account "${accountId}" (HTTP ${response.status}).`,
+        response.status,
+      );
+    }
+    const body = await readResponseText(response);
+    const boundary = batchBoundary(response.headers?.get("content-type"));
+    const split = body === undefined || boundary === undefined ? undefined : splitBatchParts(body, boundary);
+    if (split === undefined || split.length !== ids.length) {
+      // Without one parseable part per id, some message's details would be silently dropped.
+      throw unreadableBatchError(accountId);
+    }
+    const throttled = split
+      .map((part) => parseBatchPart(part))
+      .find((parsed) => parsed !== undefined && (parsed.status === 429 || isRateLimitBody(parsed.body)));
+    if (throttled === undefined) {
+      parts = split;
+      break;
+    }
+    if (!(await throttlePartBackoff(services, accountId, throttleRetries))) {
+      throw throttleGiveUpError("Gmail", accountId, throttled.status);
+    }
+    throttleRetries += 1;
   }
   const messages: Array<MessageDTO | undefined> = Array.from({ length: ids.length }, () => undefined);
   // Which ids the parts have answered for, filled or skipped: every index needs exactly one answer.

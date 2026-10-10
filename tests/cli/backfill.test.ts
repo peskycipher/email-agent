@@ -21,8 +21,13 @@ interface RecordedRequest {
   authorization: string | undefined;
 }
 
-function jsonResponse(body: unknown, ok = true, status = 200): FetchResponseLike {
-  return { ok, status, json: async () => body };
+function jsonResponse(body: unknown, ok = true, status = 200, headers?: Record<string, string>): FetchResponseLike {
+  return {
+    ok,
+    status,
+    ...(headers === undefined ? {} : { headers: { get: (name: string) => headers[name.toLowerCase()] ?? null } }),
+    json: async () => body,
+  };
 }
 
 /** Only the fetch calls, so a test's request-count assertions stay about fetching, not write-back. */
@@ -246,6 +251,43 @@ test("--backfill --account all fetches every enabled account, one count line eac
   expect(requests[0]?.url.startsWith(`${FOLDER_MESSAGES_URL}/Inbox/messages?`)).toBe(true);
   expect(requests[0]?.url).toContain("$top=50");
   expect(requests[0]?.authorization).toBe("Bearer access-m365-work");
+});
+
+test("a throttled backfill fetch waits through the adapters' injected sleep and still completes (THROTTLED)", async () => {
+  await writeAccount("work");
+  const { fetchFn, requests } = recordingFetch([
+    jsonResponse({ error: { code: "TooManyRequests" } }, false, 429, { "retry-after": "2" }),
+    graphPage(["m1", "m2"]),
+    ...m365WriteResponses(["m1", "m2"]),
+  ]);
+  const sleeps: number[] = [];
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runBackfill(
+    { source: "m365", account: "all" },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      model: modelDouble(),
+      sleep: async (ms) => { sleeps.push(ms); },
+    },
+  );
+
+  expect(code).toBe(0);
+  // The adapter's backoff wait arrived through the command's seam — recorded, never really waited.
+  expect(sleeps).toEqual([2_000]);
+  // The wait is logged naming the account (no silent sleeping) and there is no failure line:
+  // the throttled fetch is not an error (THROTTLED row).
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain('is throttled by Microsoft Graph — waiting 2s before retry 1 of 5');
+  expect(errors).not.toContain("failed");
+  expect(capturedLines(stdout).join("")).toContain("2 labeled, 0 skipped, 0 already done, 0 error(s)");
+  // The throttled page and its re-issue: same URL, two wire calls. Two messages then cost one
+  // read + one PATCH each.
+  expect(requests[0]?.url).toBe(requests[1]?.url);
+  expect(requests).toHaveLength(6);
 });
 
 test("--account all keeps going after an account fails and exits 1 with a counted line (MULTI_ACCOUNT)", async () => {

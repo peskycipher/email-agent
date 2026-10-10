@@ -23,6 +23,30 @@ const DEFAULT_BATCH_SIZE = 50;
 /** A healthy Graph call answers in seconds; a stalled socket must not hang the sync forever. */
 const REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * Story 9.1's backoff ladder, in seconds: the wait per throttled retry when the response's
+ * `Retry-After` is absent or unreadable. Graph names throttling by status only; the wait
+ * specifics — parsing, rung, give-up — are this adapter's own wire layer, not shared code.
+ */
+const THROTTLE_LADDER_SECONDS = [2, 4, 8, 16, 32];
+/** The ceiling: neither a `Retry-After` nor a rung ever waits longer than 60 seconds. */
+const MAX_THROTTLE_WAIT_SECONDS = 60;
+/** The retry budget per call: one backoff wait per retry, all five rungs, then give up. */
+const MAX_THROTTLE_RETRIES = THROTTLE_LADDER_SECONDS.length;
+
+/**
+ * The response's `Retry-After` in seconds when present and usable; a non-numeric header (an
+ * HTTP-date) or a non-positive one (`"0"`, empty, whitespace — `Number("") === 0`) falls back to
+ * the ladder, never a zero-second retry. Graph names throttling in seconds, so only a positive
+ * integer wait parses.
+ */
+function retryAfterSeconds(response: FetchResponseLike): number | undefined {
+  const raw = response.headers?.get("retry-after");
+  if (raw === null || raw === undefined) return undefined;
+  const seconds = Number(raw);
+  return Number.isInteger(seconds) && seconds > 0 ? seconds : undefined;
+}
+
 /** The `FetchLike` init shape, reused so the GET builder can honestly omit `body`. */
 type FetchInit = Parameters<FetchLike>[1];
 
@@ -30,7 +54,8 @@ export type M365AdapterErrorCode =
   | "LIST_CATEGORIES_FAILED"
   | "CREATE_CATEGORY_FAILED"
   | "LIST_MESSAGES_FAILED"
-  | "WRITE_LABELS_FAILED";
+  | "WRITE_LABELS_FAILED"
+  | "RATE_LIMIT_GAVE_UP";
 
 /**
  * Typed at the adapter boundary so the CLI renders one actionable line (AD-4) —
@@ -56,6 +81,8 @@ export interface M365AdapterDeps {
   getAccessToken(accountName: string, options?: { forceRefresh?: boolean }): Promise<TokenSet>;
   /** Epic 7's 404 warning for moved messages; the caller supplies the orchestration log seam. */
   logPort: LogPort;
+  /** Story 9.1's backoff seam, threaded from the CLI; defaults to a real `setTimeout` sleep. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function authorizationHeader(token: string): Record<string, string> {
@@ -134,11 +161,13 @@ export class M365Adapter {
   private readonly fetchFn: FetchLike;
   private readonly getAccessToken: M365AdapterDeps["getAccessToken"];
   private readonly logPort: LogPort;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(deps: M365AdapterDeps) {
     this.fetchFn = deps.fetchFn;
     this.getAccessToken = deps.getAccessToken;
     this.logPort = deps.logPort;
+    this.sleep = deps.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   }
 
   /**
@@ -415,25 +444,59 @@ export class M365Adapter {
     return this.send(url, init, accountId, code);
   }
 
+  /**
+   * The bounded HTTP entry point every Graph call shares, made throttle-aware by Story 9.1:
+   * a response answering 429 is retried on the same call — the wait is the response's
+   * `Retry-After` seconds when present and parseable, else the next ladder rung (2s, 4s, 8s,
+   * 16s, 32s), always capped at 60s. Every wait is logged naming the account; after the
+   * retry budget is spent the give-up error throws and the batch's fate is the caller's
+   * account-failure isolation. Graph names throttling by status alone (the body is never
+   * read on an error path), so any other failure returns the response untouched and the
+   * flat-retry mechanisms outside the adapters stay exactly as they were.
+   */
   private async send(
     url: string,
     init: FetchInit,
     accountId: string,
     code: M365AdapterErrorCode,
   ): Promise<FetchResponseLike> {
-    try {
-      return await this.fetchFn(url, {
-        ...init,
-        // Never override a caller-supplied signal; bound the request only when there is none.
-        signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-    } catch {
-      // The thrown value can carry a stack and a raw cause; the typed error carries neither.
-      throw new M365AdapterError(
-        code,
-        accountId,
-        `Microsoft Graph could not be reached for account "${accountId}".`,
+    let retries = 0;
+    for (;;) {
+      let response: FetchResponseLike;
+      try {
+        response = await this.fetchFn(url, {
+          ...init,
+          // Never override a caller-supplied signal; bound the request only when there is none.
+          signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+      } catch {
+        // The thrown value can carry a stack and a raw cause; the typed error carries neither.
+        throw new M365AdapterError(
+          code,
+          accountId,
+          `Microsoft Graph could not be reached for account "${accountId}".`,
+        );
+      }
+      if (response.status !== 429) return response;
+      if (retries >= MAX_THROTTLE_RETRIES) {
+        throw new M365AdapterError(
+          "RATE_LIMIT_GAVE_UP",
+          accountId,
+          `Microsoft Graph kept throttling account "${accountId}" — the call was abandoned after ${MAX_THROTTLE_RETRIES} backoff retries (HTTP ${response.status}).`,
+          response.status,
+        );
+      }
+      const waitSeconds = Math.min(
+        retryAfterSeconds(response) ?? THROTTLE_LADDER_SECONDS[retries],
+        MAX_THROTTLE_WAIT_SECONDS,
       );
+      // No silent sleeping: one line per wait, naming the account and the capped wait (AD-4).
+      this.logPort.warn(
+        `Account "${accountId}" is throttled by Microsoft Graph — waiting ${waitSeconds}s before retry ${retries + 1} of ${MAX_THROTTLE_RETRIES}.`,
+        { accountId, waitSeconds },
+      );
+      await this.sleep(waitSeconds * 1000);
+      retries += 1;
     }
   }
 }

@@ -41,7 +41,8 @@ export type GmailAdapterErrorCode =
   | "BATCH_GET_MESSAGES_FAILED"
   | "GET_PROFILE_FAILED"
   | "LIST_HISTORY_FAILED"
-  | "WRITE_LABELS_FAILED";
+  | "WRITE_LABELS_FAILED"
+  | "RATE_LIMIT_GAVE_UP";
 
 /**
  * Typed at the adapter boundary so the CLI renders one actionable line (AD-4) —
@@ -61,6 +62,103 @@ export class GmailAdapterError extends Error {
   }
 }
 
+/** Story 9.1's backoff seam: injectable so tests never really wait 2–60 seconds. */
+export type ThrottleSleep = (ms: number) => Promise<void>;
+
+/** A real wait, the seam's default. */
+export function realThrottleSleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Story 9.1's backoff ladder, in seconds: the wait per throttled retry when the response's
+ * `Retry-After` is absent or unreadable. One rung per retry; the cap below can only bind
+ * to a header wait longer than the ladder's last rung.
+ */
+const THROTTLE_LADDER_SECONDS = [2, 4, 8, 16, 32];
+/** The ladder's ceiling: neither a `Retry-After` nor a rung ever waits longer than 60 seconds. */
+const MAX_THROTTLE_WAIT_SECONDS = 60;
+/** The retry budget per call: one backoff wait per retry, all five rungs, then give up. */
+const MAX_THROTTLE_RETRIES = THROTTLE_LADDER_SECONDS.length;
+
+/**
+ * The response's `Retry-After` in seconds when present and usable; a non-numeric header (an
+ * HTTP-date) or a non-positive one (`"0"`, empty, whitespace — `Number("") === 0`) falls back to
+ * the ladder, never a zero-second retry. Gmail names throttling in seconds, so only a positive
+ * integer wait parses.
+ */
+export function retryAfterSeconds(response: FetchResponseLike): number | undefined {
+  const raw = response.headers?.get("retry-after");
+  if (raw === null || raw === undefined) return undefined;
+  const seconds = Number(raw);
+  return Number.isInteger(seconds) && seconds > 0 ? seconds : undefined;
+}
+
+/**
+ * Gmail's body signal for throttling (Story 9.1, RATE_LIMIT_BODY): the provider can answer
+ * `rateLimitExceeded` in the error body at a status other than 429. Detection is status or
+ * body — the shape is `error.errors[].reason`.
+ */
+export function isRateLimitBody(body: unknown): boolean {
+  if (typeof body !== "object" || body === null) return false;
+  const error = (body as Record<string, unknown>)["error"];
+  if (typeof error !== "object" || error === null) return false;
+  const errors = (error as Record<string, unknown>)["errors"];
+  return (
+    Array.isArray(errors) &&
+    errors.some(
+      (entry) =>
+        typeof entry === "object" &&
+        entry !== null &&
+        (entry as Record<string, unknown>)["reason"] === "rateLimitExceeded",
+    )
+  );
+}
+
+/** The throttle-aware caller's seam: the log the waits are written through, and the injectable wait. */
+export interface ThrottleDeps {
+  logPort: LogPort;
+  sleep?: ThrottleSleep;
+}
+
+/**
+ * The give-up: the retry budget is spent and the call is still throttled. A distinct code (AD-4)
+ * so the caller sees an exhausted ladder, not an ordinary wire failure, and the batch's fate is
+ * the account-failure isolation that already exists.
+ */
+export function throttleGiveUpError(
+  provider: "Gmail" | "Microsoft Graph",
+  accountId: string,
+  status: number,
+): GmailAdapterError {
+  return new GmailAdapterError(
+    "RATE_LIMIT_GAVE_UP",
+    accountId,
+    `${provider} kept throttling account "${accountId}" — the call was abandoned after ${MAX_THROTTLE_RETRIES} backoff retries (HTTP ${status}).`,
+    status,
+  );
+}
+
+/**
+ * The per-part backoff rung (Story 9.1, RATE_LIMIT_BODY): Gmail can throttle one sub-request while
+ * the batch envelope still answers 200, where `send`'s envelope-level check never sees it. The
+ * caller re-issues the batch and asks for the wait here; `false` means the budget is spent.
+ */
+export async function throttlePartBackoff(
+  deps: Pick<ThrottleDeps, "logPort" | "sleep">,
+  accountId: string,
+  retries: number,
+): Promise<boolean> {
+  if (retries >= MAX_THROTTLE_RETRIES) return false;
+  const waitSeconds = THROTTLE_LADDER_SECONDS[retries];
+  deps.logPort.warn(
+    `Account "${accountId}" is throttled by Gmail — waiting ${waitSeconds}s before retry ${retries + 1} of ${MAX_THROTTLE_RETRIES}.`,
+    { accountId, waitSeconds },
+  );
+  await (deps.sleep ?? realThrottleSleep)(waitSeconds * 1000);
+  return true;
+}
+
 export type GmailFetchFn = (
   url: string,
   init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal },
@@ -72,6 +170,8 @@ export interface GmailAdapterServices {
   fetchFn: GmailFetchFn;
   getAccessToken: GmailGetAccessToken;
   logPort: LogPort;
+  /** Story 9.1's backoff seam, threaded from the CLI; the default is a real `setTimeout` sleep. */
+  sleep?: ThrottleSleep;
   /** Written only by `gmailLabelSync`'s complete sync; read by `gmailLabelSync` and `gmailLabelWrite`. */
   labelIdsByAccount: Map<string, GmailLabelIds>;
   /** Written and read only by `gmailMessageFetch`, which owns the per-account dedupe across walks. */
@@ -172,6 +272,15 @@ export async function readJsonObject(response: FetchResponseLike): Promise<Recor
 /**
  * The bounded HTTP entry point every Gmail adapter concern shares. A network failure is a typed
  * error carrying the caller's code; the raw thrown value is never forwarded.
+ *
+ * When a `throttle` seam is supplied (every mail-wire call supplies one — Story 9.1), a response
+ * answering 429 — or with `rateLimitExceeded` in its error body — is retried on the same call:
+ * the wait is the response's `Retry-After` seconds when present and parseable, else the next
+ * ladder rung (2s, 4s, 8s, 16s, 32s), always capped at 60s. Every wait is logged naming the
+ * account; after the retry budget is spent the give-up error throws and the batch's fate is the
+ * caller's account-failure isolation. Any other failure returns the response untouched, so the
+ * non-429 error paths — and the flat-retry mechanisms outside the adapters — stay exactly as
+ * they were.
  */
 export async function send(
   fetchFn: GmailFetchFn,
@@ -179,17 +288,53 @@ export async function send(
   init: FetchInit,
   accountId: string,
   code: GmailAdapterErrorCode,
+  throttle?: ThrottleDeps,
 ): Promise<FetchResponseLike> {
-  try {
-    return await fetchFn(url, {
-      ...init,
-      // Never override a caller-supplied signal; bound the request only when there is none.
-      signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  } catch {
-    // The thrown value can carry a stack and a raw cause; the typed error carries neither.
-    throw new GmailAdapterError(code, accountId, `Gmail could not be reached for account "${accountId}".`);
+  let retries = 0;
+  for (;;) {
+    let response: FetchResponseLike;
+    try {
+      response = await fetchFn(url, {
+        ...init,
+        // Never override a caller-supplied signal; bound the request only when there is none.
+        signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch {
+      // The thrown value can carry a stack and a raw cause; the typed error carries neither.
+      throw new GmailAdapterError(code, accountId, `Gmail could not be reached for account "${accountId}".`);
+    }
+    if (response.ok || throttle === undefined) return response;
+    // Reading the error body here is safe: every caller renders a non-ok response from its
+    // status alone and never re-reads the body, so nothing is consumed twice.
+    const body = await readJsonObject(response);
+    if (response.status !== 429 && !isRateLimitBody(body)) return response;
+    if (retries >= MAX_THROTTLE_RETRIES) throw throttleGiveUpError("Gmail", accountId, response.status);
+    const waitSeconds = Math.min(
+      retryAfterSeconds(response) ?? THROTTLE_LADDER_SECONDS[retries],
+      MAX_THROTTLE_WAIT_SECONDS,
+    );
+    // No silent sleeping: one line per wait, naming the account and the capped wait (AD-4).
+    throttle.logPort.warn(
+      `Account "${accountId}" is throttled by Gmail — waiting ${waitSeconds}s before retry ${retries + 1} of ${MAX_THROTTLE_RETRIES}.`,
+      { accountId, waitSeconds },
+    );
+    await (throttle.sleep ?? realThrottleSleep)(waitSeconds * 1000);
+    retries += 1;
   }
+}
+
+/**
+ * The throttle-aware caller's entry point, one shape for every Gmail mail-wire call site
+ * (Story 9.1): the caller hands its `services` and the wire specifics stay inside the adapter.
+ */
+export async function sendThrottled(
+  services: Pick<GmailAdapterServices, "fetchFn" | "logPort"> & ThrottleDeps,
+  url: string,
+  init: FetchInit,
+  accountId: string,
+  code: GmailAdapterErrorCode,
+): Promise<FetchResponseLike> {
+  return send(services.fetchFn, url, init, accountId, code, services);
 }
 
 /**

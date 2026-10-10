@@ -4,7 +4,7 @@ import {
   getRequest,
   postRequest,
   readJsonObject,
-  send,
+  sendThrottled,
   MESSAGES_URL,
   GmailAdapterError,
   type GmailAdapterServices,
@@ -69,8 +69,8 @@ async function runWriteLabels(
 
   const messageUrl = `${MESSAGES_URL}/${encodeURIComponent(messageId)}`;
   const readUrl = `${messageUrl}?format=minimal&fields=labelIds`;
-  const readResponse = await send(
-    services.fetchFn,
+  const readResponse = await sendThrottled(
+    services,
     readUrl,
     getRequest(authorizationHeader(effectiveToken)),
     accountId,
@@ -105,8 +105,8 @@ async function runWriteLabels(
   }
   if (missing.length === 0) return;
 
-  const modifyResponse = await send(
-    services.fetchFn,
+  const modifyResponse = await sendThrottled(
+    services,
     `${messageUrl}/modify`,
     postRequest(authorizationHeader(effectiveToken), { addLabelIds: missing }),
     accountId,

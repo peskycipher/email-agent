@@ -7,7 +7,7 @@ import {
   readField,
   readJsonObject,
   readString,
-  send,
+  sendThrottled,
   GmailAdapterError,
   PROFILE_URL,
   clampBatchSize,
@@ -103,8 +103,8 @@ function parseHistoryPage(body: Record<string, unknown> | undefined, accountId: 
  */
 export async function fetchHistoryId(services: GmailAdapterServices, accountId: string): Promise<string> {
   const token = (await services.getAccessToken(accountId)).accessToken;
-  const response = await send(
-    services.fetchFn,
+  const response = await sendThrottled(
+    services,
     PROFILE_URL,
     getRequest(authorizationHeader(token)),
     accountId,
@@ -148,8 +148,8 @@ export async function fetchHistory(services: GmailAdapterServices, opts: GmailHi
   const seenTokens = new Set<string>();
   let pageToken: string | undefined;
   for (;;) {
-    const response = await send(
-      services.fetchFn,
+    const response = await sendThrottled(
+      services,
       historyUrl(opts.historyId, pageToken),
       getRequest(authorizationHeader(token)),
       opts.accountId,

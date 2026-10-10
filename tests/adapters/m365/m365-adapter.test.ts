@@ -63,8 +63,14 @@ interface RecordedRequest {
   signal: boolean;
 }
 
-function jsonResponse(body: unknown, ok = true, status = 200): FetchResponseLike {
-  return { ok, status, json: async () => body };
+/** A JSON response; `headers` carries `Retry-After` for the Story 9.1 throttle suites. */
+function jsonResponse(body: unknown, ok = true, status = 200, headers?: Record<string, string>): FetchResponseLike {
+  return {
+    ok,
+    status,
+    ...(headers === undefined ? {} : { headers: { get: (name: string) => headers[name.toLowerCase()] ?? null } }),
+    json: async () => body,
+  };
 }
 
 function scriptedFetch(responses: FetchResponseLike[]): {
@@ -265,10 +271,10 @@ test("a non-2xx list response is a typed error naming the account and status (AP
   expect(requests).toHaveLength(1);
 });
 
-test("a throttled create surfaces as a typed error with no retry (THROTTLED)", async () => {
+test("a throttled create surfaces as a typed error with the ladder untouched (FLAT_KEEP)", async () => {
   const { fetchFn, requests } = scriptedFetch([
     jsonResponse({ value: [] }),
-    jsonResponse({ error: { code: "TooManyRequests", message: "SECRET-PAYLOAD" } }, false, 429),
+    jsonResponse({ error: { code: "ServiceUnavailable", message: "SECRET-PAYLOAD" } }, false, 503),
   ]);
   const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
@@ -278,7 +284,7 @@ test("a throttled create surfaces as a typed error with no retry (THROTTLED)", a
   expect(error).toBeInstanceOf(M365AdapterError);
   expect(error.code).toBe("CREATE_CATEGORY_FAILED");
   expect(error.accountId).toBe("work");
-  expect(error.status).toBe(429);
+  expect(error.status).toBe(503);
   expect(error.message).toContain("Action Needed");
   expect(error.message).not.toContain("SECRET-PAYLOAD");
   expect(requests).toHaveLength(2);
@@ -737,8 +743,8 @@ test("a 200 without a value array is a typed error, never an empty result (MALFO
   expect(requests).toHaveLength(1);
 });
 
-test("a 429 on a page is a typed failure with no retry (THROTTLED)", async () => {
-  const { fetchFn, requests } = scriptedFetch([jsonResponse({}, false, 429)]);
+test("a 503 on a page is a typed failure with the ladder untouched (FLAT_KEEP)", async () => {
+  const { fetchFn, requests } = scriptedFetch([jsonResponse({}, false, 503)]);
   const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter
@@ -746,8 +752,8 @@ test("a 429 on a page is a typed failure with no retry (THROTTLED)", async () =>
     .catch((err: unknown) => err)) as M365AdapterError;
 
   expect(error.code).toBe("LIST_MESSAGES_FAILED");
-  expect(error.status).toBe(429);
-  // No retry: exactly one request, the throttled one.
+  expect(error.status).toBe(503);
+  // No retry: exactly one request, the failed one.
   expect(requests).toHaveLength(1);
 });
 

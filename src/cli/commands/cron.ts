@@ -60,8 +60,17 @@ export interface CronRuntime {
   model?: ModelPort;
   /** The scheduler that runs the first cycle and then the loop; injectable so tests never start a real interval. */
   scheduler?: SchedulerPort;
-  /** The 30s backoff seam, threaded into the cycle; injectable so tests never really sleep. */
+  /**
+   * The single 30s flat-retry seam, threaded into the cycle *and* into the provider adapters as
+   * Story 9.1's ladder seam; injectable so tests never really sleep. One recorder therefore sees
+   * both mechanisms' waits, and a wait cannot be attributed to either from it alone.
+   */
   sleep?: (ms: number) => Promise<void>;
+}
+
+/** Story 9.1's adapter backoff seam, threaded into the provider adapters only when injected. */
+function adapterSleep(runtime: CronRuntime): { sleep?: (ms: number) => Promise<void> } {
+  return runtime.sleep === undefined ? {} : { sleep: runtime.sleep };
 }
 
 /** The part of a per-account listing this command reads; both providers return one. */
@@ -175,6 +184,7 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
     fetchFn,
     getAccessToken: gmailAuth.getAccessToken.bind(gmailAuth),
     logPort,
+    ...adapterSleep(runtime),
   });
   const plans: Record<"m365" | "gmail", CronProviderPlan> = {
     m365: {
@@ -191,6 +201,7 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
         fetchFn,
         getAccessToken: m365Auth.getAccessToken.bind(m365Auth),
         logPort,
+        ...adapterSleep(runtime),
       }),
     },
     gmail: {

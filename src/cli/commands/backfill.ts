@@ -55,6 +55,8 @@ export interface BackfillRuntime {
   modelConfig?: ModelConfig;
   /** Model adapter seam; injectable so a test never reaches a provider SDK or the network. */
   model?: Parameters<typeof runBackfillAccounts>[0]["model"];
+  /** Story 9.1's adapter backoff seam, threaded into the adapters; injectable so tests never really wait. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** The part of a per-account listing this command reads; both providers return one. */
@@ -170,6 +172,7 @@ export async function runBackfill(
         fetchFn,
         getAccessToken: m365Auth.getAccessToken.bind(m365Auth),
         logPort,
+        ...(runtime.sleep === undefined ? {} : { sleep: runtime.sleep }),
       }),
     },
     gmail: {
@@ -189,6 +192,7 @@ export async function runBackfill(
         fetchFn,
         getAccessToken: gmailAuth.getAccessToken.bind(gmailAuth),
         logPort,
+        ...(runtime.sleep === undefined ? {} : { sleep: runtime.sleep }),
       }),
     },
   };

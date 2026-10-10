@@ -15,6 +15,11 @@ const SLOW_DOWN_INCREMENT_MS = 5_000;
 export interface FetchResponseLike {
   ok: boolean;
   status: number;
+  /**
+   * Story 9.1: the throttling backoff reads `Retry-After` here. A real `Response` always
+   * supplies it; a JSON-only test double may omit it, which is exactly "no header".
+   */
+  headers?: { get(name: string): string | null };
   json(): Promise<unknown>;
 }
 
