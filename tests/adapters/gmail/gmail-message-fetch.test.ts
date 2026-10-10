@@ -54,6 +54,9 @@ test("lists one page and hydrates it through one batch POST (HAPPY, BATCH_GET)",
   const messages = await adapter.fetchMessages({ source: "gmail", accountId: "personal" });
 
   expect(messages.map((message) => message.id)).toEqual(["m1", "m2"]);
+  // Every fetched message carries a distinct, non-empty identity — the header the batch request
+  // asked for, which is what Story 8.2's pre-classify lookup keys on.
+  expect(messages.map((message) => message.internetMessageId)).toEqual(["<m1@example.com>", "<m2@example.com>"]);
   expect(requests).toHaveLength(2);
   // The list GET scopes to INBOX, caps at the default 50, is Bearer-bound and bounded.
   expect(requests[0]?.method).toBe("GET");
@@ -66,10 +69,10 @@ test("lists one page and hydrates it through one batch POST (HAPPY, BATCH_GET)",
   expect(requests[1]?.url).toBe(BATCH_URL);
   expect(requests[1]?.headers["content-type"]).toBe(`multipart/mixed; boundary=${BATCH_BOUNDARY}`);
   expect(requests[1]?.rawBody).toContain(
-    "GET /gmail/v1/users/me/messages/m1?format=metadata&metadataHeaders=From,Subject",
+    "GET /gmail/v1/users/me/messages/m1?format=metadata&metadataHeaders=From,Subject,Message-ID",
   );
   expect(requests[1]?.rawBody).toContain(
-    "GET /gmail/v1/users/me/messages/m2?format=metadata&metadataHeaders=From,Subject",
+    "GET /gmail/v1/users/me/messages/m2?format=metadata&metadataHeaders=From,Subject,Message-ID",
   );
   // The exact multipart frame: a delimiter line, an application/http part with a Content-ID, and a
   // request line carrying HTTP/1.1 — a frame Gmail would reject must fail this assertion.
@@ -78,13 +81,13 @@ test("lists one page and hydrates it through one batch POST (HAPPY, BATCH_GET)",
       `Content-Type: application/http\r\n` +
       `Content-ID: <message-1>\r\n` +
       `\r\n` +
-      `GET /gmail/v1/users/me/messages/m1?format=metadata&metadataHeaders=From,Subject HTTP/1.1\r\n` +
+      `GET /gmail/v1/users/me/messages/m1?format=metadata&metadataHeaders=From,Subject,Message-ID HTTP/1.1\r\n` +
       `\r\n` +
       `--${BATCH_BOUNDARY}\r\n` +
       `Content-Type: application/http\r\n` +
       `Content-ID: <message-2>\r\n` +
       `\r\n` +
-      `GET /gmail/v1/users/me/messages/m2?format=metadata&metadataHeaders=From,Subject HTTP/1.1\r\n` +
+      `GET /gmail/v1/users/me/messages/m2?format=metadata&metadataHeaders=From,Subject,Message-ID HTTP/1.1\r\n` +
       `\r\n` +
       `--${BATCH_BOUNDARY}--\r\n`,
   );

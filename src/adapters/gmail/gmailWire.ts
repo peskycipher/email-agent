@@ -194,7 +194,9 @@ export async function send(
 
 /**
  * The batch request body: one `application/http` part per message id, each a metadata GET
- * for exactly the fields the mapper reads. The closing delimiter terminates the body.
+ * for exactly the fields the mapper reads. `Message-ID` is the RFC header the mapper takes the
+ * message's identity from — Gmail's `Message` resource has no top-level `internetMessageId`.
+ * The closing delimiter terminates the body.
  */
 export function batchRequestBody(ids: string[]): string {
   const parts = ids.map(
@@ -203,7 +205,7 @@ export function batchRequestBody(ids: string[]): string {
       `Content-Type: application/http\r\n` +
       `Content-ID: <message-${index + 1}>\r\n` +
       `\r\n` +
-      `GET /gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From,Subject HTTP/1.1\r\n`,
+      `GET /gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From,Subject,Message-ID HTTP/1.1\r\n`,
   );
   // The parts already end in CRLF; `join` adds the blank line multipart requires before each delimiter.
   parts.push(`--${BATCH_BOUNDARY}--`);

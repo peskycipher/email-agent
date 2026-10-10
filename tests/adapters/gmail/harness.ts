@@ -114,12 +114,15 @@ export interface MultipartTestResponse extends FetchResponseLike {
   text(): Promise<string>;
 }
 
-/** One `format=metadata` detail as the batch parser sees it. */
+/**
+ * One `format=metadata` detail as the batch parser sees it. The message identity is the RFC
+ * `Message-ID` header — Gmail's `Message` resource has no top-level `internetMessageId`, and the
+ * batch request asks for `Message-ID` for exactly this reason (Story 8.2).
+ */
 export function gmailDetail(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id,
     threadId: id,
-    internetMessageId: `<${id}@example.com>`,
     labelIds: ["INBOX"],
     snippet: `Preview ${id}`,
     internalDate: "1759999999000",
@@ -127,6 +130,7 @@ export function gmailDetail(id: string, overrides: Record<string, unknown> = {})
       headers: [
         { name: "From", value: `Sender ${id} <${id}@example.com>` },
         { name: "Subject", value: `Subject ${id}` },
+        { name: "Message-ID", value: `<${id}@example.com>` },
       ],
     },
     ...overrides,

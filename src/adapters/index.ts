@@ -92,3 +92,10 @@ export {
   StateFileError,
 } from "./config/stateFile.js";
 export type { AccountState, StateFileErrorCode, StateFileOptions } from "./config/stateFile.js";
+
+export { IdempotencyStore, IdempotencyStoreError } from "./idempotency/sqliteIdempotencyStore.js";
+export type { IdempotencyStoreErrorCode, IdempotencyStoreOptions } from "./idempotency/sqliteIdempotencyStore.js";
+export { idempotencyKey } from "./idempotency/key.js";
+
+export { acquireRunLock, releaseRunLock, runLockPath, RunLockError } from "./lock/runLock.js";
+export type { RunLockErrorCode, RunLockOptions } from "./lock/runLock.js";

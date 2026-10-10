@@ -195,8 +195,9 @@ export async function readAccountState(accountName: string, options: StateFileOp
  * overwritten. Always writes the per-provider namespaced file (EC2) — the legacy
  * `state/<name>.json` is never written again.
  *
- * ponytail: no lock around this read-merge-write — no concurrent runner exists until Story 8.3
- * owns one; the upgrade path is a lock file held around a cycle (Epic 8/9).
+ * ponytail: no lock inside this read-merge-write — Story 8.2's process lock serialises whole
+ * `--backfill` and `--cron` runs around it; `--auth` and `--sync-categories` stay lock-free and
+ * never race a run's state.
  */
 async function writeMergedState(
   accountName: string,

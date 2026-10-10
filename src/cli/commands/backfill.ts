@@ -14,6 +14,8 @@ import { M365Adapter } from "../../adapters/m365/M365Adapter.js";
 import { M365AuthAdapter, type FetchLike } from "../../adapters/m365/M365AuthAdapter.js";
 import { KeychainTokenStore } from "../../adapters/token/KeychainTokenStore.js";
 import { loadTaxonomy } from "../../adapters/config/taxonomy.js";
+import { IdempotencyStore } from "../../adapters/idempotency/sqliteIdempotencyStore.js";
+import { acquireRunLock, releaseRunLock, type RunLockOptions } from "../../adapters/lock/runLock.js";
 import { createModelAdapter, defaultModelClientFactories, DEFAULT_MODEL_CONFIG } from "../../adapters/model/modelAdapterFactory.js";
 import type { ModelConfig } from "../../core/dto/ModelConfig.js";
 import type { Taxonomy } from "../../core/dto/Taxonomy.js";
@@ -88,12 +90,27 @@ function noAccountsHint(plan: BackfillProviderPlan, account: string): string {
 }
 
 /**
+ * Releases the run lock, reporting a failure as one line without changing the run's exit code:
+ * the stale-pid rule frees the file on the next run either way. Duplicated in `cron.ts`, which
+ * takes the same lock.
+ */
+function releaseLock(options: RunLockOptions): void {
+  try {
+    releaseRunLock(options);
+  } catch (error) {
+    process.stderr.write(`${errorLine(error)}\n`);
+  }
+}
+
+/**
  * The one-shot backfill: `--backfill --source <m365|gmail> --account <name|all>`, optionally
  * bounded by `--since` and `--batch-size`. Lists the enabled accounts for the requested
- * provider, then for each account fetches its messages, classifies every one against the
- * merged taxonomy and writes the resulting labels back through `MailPort.writeLabels`
- * (Story 8.1). Accounts are processed sequentially and independently; the failure count maps
- * to the exit code. Nothing is persisted yet — resume is Story 8.2's.
+ * provider, then for each account fetches its messages, classifies every message the idempotency
+ * store does not already record against the merged taxonomy, and writes the resulting labels back
+ * through `MailPort.writeLabels` (Stories 8.1/8.2). Accounts are processed sequentially and
+ * independently; the failure count maps to the exit code. `--backfill` and `--cron` take the one
+ * process lock, and completed messages are recorded in the one shared idempotency store, so a
+ * killed run resumes instead of redoing its work.
  */
 export async function runBackfill(
   options: BackfillCommandOptions,
@@ -199,6 +216,25 @@ export async function runBackfill(
     return 1;
   }
 
+  // The lock and the store are taken only once this invocation is known to have accounts to run
+  // (Story 8.2): a rejected selection reports its own hint rather than a busy lock, and a typo'd
+  // account name never leaves an empty `idempotency.db` behind.
+  const lock: RunLockOptions = { ...configDir, pid: process.pid };
+  try {
+    acquireRunLock(lock);
+  } catch (error) {
+    process.stderr.write(`${errorLine(error)}\n`);
+    return 1;
+  }
+  let store: IdempotencyStore;
+  try {
+    store = new IdempotencyStore(configDir);
+  } catch (error) {
+    process.stderr.write(`${errorLine(error)}\n`);
+    releaseLock(lock);
+    return 1;
+  }
+
   // The command-level flags are the same for every account: `--batch-size` is folded in first so
   // an account's own settings file still wins, and `--since` bounds every account's walk.
   const accounts = selected.map((entry) => {
@@ -209,15 +245,23 @@ export async function runBackfill(
       ...(options.since === undefined ? {} : { since: options.since }),
     };
   });
-  const result: BackfillResult = await runBackfillAccounts({
-    accounts,
-    mailPort: plan.port,
-    taxonomy,
-    model,
-    config: modelConfig,
-    logPort,
-    source: plan.provider,
-  });
+  let result: BackfillResult;
+  try {
+    result = await runBackfillAccounts({
+      accounts,
+      store,
+      mailPort: plan.port,
+      taxonomy,
+      model,
+      config: modelConfig,
+      logPort,
+      source: plan.provider,
+    });
+  } finally {
+    // The lock covers the store and the per-account state files; every exit path releases it.
+    store.close();
+    releaseLock(lock);
+  }
 
   const total = selected.length + relevantErrors.length;
   const totalFailures = result.failures + relevantErrors.length;
@@ -228,7 +272,7 @@ export async function runBackfill(
   // is already reported on stderr, and claiming it here would read as if it had fetched something.
   process.stdout.write(
     `Fetched ${result.fetched} message(s) from ${selected.length - result.failures} account(s): ` +
-      `${result.labeled} labeled, ${result.skipped} skipped, ${result.errors} error(s).\n`,
+      `${result.labeled} labeled, ${result.skipped} skipped, ${result.alreadyDone} already done, ${result.errors} error(s).\n`,
   );
   return totalFailures > 0 || result.errors > 0 ? 1 : 0;
 }

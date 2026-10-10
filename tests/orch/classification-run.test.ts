@@ -5,7 +5,7 @@ import type { ModelConfig } from "../../src/core/dto/ModelConfig.js";
 import type { Taxonomy } from "../../src/core/dto/Taxonomy.js";
 import type { LogContext, LogPort } from "../../src/core/ports/LogPort.js";
 import type { ModelPort } from "../../src/core/ports/ModelPort.js";
-import { runBackfillAccounts, type BackfillAccount, type LabelWriteTarget } from "../../src/orch/classification-run.js";
+import { runBackfillAccounts, type BackfillAccount, type ClassificationRecordStore, type LabelWriteTarget } from "../../src/orch/classification-run.js";
 import type { MessageFetchTarget } from "../../src/orch/fetch.js";
 
 const TAXONOMY: Taxonomy = [
@@ -103,6 +103,36 @@ function portDouble(options: {
   };
 }
 
+/**
+ * A `ClassificationRecordStore` double over a plain map: the pre-classify lookup answers for a
+ * recorded pair, `record` stores one. `failRead`/`failWrite` make one call throw, so the loop's
+ * isolation of a store failure is observable rather than inferred.
+ */
+function storeDouble(seed: Array<{ accountId: string; internetMessageId: string }> = [], options: {
+  failRead?: boolean;
+  failWrite?: boolean;
+} = {}): {
+  store: ClassificationRecordStore;
+  records: Array<{ accountId: string; internetMessageId: string; labels: string[] }>;
+} {
+  const pairs = new Set(seed.map((pair) => `${pair.accountId}|${pair.internetMessageId}`));
+  const records: Array<{ accountId: string; internetMessageId: string; labels: string[] }> = [];
+  return {
+    records,
+    store: {
+      async labelsFor(accountId: string, internetMessageId: string): Promise<string[] | undefined> {
+        if (options.failRead === true) throw new Error("store read exploded");
+        return pairs.has(`${accountId}|${internetMessageId}`) ? ["Crypto"] : undefined;
+      },
+      async record(accountId: string, internetMessageId: string, labels: string[]): Promise<void> {
+        if (options.failWrite === true) throw new Error("store write exploded");
+        pairs.add(`${accountId}|${internetMessageId}`);
+        records.push({ accountId, internetMessageId, labels });
+      },
+    },
+  };
+}
+
 const ACCOUNT: BackfillAccount = { accountId: "acc-1", folders: ["Inbox"] };
 
 function run(
@@ -110,8 +140,18 @@ function run(
   port: MessageFetchTarget & LabelWriteTarget,
   model: ModelPort,
   logPort: LogPort,
+  store: ClassificationRecordStore = storeDouble().store,
 ) {
-  return runBackfillAccounts({ accounts, mailPort: port, taxonomy: TAXONOMY, model, config: CONFIG, logPort, source: "m365" });
+  return runBackfillAccounts({
+    accounts,
+    store,
+    mailPort: port,
+    taxonomy: TAXONOMY,
+    model,
+    config: CONFIG,
+    logPort,
+    source: "m365",
+  });
 }
 
 test("classifies and writes each fetched message (HAPPY_PATH)", async () => {
@@ -125,12 +165,20 @@ test("classifies and writes each fetched message (HAPPY_PATH)", async () => {
     },
   });
   const { logPort } = recordingLogPort();
+  const { store, records } = storeDouble();
   const model = modelDouble({ Crypto: ["Crypto"] });
-  const result = await run([ACCOUNT], port, model, logPort);
+  const result = await run([ACCOUNT], port, model, logPort, store);
   expect(result.fetched).toBe(3);
   expect(result.labeled).toBe(3);
   expect(result.skipped).toBe(0);
+  expect(result.alreadyDone).toBe(0);
   expect(result.failures).toBe(0);
+  // Each finished message is recorded once, under the pair the next run looks up.
+  expect(records).toEqual([
+    { accountId: "acc-1", internetMessageId: "m1@example.com", labels: ["Crypto"] },
+    { accountId: "acc-1", internetMessageId: "m2@example.com", labels: ["Crypto"] },
+    { accountId: "acc-1", internetMessageId: "m3@example.com", labels: ["Crypto"] },
+  ]);
   expect(writes).toEqual([
     { accountId: "acc-1", messageId: "m1", labels: ["Crypto"] },
     { accountId: "acc-1", messageId: "m2", labels: ["Crypto"] },
@@ -138,10 +186,156 @@ test("classifies and writes each fetched message (HAPPY_PATH)", async () => {
   ]);
 });
 
+test("an empty label set writes nothing, records the empty outcome, and counts as skipped (EMPTY_LABEL_SET, NO_WRITE_ALSO_RECORDED)", async () => {
+  const { port, writes } = portDouble({
+    messagesByFolder: { Inbox: [messageWithSubject("m1", "acc-1", "Unmatched")] },
+  });
+  const { logPort } = recordingLogPort();
+  const { store, records } = storeDouble();
+  const result = await run([ACCOUNT], port, modelDouble({ Unmatched: [] }), logPort, store);
+  expect(writes).toHaveLength(0);
+  expect(result.skipped).toBe(1);
+  expect(result.labeled).toBe(0);
+  expect(result.errors).toBe(0);
+  // The empty outcome is durable: the next run counts the message already done, not skipped again.
+  expect(records).toEqual([{ accountId: "acc-1", internetMessageId: "m1@example.com", labels: [] }]);
+});
+
+test("a recorded message is skipped before any classify call and no write is attempted (ALREADY_DONE)", async () => {
+  const { port, writes } = portDouble({
+    messagesByFolder: {
+      Inbox: [messageWithSubject("m1", "acc-1", "Crypto"), messageWithSubject("m2", "acc-1", "Crypto")],
+    },
+  });
+  const { logPort } = recordingLogPort();
+  const { store } = storeDouble([{ accountId: "acc-1", internetMessageId: "m1@example.com" }]);
+  const model = modelDouble({ Crypto: ["Crypto"] });
+  let classified = 0;
+  const counting: ModelPort = {
+    async complete(prompt): Promise<unknown> {
+      classified += 1;
+      return model.complete(prompt);
+    },
+  };
+
+  const result = await run([ACCOUNT], port, counting, logPort, store);
+
+  expect(classified).toBe(1);
+  expect(result.alreadyDone).toBe(1);
+  expect(result.labeled).toBe(1);
+  expect(result.skipped).toBe(0);
+  expect(result.errors).toBe(0);
+  expect(writes).toEqual([{ accountId: "acc-1", messageId: "m2", labels: ["Crypto"] }]);
+});
+
+test("a record under an older taxonomy still reads as already done (STALE_TAXONOMY)", async () => {
+  const { port, writes } = portDouble({
+    messagesByFolder: { Inbox: [messageWithSubject("m1", "acc-1", "Crypto")] },
+  });
+  const { logPort, entries } = recordingLogPort();
+  // The row was written by an earlier run; the record is keyed by message, not by taxonomy version.
+  const { store } = storeDouble([{ accountId: "acc-1", internetMessageId: "m1@example.com" }]);
+
+  const result = await run([ACCOUNT], port, modelDouble({ Crypto: ["Crypto"] }), logPort, store);
+
+  expect(result.alreadyDone).toBe(1);
+  expect(result.labeled).toBe(0);
+  expect(writes).toHaveLength(0);
+  expect(entries.some((entry) => entry.level === "error")).toBe(false);
+});
+
+test("a failed classification or write records nothing, so the next run retries it (FAILED_NOT_RECORDED)", async () => {
+  const { port } = portDouble({
+    messagesByFolder: { Inbox: [messageWithSubject("m1", "acc-1", "Crypto")] },
+    writeError: "write exploded",
+  });
+  const { logPort } = recordingLogPort();
+  const { store, records } = storeDouble();
+
+  const writeFailed = await run([ACCOUNT], port, modelDouble({ Crypto: ["Crypto"] }), logPort, store);
+  const rejectPort = portDouble({ messagesByFolder: { Inbox: [messageWithSubject("m1", "acc-1", "Crypto")] } });
+  const { store: rejectStore, records: rejectRecords } = storeDouble();
+  const classifyRejected = await run(
+    [ACCOUNT],
+    rejectPort.port,
+    modelDouble({}, { reject: true }),
+    logPort,
+    rejectStore,
+  );
+
+  expect(writeFailed.errors).toBe(1);
+  expect(classifyRejected.errors).toBe(1);
+  expect(records).toHaveLength(0);
+  expect(rejectRecords).toHaveLength(0);
+});
+
+test("a record failure after a landed write is an error and the account's remaining messages continue (STORE_WRITE_FAILS)", async () => {
+  const { port, writes } = portDouble({
+    messagesByFolder: {
+      Inbox: [messageWithSubject("m1", "acc-1", "Crypto"), messageWithSubject("m2", "acc-1", "Crypto")],
+    },
+  });
+  const { logPort, entries } = recordingLogPort();
+  const { store } = storeDouble([], { failWrite: true });
+
+  const result = await run([ACCOUNT], port, modelDouble({ Crypto: ["Crypto"] }), logPort, store);
+
+  // Both writes landed, and both record attempts failed: counted as errors, never as labeled, so
+  // `fetched = labeled + skipped + alreadyDone + errors` still partitions the two messages.
+  expect(writes).toHaveLength(2);
+  expect(result.errors).toBe(2);
+  expect(result.labeled).toBe(0);
+  expect(result.alreadyDone).toBe(0);
+  expect(result.labeled + result.skipped + result.alreadyDone + result.errors).toBe(result.fetched);
+  expect(entries.some((entry) => entry.level === "error" && entry.context?.messageId === "m1")).toBe(true);
+});
+
+test("a store read failure is that message's error and the account's remaining messages continue (STORE_READ_FAILS)", async () => {
+  const { port, writes } = portDouble({
+    messagesByFolder: {
+      Inbox: [messageWithSubject("m1", "acc-1", "Crypto"), messageWithSubject("m2", "acc-1", "Crypto")],
+    },
+  });
+  const { logPort, entries } = recordingLogPort();
+  const { store } = storeDouble([], { failRead: true });
+
+  const result = await run([ACCOUNT], port, modelDouble({ Crypto: ["Crypto"] }), logPort, store);
+
+  expect(result.errors).toBe(2);
+  expect(result.labeled).toBe(0);
+  expect(result.failures).toBe(0);
+  expect(writes).toHaveLength(0);
+  expect(entries.filter((entry) => entry.level === "error")).toHaveLength(2);
+});
+
+test("an empty internetMessageId is never looked up and never recorded, so two such messages never collapse (EMPTY_IDENTITY)", async () => {
+  const blank = (id: string): MessageDTO => ({ ...messageWithSubject(id, "acc-1", "Crypto"), internetMessageId: "" });
+  const { port, writes } = portDouble({ messagesByFolder: { Inbox: [blank("m1"), blank("m2")] } });
+  const { logPort } = recordingLogPort();
+  const { store, records } = storeDouble();
+  let classified = 0;
+
+  const model: ModelPort = {
+    async complete(): Promise<unknown> {
+      classified += 1;
+      return { labels: ["Crypto"] };
+    },
+  };
+  const result = await run([ACCOUNT], port, model, logPort, store);
+
+  // Both are classified and written — neither is mistaken for the other — and neither is recorded.
+  expect(classified).toBe(2);
+  expect(writes).toHaveLength(2);
+  expect(records).toHaveLength(0);
+  expect(result.labeled).toBe(2);
+  expect(result.errors).toBe(0);
+});
+
 test("an account with no messages classifies and writes nothing (EMPTY_ACCOUNT)", async () => {
   const { port, writes } = portDouble({ messagesByFolder: { Inbox: [] } });
   const { logPort } = recordingLogPort();
-  const result = await run([ACCOUNT], port, modelDouble({}), logPort);
+  const { store } = storeDouble();
+  const result = await run([ACCOUNT], port, modelDouble({}), logPort, store);
   expect(result.fetched).toBe(0);
   expect(result.labeled).toBe(0);
   expect(result.errors).toBe(0);
@@ -236,7 +430,7 @@ test("applies the run's since bound to the fetch (SINCE)", async () => {
   expect(fetches[0]?.since).toEqual(since);
 });
 
-test("counts the four counters so processed equals labeled plus skipped (COUNTERS)", async () => {
+test("counts the five counters so fetched partitions and processed is labeled plus skipped (COUNTERS)", async () => {
   const { port } = portDouble({
     messagesByFolder: {
       Inbox: [
@@ -247,11 +441,14 @@ test("counts the four counters so processed equals labeled plus skipped (COUNTER
     },
   });
   const { logPort } = recordingLogPort();
-  const result = await run([ACCOUNT], port, modelDouble({ Crypto: ["Crypto"], Unmatched: [] }), logPort);
+  const { store } = storeDouble([{ accountId: "acc-1", internetMessageId: "m4@example.com" }]);
+  const result = await run([ACCOUNT], port, modelDouble({ Crypto: ["Crypto"], Unmatched: [] }), logPort, store);
   expect(result.labeled).toBe(2);
   expect(result.skipped).toBe(1);
+  expect(result.alreadyDone).toBe(0);
   expect(result.errors).toBe(0);
   expect(result.labeled + result.skipped).toBe(3);
+  expect(result.labeled + result.skipped + result.alreadyDone + result.errors).toBe(result.fetched);
 });
 
 test("a partial folder failure counts only accounts that fetched cleanly (PARTIAL_FOLDER)", async () => {

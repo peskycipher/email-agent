@@ -15,14 +15,32 @@ export interface LabelWriteTarget {
   writeLabels(accountId: string, messageId: string, labels: string[]): Promise<void>;
 }
 
+/**
+ * The idempotency seam the loop needs (AD-10): the pre-classify lookup and the post-write record,
+ * both on the store's `(accountId, internetMessageId)` pair. The store adapter implements it; the
+ * loop never sees the AC's hash or SQLite.
+ */
+export interface ClassificationRecordStore {
+  /** The labels recorded for the pair, or `undefined` when the message was never completed. */
+  labelsFor(accountId: string, internetMessageId: string): Promise<string[] | undefined>;
+  /** Records a completed message — its labels, or an empty set — so a re-run skips it. */
+  record(accountId: string, internetMessageId: string, labels: string[]): Promise<void>;
+}
+
 /** One account's backfill plan: the same fetch bounds the fetch loop takes, plus nothing new. */
 export type BackfillAccount = FetchAccount;
 
-/** The per-account counters the AC names; `processed = labeled + skipped`, with `errors` counted apart. */
+/**
+ * The per-account counters the AC names. `processed = labeled + skipped` keeps 8.1's meaning — an
+ * already-recorded message is never classified — so the full partition of what was fetched is
+ * `fetched = labeled + skipped + alreadyDone + errors`.
+ */
 export interface AccountProgress {
   processed: number;
   labeled: number;
   skipped: number;
+  /** Messages the store already recorded, skipped before any classify call (Story 8.2). */
+  alreadyDone: number;
   errors: number;
 }
 
@@ -30,6 +48,8 @@ export interface BackfillOptions {
   accounts: BackfillAccount[];
   /** The fetch + write seam: one object carrying the two `MailPort` methods this loop needs. */
   mailPort: MessageFetchTarget & LabelWriteTarget;
+  /** The durable per-message record; a resumed run skips what it already holds (Story 8.2). */
+  store: ClassificationRecordStore;
   /** The active (merged, frozen) taxonomy every message is classified against. */
   taxonomy: Taxonomy;
   /** The configured model adapter; one `complete` call per attempt, owned by `classify`. */
@@ -42,13 +62,15 @@ export interface BackfillOptions {
 }
 
 export interface BackfillResult {
-  /** Messages fetched and then classified, across accounts that fetched cleanly. */
+  /** Messages fetched across accounts that fetched cleanly; `fetched = labeled + skipped + alreadyDone + errors`. */
   fetched: number;
   /** Messages classified and labelled, across every account. */
   labeled: number;
   /** Messages the classifier emptied — processed without a write (the "skipped" counter). */
   skipped: number;
-  /** Messages whose classification or write failed; each was logged and did not stop the run. */
+  /** Messages the store already recorded; they were never classified this run. */
+  alreadyDone: number;
+  /** Messages whose lookup, classification, write or record failed; each was logged and did not stop the run. */
   errors: number;
   /** Accounts whose fetch failed outright; they are reported on stderr by the caller. */
   failures: number;
@@ -61,27 +83,29 @@ function errorLine(error: unknown): string {
 
 function logProgress(progress: AccountProgress, accountId: string, logPort: LogPort): void {
   logPort.info(
-    `Processed ${progress.processed} message(s): ${progress.labeled} labeled, ${progress.skipped} skipped, ${progress.errors} error(s).`,
+    `Processed ${progress.processed} message(s): ${progress.labeled} labeled, ${progress.skipped} skipped, ` +
+      `${progress.alreadyDone} already done, ${progress.errors} error(s).`,
     { accountId },
   );
 }
 
 /**
- * One account's fetch, then per-message classify → write. The fetch walks the account's
- * folders with the same `DEFAULT_FOLDERS`/`DEFAULT_BATCH_SIZE` defaults the fetch loop uses,
- * and — like that loop — one folder's failure does not stop the account's other folders. Every
- * fetched message is then classified and written individually: a single message's
- * classification rejection or write failure is logged with that message's id and never stops
- * the account's remaining messages.
+ * One account's fetch, then per-message lookup → classify → write → record. The fetch walks the
+ * account's folders with the same `DEFAULT_FOLDERS`/`DEFAULT_BATCH_SIZE` defaults the fetch loop
+ * uses, and — like that loop — one folder's failure does not stop the account's other folders.
+ * Every fetched message is then resolved individually: one already recorded in the store is
+ * skipped before any classify call, and a single message's lookup, classification, write or
+ * record failure is logged with that message's id and never stops the account's remaining
+ * messages.
  */
 async function runAccount(
   account: BackfillAccount,
   options: BackfillOptions,
   logPort: LogPort,
 ): Promise<{ progress: AccountProgress; fetched: number; failed: boolean }> {
-  const { mailPort, taxonomy, model, config, source = "m365" } = options;
+  const { mailPort, store, taxonomy, model, config, source = "m365" } = options;
   const accountId = account.accountId;
-  const progress: AccountProgress = { processed: 0, labeled: 0, skipped: 0, errors: 0 };
+  const progress: AccountProgress = { processed: 0, labeled: 0, skipped: 0, alreadyDone: 0, errors: 0 };
   // An empty list is not "walk nothing" — it is a plan that never set folders, so it takes the default.
   const folders = account.folders === undefined || account.folders.length === 0 ? DEFAULT_FOLDERS : account.folders;
   const batchSize = account.batchSize ?? DEFAULT_BATCH_SIZE;
@@ -112,6 +136,26 @@ async function runAccount(
 
   const context = { accountId };
   for (const message of messages) {
+    // An empty identity can never key a record: every such message would collapse onto the one
+    // `(accountId, "")` pair. It is therefore never looked up and never recorded — the message is
+    // simply classified again on the next run, which is the safe half of that trade.
+    const identity = message.internetMessageId;
+    if (identity.length > 0) {
+      let recorded: string[] | undefined;
+      try {
+        recorded = await store.labelsFor(accountId, identity);
+      } catch (error) {
+        // A read failure is this message's error; the account's remaining messages still run.
+        progress.errors += 1;
+        logPort.error(errorLine(error), { accountId, messageId: message.id });
+        continue;
+      }
+      if (recorded !== undefined) {
+        // Already recorded: no classify call, no write — the pre-classify skip the AC names.
+        progress.alreadyDone += 1;
+        continue;
+      }
+    }
     let labels: LabelSet;
     try {
       labels = await classify({ message, taxonomy, model, config, logPort, context });
@@ -120,21 +164,30 @@ async function runAccount(
       logPort.error(errorLine(error), { accountId, messageId: message.id });
       continue;
     }
-    if (labels.labels.length === 0) {
-      // An empty set is a valid classification — no write is attempted, and the message is
-      // counted as skipped, so the counters partition as processed = labeled + skipped.
-      progress.skipped += 1;
-      progress.processed += 1;
-    } else {
+    if (labels.labels.length > 0) {
       try {
         await mailPort.writeLabels(accountId, message.id, labels.labels);
-        progress.labeled += 1;
-        progress.processed += 1;
       } catch (error) {
         progress.errors += 1;
         logPort.error(errorLine(error), { accountId, messageId: message.id });
+        continue;
       }
     }
+    // The outcome — labels or the empty set — is recorded only once the write it describes landed.
+    // A failure here records nothing, so the next run retries the message; its add-only write is
+    // safe to repeat.
+    try {
+      if (identity.length > 0) await store.record(accountId, identity, labels.labels);
+    } catch (error) {
+      progress.errors += 1;
+      logPort.error(errorLine(error), { accountId, messageId: message.id });
+      continue;
+    }
+    // An empty set is a valid classification — no write was attempted; both outcomes count as
+    // processed, so the counters partition as processed = labeled + skipped.
+    if (labels.labels.length === 0) progress.skipped += 1;
+    else progress.labeled += 1;
+    progress.processed += 1;
     if (progress.processed % PROGRESS_INTERVAL === 0) logProgress(progress, accountId, logPort);
   }
   return { progress, fetched: messages.length, failed: false };
@@ -142,13 +195,13 @@ async function runAccount(
 
 /**
  * Runs a one-shot backfill across every account, sequentially and independently: each
- * account fetches, classifies and writes its own messages, and one account's failure is
- * logged with its `accountId` and never aborts the others (Epic 8's isolation rule). Returns
- * the run's totals so the caller can report them and set an exit code.
+ * account fetches, then classifies, writes and records its own messages, and one account's
+ * failure is logged with its `accountId` and never aborts the others (Epic 8's isolation rule).
+ * Returns the run's totals so the caller can report them and set an exit code.
  */
 export async function runBackfillAccounts(options: BackfillOptions): Promise<BackfillResult> {
   const { accounts, logPort } = options;
-  const result: BackfillResult = { fetched: 0, labeled: 0, skipped: 0, errors: 0, failures: 0 };
+  const result: BackfillResult = { fetched: 0, labeled: 0, skipped: 0, alreadyDone: 0, errors: 0, failures: 0 };
   for (const account of accounts) {
     const accountId = account.accountId;
     let outcome: Awaited<ReturnType<typeof runAccount>>;
@@ -168,6 +221,7 @@ export async function runBackfillAccounts(options: BackfillOptions): Promise<Bac
     result.fetched += outcome.fetched;
     result.labeled += outcome.progress.labeled;
     result.skipped += outcome.progress.skipped;
+    result.alreadyDone += outcome.progress.alreadyDone;
     result.errors += outcome.progress.errors;
     // The final line must not duplicate a `PROGRESS_INTERVAL` line; an empty account still needs its own zero-progress report.
     if (outcome.progress.processed === 0 || outcome.progress.processed % PROGRESS_INTERVAL !== 0) {

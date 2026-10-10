@@ -116,6 +116,11 @@ test("createProgram pins the program name, every flag description and all thirte
   program.outputHelp();
 
   expect(capturedLines(stdout).join("")).toContain(EXAMPLES_BLOCK);
+  // The durable state a run leaves behind is user-facing: the lock it takes and the store a
+  // resumed run reads (Story 8.2).
+  const help = capturedLines(stdout).join("");
+  expect(help).toContain("~/.config/email-classify/run.lock");
+  expect(help).toContain("~/.config/email-classify/idempotency.db");
 });
 
 test("--auth gmail --account work calls runAuth and exits 0 (AUTH)", async () => {

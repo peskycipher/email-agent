@@ -70,6 +70,10 @@ function parseSender(value: string): { email: string; name: string } {
  * Maps one Gmail message (a `format=metadata` detail) onto the canonical `MessageDTO`.
  * This is the one place Gmail's payload shape is known (Story 5.3): the read is total —
  * a missing or mistyped field degrades to `""`/`[]`, never throws, and never drops a message.
+ *
+ * The identity comes from the `Message-ID` header, which `batchRequestBody` asks for: the
+ * `Message` resource has no top-level `internetMessageId`, so reading one there yields `""` for
+ * every message (the trap Story 8.2's pre-classify lookup repairs).
  */
 export function mapGmailMessage(entry: unknown, accountId: string): MessageDTO {
   const labelIds = readLabelIds(entry);
@@ -77,7 +81,7 @@ export function mapGmailMessage(entry: unknown, accountId: string): MessageDTO {
   const sender = parseSender(headers.get("from") ?? "");
   return {
     id: readString(entry, "id"),
-    internetMessageId: readString(entry, "internetMessageId"),
+    internetMessageId: headers.get("message-id") ?? "",
     subject: headers.get("subject") ?? "",
     bodyPreview: readString(entry, "snippet"),
     senderEmail: sender.email,
