@@ -254,7 +254,7 @@ test("counts the four counters so processed equals labeled plus skipped (COUNTER
   expect(result.labeled + result.skipped).toBe(3);
 });
 
-test("a partial folder failure still classifies the messages it successfully fetched (PARTIAL_FOLDER)", async () => {
+test("a partial folder failure counts only accounts that fetched cleanly (PARTIAL_FOLDER)", async () => {
   const calls: string[] = [];
   const writes: Array<{ accountId: string; messageId: string; labels: string[] }> = [];
   const port: MessageFetchTarget & LabelWriteTarget = {

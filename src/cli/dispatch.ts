@@ -67,9 +67,10 @@ function resolveBackfill(options: CliOptions): CliCommand {
 /** `undefined` when unset; `null` when set but unparseable, so the caller can name the bad value. */
 function parseSince(raw: string | undefined): Date | undefined | null {
   if (raw === undefined) return undefined;
-  if (!/^\d{4}-\d{2}-\d{2}/.test(raw.trim())) return null;
-  const date = new Date(raw);
-  return Number.isNaN(date.getTime()) ? null : date;
+  const value = raw.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? null : date;
 }
 
 /** `undefined` when unset; `null` when set but not a positive integer. The ceiling stays the adapter's. */

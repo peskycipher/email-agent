@@ -182,6 +182,11 @@ test("--since rejects a non-ISO value", () => {
   expect(nonIso.kind).toBe("error");
 });
 
+test("--since rejects a nonexistent calendar date", () => {
+  const command = resolveCliCommand({ backfill: true, since: "2026-02-30" });
+  expect(command.kind).toBe("error");
+});
+
 test("--batch-size rejects a non-integer and non-positive value", () => {
   const command = resolveCliCommand({ backfill: true, batchSize: "abc" });
   expect(command.kind).toBe("error");

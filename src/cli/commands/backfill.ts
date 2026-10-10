@@ -35,7 +35,7 @@ export interface BackfillCommandOptions {
   source: "m365" | "gmail";
   /** A per-account settings name, or "all" for every enabled account of that provider. */
   account: string;
-  /** Messages received after this instant are the only ones fetched; absent means all time (Story 8.2's AC default). */
+  /** Messages received on or after this instant are the only ones fetched; absent means all time (Story 8.1's AC default). */
   since?: Date;
   /** The per-account fetch batch; the adapter clamps it to the provider's ceiling (default 50, max 100). */
   batchSize?: number;

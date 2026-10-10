@@ -143,7 +143,14 @@ context:
 
 ## Verification
 
-**Commands:**
+### Review Findings
+
+- [x] [Review][Patch] `processed` counter partition is broken when `writeLabels` throws — `src/orch/classification-run.ts:123` — move the increment into the success branches so `processed = labeled + skipped` stays true.
+- [x] [Review][Patch] Empty-account progress line is suppressed — `src/orch/classification-run.ts:171` — emit the per-account zero line for a clean empty account.
+- [x] [Review][Patch] `PARTIAL_FOLDER` test name mismatches the behavior it pins — `tests/orch/classification-run.test.ts:257` — rename it to match the actual partial-folder accounting.
+- [x] [Review][Patch] `--since` help/doc wording and cross-reference drift — `src/cli/main.ts:52`, `src/cli/commands/backfill.ts:38` — make the wording and the story reference match this story.
+- [x] [Review][Patch] `--since` accepts a non-ISO-ish date and a nonexistent calendar date — `src/cli/dispatch.ts:71` — tighten the parse to the advertised shape.
+
 - `mise exec node@20 -- bun run test` — expected: vitest green and `typecheck` passing
 - `mise exec node@20 -- bun run lint` — expected: oxlint and the core external-import guard pass
 - `mise exec node@20 -- bun run build` — expected: `tsc -b` clean

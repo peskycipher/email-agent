@@ -414,7 +414,7 @@ test("--backfill --source gmail --account all fetches through the list+batch pat
 
   expect(code).toBe(1);
   expect(capturedLines(stderr)).toHaveLength(2);
-  expect(capturedLines(stdout).join("")).toContain("info personal: Processed 2 message(s): 0 labeled, 0 skipped, 2 error(s).");
+  expect(capturedLines(stdout).join("")).toContain("info personal: Processed 0 message(s): 0 labeled, 0 skipped, 2 error(s).");
   expect(capturedLines(stdout).join("")).toContain("Fetched 2 message(s) from 1 account(s): 0 labeled, 0 skipped, 2 error(s).");
   expect(requests.filter((request) => request.url === GMAIL_BATCH_URL)).toHaveLength(1);
   expect(requests[0]?.method).toBe("GET");
@@ -443,7 +443,7 @@ test("--backfill --source gmail --account all keeps going after an account fails
   expect(errors).toContain("alpha: ");
   expect(errors).toContain("--auth gmail --account alpha");
   expect(errors).toContain("1 of 2 gmail account(s) failed.");
-  expect(capturedLines(stdout).join("")).toContain("info beta: Processed 1 message(s): 0 labeled, 0 skipped, 1 error(s).");
+  expect(capturedLines(stdout).join("")).toContain("info beta: Processed 0 message(s): 0 labeled, 0 skipped, 1 error(s).");
   expect(fetchRequests(requests)).toHaveLength(1);
   expect(requests[0]?.authorization).toBe("Bearer access-gmail-beta");
 });

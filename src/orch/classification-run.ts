@@ -120,15 +120,16 @@ async function runAccount(
       logPort.error(errorLine(error), { accountId, messageId: message.id });
       continue;
     }
-    progress.processed += 1;
     if (labels.labels.length === 0) {
       // An empty set is a valid classification — no write is attempted, and the message is
       // counted as skipped, so the counters partition as processed = labeled + skipped.
       progress.skipped += 1;
+      progress.processed += 1;
     } else {
       try {
         await mailPort.writeLabels(accountId, message.id, labels.labels);
         progress.labeled += 1;
+        progress.processed += 1;
       } catch (error) {
         progress.errors += 1;
         logPort.error(errorLine(error), { accountId, messageId: message.id });
@@ -168,7 +169,10 @@ export async function runBackfillAccounts(options: BackfillOptions): Promise<Bac
     result.labeled += outcome.progress.labeled;
     result.skipped += outcome.progress.skipped;
     result.errors += outcome.progress.errors;
-    if (outcome.progress.processed > 0) logProgress(outcome.progress, accountId, logPort);
+    // The final line must not duplicate a `PROGRESS_INTERVAL` line; an empty account still needs its own zero-progress report.
+    if (outcome.progress.processed === 0 || outcome.progress.processed % PROGRESS_INTERVAL !== 0) {
+      logProgress(outcome.progress, accountId, logPort);
+    }
   }
   return result;
 }

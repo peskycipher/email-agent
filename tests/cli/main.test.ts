@@ -78,7 +78,7 @@ const EXAMPLES_BLOCK = [
   "  $ email-classify --cron --source gmail --account all",
 ].join("\n");
 
-test("createProgram pins the program name, every flag description and all twelve examples", () => {
+test("createProgram pins the program name, every flag description and all thirteen examples", () => {
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const { handlers } = recordingHandlers();
   const program = createProgram(handlers);
@@ -106,7 +106,7 @@ test("createProgram pins the program name, every flag description and all twelve
       "--source",
       'message source for --backfill/--cron; "m365" or "gmail" (defaults to "m365"; "all" is not a provider)',
     ],
-    ["--since", "--backfill only: fetch messages received after this date (default: all time)"],
+    ["--since", "--backfill only: fetch messages received on or after this date (default: all time)"],
     [
       "--batch-size",
       "--backfill only: per-account fetch batch, clamped to the provider's maximum (default: 50)",

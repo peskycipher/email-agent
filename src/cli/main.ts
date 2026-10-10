@@ -49,7 +49,7 @@ export function createProgram(handlers: CliHandlers): Command {
       "--source <provider>",
       'message source for --backfill/--cron; "m365" or "gmail" (defaults to "m365"; "all" is not a provider)',
     )
-    .option("--since <date>", "--backfill only: fetch messages received after this date (default: all time)")
+    .option("--since <date>", "--backfill only: fetch messages received on or after this date (default: all time)")
     .option("--batch-size <n>", "--backfill only: per-account fetch batch, clamped to the provider's maximum (default: 50)")
     .addHelpText(
       "after",
