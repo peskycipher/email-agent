@@ -8,6 +8,7 @@ import { IdempotencyStore } from "../../src/adapters/idempotency/sqliteIdempoten
 import { acquireRunLock } from "../../src/adapters/lock/runLock.js";
 import type { FetchLike, FetchResponseLike } from "../../src/adapters/m365/M365AuthAdapter.js";
 import { runBackfill } from "../../src/cli/commands/backfill.js";
+import { createShutdown, type ShutdownTarget } from "../../src/cli/shutdown.js";
 import type { TokenSet } from "../../src/core/dto/TokenSet.js";
 import type { LogContext, LogPort } from "../../src/core/ports/LogPort.js";
 import type { ModelPort } from "../../src/core/ports/ModelPort.js";
@@ -107,17 +108,48 @@ function capturedLines(spy: ReturnType<typeof vi.spyOn>): string[] {
   return spy.mock.calls.map((call) => String(call[0]));
 }
 
+/** A `ShutdownTarget` recorder, so a test can fire the signal itself. */
+function signalTarget(): { target: ShutdownTarget; fire: (signal: "SIGINT" | "SIGTERM") => void } {
+  const listeners = new Map<string, Array<() => void>>();
+  return {
+    target: {
+      on: (signal, listener) => {
+        const forSignal = listeners.get(signal) ?? [];
+        forSignal.push(listener);
+        listeners.set(signal, forSignal);
+      },
+    },
+    fire: (signal) => {
+      for (const listener of listeners.get(signal) ?? []) listener();
+    },
+  };
+}
+
 function recordingLogPort(): {
   logPort: LogPort;
   entries: Array<{ level: string; message: string; context?: LogContext }>;
+  flushes: number;
 } {
   const entries: Array<{ level: string; message: string; context?: LogContext }> = [];
   const record = (level: string) => (message: string, context?: LogContext) => {
     entries.push({ level, message, ...(context === undefined ? {} : { context }) });
   };
+  let flushes = 0;
+  const logPort: LogPort = {
+    debug: record("debug"),
+    info: record("info"),
+    warn: record("warn"),
+    error: record("error"),
+    flush: async () => {
+      flushes += 1;
+    },
+  };
   return {
     entries,
-    logPort: { debug: record("debug"), info: record("info"), warn: record("warn"), error: record("error") },
+    logPort,
+    get flushes(): number {
+      return flushes;
+    },
   };
 }
 
@@ -750,4 +782,53 @@ test("a failing cycle still releases the lock, so the next run can start (RELEAS
   expect(code).toBe(1);
   expect(capturedLines(stderr).join("")).toContain("1 of 1 m365 account(s) failed.");
   await expect(readFile(join(configDir, "run.lock"), "utf8")).rejects.toThrow();
+});
+
+test("a SIGINT during an adapter's 429 wait ends it, flushes once and exits 0 without a failed account (SIGINT_IN_BACKOFF)", async () => {
+  await writeAccount("work");
+  // Only the 429 is queued: the abort must cut the wait before the fetch is re-issued.
+  const { fetchFn } = recordingFetch([
+    jsonResponse({ error: { code: "TooManyRequests" } }, false, 429, { "retry-after": "2" }),
+  ]);
+  const log = recordingLogPort();
+  const { target, fire } = signalTarget();
+  const exitSpy = vi.fn();
+  const shutdown = createShutdown({ target, exit: exitSpy });
+  shutdown.attach();
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const sleeps: number[] = [];
+
+  const code = await runBackfill(
+    { source: "m365", account: "all" },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      model: modelDouble(),
+      logPort: log.logPort,
+      shutdown,
+      // The adapter's 9.1 ladder wait is where the signal lands: the raced base never resolves.
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        fire("SIGINT");
+        await new Promise(() => {});
+      },
+    },
+  );
+
+  expect(code).toBe(0);
+  // The ladder's wait arrived through the command's seam and was cut short.
+  expect(sleeps).toEqual([2_000]);
+  // The throttle is still announced (no silent sleeping) through the command's log port...
+  expect(
+    log.entries.some((entry) => entry.level === "warn" && entry.message.includes("is throttled by Microsoft Graph")),
+  ).toBe(true);
+  // ...but the interrupted wait is not the account's error and the run is not reported as failed.
+  expect(log.entries.some((entry) => entry.level === "error")).toBe(false);
+  expect(capturedLines(stderr).join("")).not.toContain("account(s) failed");
+  // The drain flushed the log buffer once and never forced an exit.
+  expect(log.flushes).toBe(1);
+  expect(exitSpy).not.toHaveBeenCalled();
+  expect(capturedLines(stdout).join("")).not.toContain("Fetched");
 });

@@ -29,6 +29,7 @@ import {
   type LabelWriteTarget,
 } from "../../orch/classification-run.js";
 import { type MessageFetchTarget } from "../../orch/fetch.js";
+import { abortableSleep, type ShutdownCoordinator } from "../shutdown.js";
 import { createPassphrasePrompt, errorLine } from "./auth.js";
 import { createConsoleLogPort } from "./sync-categories.js";
 
@@ -57,6 +58,8 @@ export interface BackfillRuntime {
   model?: Parameters<typeof runBackfillAccounts>[0]["model"];
   /** Story 9.1's adapter backoff seam, threaded into the adapters; injectable so tests never really wait. */
   sleep?: (ms: number) => Promise<void>;
+  /** The graceful-shutdown coordinator; present only on the `--backfill` route the entry wires (Story 9.2). */
+  shutdown?: ShutdownCoordinator;
 }
 
 /** The part of a per-account listing this command reads; both providers return one. */
@@ -120,6 +123,12 @@ export async function runBackfill(
 ): Promise<number> {
   const configDir = runtime.configDir === undefined ? {} : { configDir: runtime.configDir };
   const modelConfig = runtime.modelConfig ?? DEFAULT_MODEL_CONFIG;
+  const shutdown = runtime.shutdown;
+  const signal = shutdown?.signal;
+  // Under a shutdown coordinator the adapter wait is raced against the signal, so an interrupt
+  // during a 9.1 ladder rung ends it; without one the command keeps its exact behaviour.
+  const sleep = shutdown === undefined ? runtime.sleep : abortableSleep(shutdown.signal, runtime.sleep);
+  const adapterSleepSeam = sleep === undefined ? {} : { sleep };
 
   let taxonomy: Taxonomy;
   try {
@@ -136,6 +145,18 @@ export async function runBackfill(
   const tokenStore =
     runtime.tokenStore ?? new KeychainTokenStore({ promptPassphrase: createPassphrasePrompt(), ...configDir });
   const logPort = runtime.logPort ?? createConsoleLogPort();
+  /**
+   * Flushes the log buffer on an exit path, once the run has drained (Story 9.2). A logger that
+   * will not flush must not reject the command: a handled shutdown still exits 0.
+   */
+  const finish = async (code: number): Promise<number> => {
+    try {
+      await logPort.flush?.();
+    } catch {
+      // A logger that will not flush must not fail the command.
+    }
+    return code;
+  };
   let model: ModelPort;
   try {
     model = runtime.model ?? createModelAdapter(modelConfig, {
@@ -144,7 +165,7 @@ export async function runBackfill(
     });
   } catch (error) {
     process.stderr.write(`${errorLine(error)}\n`);
-    return 1;
+    return finish(1);
   }
 
   const m365Auth = new M365AuthAdapter({
@@ -172,7 +193,7 @@ export async function runBackfill(
         fetchFn,
         getAccessToken: m365Auth.getAccessToken.bind(m365Auth),
         logPort,
-        ...(runtime.sleep === undefined ? {} : { sleep: runtime.sleep }),
+        ...adapterSleepSeam,
       }),
     },
     gmail: {
@@ -192,7 +213,7 @@ export async function runBackfill(
         fetchFn,
         getAccessToken: gmailAuth.getAccessToken.bind(gmailAuth),
         logPort,
-        ...(runtime.sleep === undefined ? {} : { sleep: runtime.sleep }),
+        ...adapterSleepSeam,
       }),
     },
   };
@@ -203,7 +224,7 @@ export async function runBackfill(
     listing = await plan.listEnabledAccounts();
   } catch (error) {
     process.stderr.write(`${plan.provider}: ${errorLine(error)}\n`);
-    return 1;
+    return finish(1);
   }
 
   const account = options.account;
@@ -219,7 +240,7 @@ export async function runBackfill(
         ? `${relevantErrors.length} ${plan.provider} account(s) have invalid settings — fix or remove them, then re-run.\n`
         : `${noAccountsHint(plan, account)}\n`,
     );
-    return 1;
+    return finish(1);
   }
 
   // The lock and the store are taken only once this invocation is known to have accounts to run
@@ -230,7 +251,7 @@ export async function runBackfill(
     acquireRunLock(lock);
   } catch (error) {
     process.stderr.write(`${errorLine(error)}\n`);
-    return 1;
+    return finish(1);
   }
   let store: IdempotencyStore;
   try {
@@ -238,7 +259,7 @@ export async function runBackfill(
   } catch (error) {
     process.stderr.write(`${errorLine(error)}\n`);
     releaseLock(lock);
-    return 1;
+    return finish(1);
   }
 
   // The command-level flags are the same for every account: `--batch-size` is folded in first so
@@ -262,11 +283,19 @@ export async function runBackfill(
       config: modelConfig,
       logPort,
       source: plan.provider,
+      ...(signal === undefined ? {} : { signal }),
     });
   } finally {
     // The lock covers the store and the per-account state files; every exit path releases it.
     store.close();
     releaseLock(lock);
+  }
+
+  // An interrupt stops the run at its account boundary; the deadline then covers the shutdown
+  // step (close + flush) and the exit is 0, never a failure (Story 9.2).
+  if (signal?.aborted) {
+    shutdown?.beginShutdown();
+    return finish(0);
   }
 
   const total = selected.length + relevantErrors.length;
@@ -280,5 +309,5 @@ export async function runBackfill(
     `Fetched ${result.fetched} message(s) from ${selected.length - result.failures} account(s): ` +
       `${result.labeled} labeled, ${result.skipped} skipped, ${result.alreadyDone} already done, ${result.errors} error(s).\n`,
   );
-  return totalFailures > 0 || result.errors > 0 ? 1 : 0;
+  return finish(totalFailures > 0 || result.errors > 0 ? 1 : 0);
 }

@@ -144,3 +144,17 @@
 - `isRateLimitBody` matches only `reason === "rateLimitExceeded"` (`src/adapters/gmail/gmailWire.ts:101`). Gmail's sibling throttling reasons (`userRateLimitExceeded`, `quotaExceeded`/`RESOURCE_EXHAUSTED`) are not matched, so such a response takes the FLAT_KEEP path and fails the batch with no ladder. Unverified against provider behaviour — settle with the Gmail API error-reason reference or a live probe before widening the predicate.
 - Spec/context statements contradict the code or each other: the Implementation Notes claim the cron loop's flat retry now handles non-429 failures only, but the story's own GIVE_UP test asserts a given-up 429 retires through it; `epic-9-context.md:17` still freezes "one account in backoff never pauses the others" while the spec's Decisions reconciles the wording away; the Verification block and the Kill/recovery note disagree on how many lint warnings this change introduced. Fix edits spec/agent-context files, so it is deferred.
 - The proxy for the epic's 8000+ success metric is not pinned and the I/O matrix's LADDER_VS_INTERVAL row has no test. No test keeps a multi-batch account walk completing under repeated 429s, and no aggregate throttle-wait bound is recorded per account for Epic 10. The scheduler's interval drift after a slow cycle is pre-existing and already filed.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-9-2-graceful-shutdown-multi-account.md`
+  summary: The raced base wait in `abortableSleep` is never cancelled, so an abandoned 9.1 ladder rung leaves a live `setTimeout` that keeps the event loop alive until it fires or the shutdown deadline forces the exit.
+  evidence: Real (2026-10-11): `abortableSleep` rejects on abort but leaves the base `wait(ms)` pending, and with no injected seam the base is a bare, non-unref'd `setTimeout`. The shutdown-step deadline bounds the damage today. Upgrade when Epic 10's file logger makes flush timing matter, by making the seam AbortSignal-aware end to end.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-9-2-graceful-shutdown-multi-account.md`
+  summary: The non-abort exit paths' store-close and flush are still unpinned, and `IdempotencyStore.close` has no injectable seam, so the "store closed on every exit path" contract lives in a comment.
+  evidence: Real (2026-10-11): `tests/cli/cron.test.ts` asserts only the abort path's flush; `runCron` constructs the store internally, so no test can observe `close()`. Upgrade when Epic 11's DI container makes the store injectable.
+- source_spec: `_bmad-output/implementation-artifacts/spec-9-2-graceful-shutdown-multi-account.md`
+  summary: The Gmail abort shape has no end-to-end test — both new signal cases in `tests/orch/cron-cycle.test.ts` are m365-only, so the history-id ordering (hold the cursor, do not write the history id) is unpinned.
+  evidence: Real (2026-10-11): the Gmail partial-commit path is the only provider where the cursor can land in two steps, and nothing exercises it under a signal.
+- source_spec: `_bmad-output/implementation-artifacts/spec-9-2-graceful-shutdown-multi-account.md`
+  summary: SIGTERM is registered but never fired in any test, so the second signal's abort path rests on a registration assertion alone.
+  evidence: Real (2026-10-11): every signal test in the diff fires SIGINT; `attach()` registers both.

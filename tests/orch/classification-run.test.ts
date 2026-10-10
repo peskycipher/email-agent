@@ -478,3 +478,43 @@ test("a partial folder failure counts only accounts that fetched cleanly (PARTIA
   expect(writes).toHaveLength(0);
   expect(calls).toEqual(["Inbox", "Archive"]);
 });
+
+test("a signal mid-classify finishes that message and starts no further message or account (SIGINT_MID_MESSAGE)", async () => {
+  const { port, writes, fetches } = portDouble({
+    messagesByFolder: {
+      Inbox: [messageWithSubject("m1", "acc-1", "Crypto"), messageWithSubject("m2", "acc-1", "Crypto")],
+    },
+  });
+  const { logPort } = recordingLogPort();
+  const { store, records } = storeDouble();
+  const controller = new AbortController();
+  // The signal lands while the first message is being classified; that message still completes.
+  const model: ModelPort = {
+    async complete(): Promise<unknown> {
+      controller.abort();
+      return { labels: ["Crypto"] };
+    },
+  };
+
+  const result = await runBackfillAccounts({
+    accounts: [
+      { accountId: "acc-1", folders: ["Inbox"] },
+      { accountId: "acc-2", folders: ["Inbox"] },
+    ],
+    store,
+    mailPort: port,
+    taxonomy: TAXONOMY,
+    model,
+    config: CONFIG,
+    logPort,
+    source: "m365",
+    signal: controller.signal,
+  });
+
+  // Only the in-flight message completed; the next message and the next account never started.
+  expect(writes).toEqual([{ accountId: "acc-1", messageId: "m1", labels: ["Crypto"] }]);
+  expect(records).toEqual([{ accountId: "acc-1", internetMessageId: "m1@example.com", labels: ["Crypto"] }]);
+  expect(fetches.map((fetch) => fetch.accountId)).toEqual(["acc-1"]);
+  expect(result.errors).toBe(0);
+  expect(result.failures).toBe(0);
+});

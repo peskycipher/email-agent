@@ -32,6 +32,7 @@ import {
   type GmailIncrementalSeam,
   type IncrementalAccount,
 } from "../../orch/incremental.js";
+import { abortableSleep, waitForAbort, type ShutdownCoordinator } from "../shutdown.js";
 import { createPassphrasePrompt, errorLine } from "./auth.js";
 import { createConsoleLogPort } from "./sync-categories.js";
 
@@ -63,14 +64,17 @@ export interface CronRuntime {
   /**
    * The single 30s flat-retry seam, threaded into the cycle *and* into the provider adapters as
    * Story 9.1's ladder seam; injectable so tests never really sleep. One recorder therefore sees
-   * both mechanisms' waits, and a wait cannot be attributed to either from it alone.
+   * both mechanisms' waits, and a wait cannot be attributed to either from it alone. Under a
+   * shutdown coordinator the seam is raced against the signal (Story 9.2).
    */
   sleep?: (ms: number) => Promise<void>;
+  /** The graceful-shutdown coordinator; present only on the `--cron` route the entry wires (Story 9.2). */
+  shutdown?: ShutdownCoordinator;
 }
 
-/** Story 9.1's adapter backoff seam, threaded into the provider adapters only when injected. */
-function adapterSleep(runtime: CronRuntime): { sleep?: (ms: number) => Promise<void> } {
-  return runtime.sleep === undefined ? {} : { sleep: runtime.sleep };
+/** Story 9.1's adapter backoff seam, threaded into the provider adapters only when resolved. */
+function adapterSleep(sleep: ((ms: number) => Promise<void>) | undefined): { sleep?: (ms: number) => Promise<void> } {
+  return sleep === undefined ? {} : { sleep };
 }
 
 /** The part of a per-account listing this command reads; both providers return one. */
@@ -143,6 +147,12 @@ function releaseLock(options: RunLockOptions): void {
 export async function runCron(options: CronCommandOptions, runtime: CronRuntime = {}): Promise<number> {
   const configDir = runtime.configDir === undefined ? {} : { configDir: runtime.configDir };
   const modelConfig = runtime.modelConfig ?? DEFAULT_MODEL_CONFIG;
+  const shutdown = runtime.shutdown;
+  const signal = shutdown?.signal;
+  // Under a shutdown coordinator the one seam is raced against the signal, so an interrupt during
+  // either mechanism's wait ends it; without one the command keeps Story 8.3's exact behaviour.
+  const sleep = shutdown === undefined ? runtime.sleep : abortableSleep(shutdown.signal, runtime.sleep);
+  const adapterSleepSeam = adapterSleep(sleep);
 
   let taxonomy: Taxonomy;
   try {
@@ -167,6 +177,8 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
     });
   } catch (error) {
     process.stderr.write(`${errorLine(error)}\n`);
+    // The model adapter logs through `logPort`, so a construction fault still drains the buffer.
+    await logPort.flush?.();
     return 1;
   }
 
@@ -184,7 +196,7 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
     fetchFn,
     getAccessToken: gmailAuth.getAccessToken.bind(gmailAuth),
     logPort,
-    ...adapterSleep(runtime),
+    ...adapterSleepSeam,
   });
   const plans: Record<"m365" | "gmail", CronProviderPlan> = {
     m365: {
@@ -201,7 +213,7 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
         fetchFn,
         getAccessToken: m365Auth.getAccessToken.bind(m365Auth),
         logPort,
-        ...adapterSleep(runtime),
+        ...adapterSleepSeam,
       }),
     },
     gmail: {
@@ -277,7 +289,8 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
 
   if (providers.length === 0) {
     // A rejected selection reports its own hints rather than a busy lock (Story 8.2); nothing has
-    // been locked, fetched or classified yet.
+    // been locked, fetched or classified yet — but the model adapter may already have logged.
+    await logPort.flush?.();
     return 1;
   }
 
@@ -289,13 +302,33 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
   // The store opens only once a cycle actually holds the lock — the same lock→store order the
   // backfill runs — so a start blocked by another invocation never leaves an empty `idempotency.db`
   // behind (Story 8.2's promise, which a whole-loop store open would have broken). It then stays
-  // open for the daemon's lifetime: after the loop starts there is no exit path through this
-  // command, only ticks.
+  // open for the daemon's lifetime and is closed on every exit path (Story 9.2).
   let store: IdempotencyStore | undefined;
   // Whether the cycle just run was blocked by another invocation's lock or escaped as a fault;
   // only the first cycle's value is read, to decide whether the loop may start at all.
   let blockedByLock = false;
   let firstCycleFailed = false;
+  // The cycle the interval started, so the drain can await it: the scheduler's `abort()` clears
+  // the timer but does not await an in-flight tick, and the cycle's own stop flag is the signal.
+  let inFlight: Promise<void> = Promise.resolve();
+
+  /**
+   * Flushes the log buffer and closes the store; every exit path, not only the abort one. Neither
+   * step may reject: a handled shutdown has to exit 0 even when the logger or the store fails.
+   */
+  const finish = async (code: number): Promise<number> => {
+    try {
+      store?.close();
+    } catch {
+      // A store that will not close must not fail the command.
+    }
+    try {
+      await logPort.flush?.();
+    } catch {
+      // A logger that will not flush must not fail the command.
+    }
+    return code;
+  };
 
   /**
    * One cycle: take the 8.2 lock, open the store on first success, run `runCronCycle` over the
@@ -333,7 +366,8 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
         config: modelConfig,
         logPort,
         ...(runtime.now === undefined ? {} : { now: runtime.now }),
-        ...(runtime.sleep === undefined ? {} : { sleep: runtime.sleep }),
+        ...(sleep === undefined ? {} : { sleep }),
+        ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
       // A fault outside the cycle's per-account isolation (its wiring-fault contract): one line,
@@ -346,6 +380,8 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
       // path releases it, so the gap before the next cycle stays free for `--backfill`.
       releaseLock(lock);
     }
+    // An interrupted cycle is not a completed one: it advertises no next cycle.
+    if (signal?.aborted) return;
     const nextAt = new Date(now().getTime() + intervalMs);
     process.stdout.write(
       `Cron cycle started ${report.startedAt.toISOString()}: ${report.fetched} fetched, ${report.labeled} labeled, ` +
@@ -359,17 +395,34 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
     }
   };
 
+  // A wrapper around the cycle that remembers the in-flight run, so the drain can await the one
+  // cycle the signal interrupted. The interval is what keeps the process alive between cycles.
+  const tick = (): Promise<void> => {
+    inFlight = runCycle();
+    return inFlight;
+  };
+
   // The first cycle runs inline through `runOnce`, so a lock held by another invocation exits 1
   // with the 8.2 line and fetches nothing, before any interval exists.
-  await scheduler.runOnce(runCycle);
-  if (blockedByLock || firstCycleFailed) {
-    store?.close();
-    return 1;
+  await scheduler.runOnce(tick);
+  if (blockedByLock || firstCycleFailed) return finish(1);
+  // A signal that arrived during the first cycle starts no loop at all; the shutdown step still
+  // gets its 5s bound, exactly as the loop path's drain does.
+  if (signal?.aborted) {
+    shutdown?.beginShutdown();
+    return finish(0);
   }
-  // The loop: the interval keeps the process alive; Ctrl+C kills it with no handler (Story 9.2
-  // owns graceful shutdown), and the per-cycle state stays consistent by construction. Awaiting the
-  // scheduler's promise is free in production (the adapter resolves immediately, the interval then
-  // runs on its own) and lets an injected scheduler finish its ticks before the command returns.
-  await scheduler.runInterval(runCycle, intervalMs);
-  return 0;
+  // The loop: the interval keeps the process alive and `waitForAbort` keeps this command alive
+  // until a signal. Awaiting the scheduler's promise is free in production (the adapter resolves
+  // immediately) and lets an injected scheduler finish its ticks before the command returns.
+  const controller = await scheduler.runInterval(tick, intervalMs);
+  if (shutdown !== undefined) {
+    if (!shutdown.signal.aborted) await waitForAbort(shutdown.signal);
+    // Stop at the account boundary: clear the interval, then let the in-flight cycle observe the
+    // signal and finish the message it is on. Only once it has drained does the 5s deadline arm.
+    controller.abort();
+    await inFlight;
+    shutdown.beginShutdown();
+  }
+  return finish(0);
 }

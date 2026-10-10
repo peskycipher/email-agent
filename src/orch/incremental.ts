@@ -122,6 +122,12 @@ export interface FetchIncrementalAccountOptions {
   gmail?: GmailIncrementalSeam;
   /** The clock seam; the cycle start is read from it before the state read. */
   now?: () => Date;
+  /**
+   * Story 9.2's shutdown signal. When a fetch throws with the signal aborted (the provider wait
+   * was cut short), the abort is rethrown rather than logged as a per-folder error naming an
+   * account that was never at fault; the caller abandons the account and holds its cursor.
+   */
+  signal?: AbortSignal;
 }
 
 /** The epic's cron window: an incremental Gmail cycle always scopes to the INBOX system label (the same label the adapter's history walk hardcodes). */
@@ -155,6 +161,7 @@ async function walkAccount(
   mailPort: MessageFetchTarget,
   logPort: LogPort,
   source: FetchOpts["source"],
+  signal: AbortSignal | undefined,
 ): Promise<{ messages: MessageDTO[]; failed: boolean }> {
   const accountId = plan.accountId;
   const folders = plan.folders === undefined || plan.folders.length === 0 ? DEFAULT_FOLDERS : plan.folders;
@@ -164,6 +171,11 @@ async function walkAccount(
   // A settings file can list the same folder twice; walking the de-duplicated list keeps both the
   // work and the count honest.
   for (const folder of new Set(folders)) {
+    // An abort between folders starts no further fetch; the account is abandoned, not failed.
+    if (signal?.aborted) {
+      failed = true;
+      break;
+    }
     try {
       messages.push(
         ...(await mailPort.fetchMessages({
@@ -176,6 +188,9 @@ async function walkAccount(
       );
     } catch (error) {
       failed = true;
+      // An interrupt during a provider wait is not this folder's fault: rethrow so the caller sees
+      // the shutdown and abandons the account rather than logging a spurious line (Story 9.2).
+      if (signal?.aborted) throw error;
       logPort.error(errorLine(error), { accountId, folder });
     }
   }
@@ -191,6 +206,8 @@ interface GmailFetchSeams {
   mailPort: MessageFetchTarget;
   logPort: LogPort;
   gmail: GmailIncrementalSeam;
+  /** Story 9.2's shutdown signal, threaded through to the folder walk and the history calls. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -212,6 +229,8 @@ async function fetchGmailListRaw(
   try {
     historyId = await gmail.history.fetchHistoryId(accountId);
   } catch (error) {
+    // An interrupt during the profile call is a shutdown, not this account's failure.
+    if (seams.signal?.aborted) throw error;
     logPort.error(errorLine(error), { accountId });
     return { failed: true, messages: [] };
   }
@@ -224,7 +243,7 @@ async function fetchGmailListRaw(
     // between that id and the walk can land unseen.
     ...(state.lastRunTimestamp === undefined ? {} : { since: new Date(state.lastRunTimestamp) }),
   };
-  const walked = await walkAccount(plan, mailPort, logPort, "gmail");
+  const walked = await walkAccount(plan, mailPort, logPort, "gmail", seams.signal);
   return walked.failed
     ? { failed: true, messages: walked.messages }
     : { failed: false, messages: walked.messages, historyId };
@@ -252,6 +271,8 @@ async function fetchGmailAccountRaw(
       ...(account.batchSize === undefined ? {} : { batchSize: account.batchSize }),
     });
   } catch (error) {
+    // An interrupt during the history call is a shutdown, not this account's failure.
+    if (seams.signal?.aborted) throw error;
     logPort.error(errorLine(error), { accountId });
     return { failed: true, messages: [] };
   }
@@ -304,7 +325,12 @@ export async function fetchIncrementalAccount(options: FetchIncrementalAccountOp
     return { accountId, messages: [], failed: true };
   }
   if (source === "gmail" && gmail !== undefined) {
-    const fetched = await fetchGmailAccountRaw(account, state, { mailPort, logPort, gmail });
+    const fetched = await fetchGmailAccountRaw(account, state, {
+      mailPort,
+      logPort,
+      gmail,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
     if (fetched.failed) return { accountId, messages: fetched.messages, failed: true };
     return {
       accountId,
@@ -313,7 +339,7 @@ export async function fetchIncrementalAccount(options: FetchIncrementalAccountOp
       pending: { cycleStart, historyId: fetched.historyId },
     };
   }
-  const walked = await walkAccount(toPlan(account, state.lastRunTimestamp), mailPort, logPort, source);
+  const walked = await walkAccount(toPlan(account, state.lastRunTimestamp), mailPort, logPort, source, options.signal);
   return {
     accountId,
     messages: walked.messages,

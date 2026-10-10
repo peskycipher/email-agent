@@ -68,6 +68,12 @@ export interface CronCycleOptions {
   now?: () => Date;
   /** The backoff seam; defaults to a real `setTimeout` sleep. Injected so tests never really wait. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * The graceful-shutdown signal (Story 9.2). Absent for a direct caller. When aborted, the cycle
+   * stops at the account boundary, holds the in-flight account's cursor, and neither counts nor
+   * logs it as a failure.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -126,6 +132,7 @@ async function runAccountAttempt(
     source: provider.source,
     ...(provider.gmail === undefined ? {} : { gmail: provider.gmail }),
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
   // A failed fetch earned its one retry; its partly-fetched messages are left for that retry's
   // re-fetch (the held cursor re-covers them, and the store makes the re-walk cheap).
@@ -138,6 +145,9 @@ async function runAccountAttempt(
     try {
       await provider.mailPort.ensureCategories(account.accountId, options.taxonomy);
     } catch (error) {
+      // An interrupt during the labels call is a shutdown, not this account's failure: rethrow so
+      // the cycle's abort check abandons it without a spurious line (Story 9.2).
+      if (options.signal?.aborted) throw error;
       options.logPort.error(errorLine(error), { accountId: account.accountId });
       return { fetched: 0, progress: emptyProgress(), retryable: true };
     }
@@ -151,6 +161,7 @@ async function runAccountAttempt(
     model: options.model,
     config: options.config,
     logPort: options.logPort,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
   return {
     fetched: egress.messages.length,
@@ -193,13 +204,22 @@ export async function runCronCycle(options: CronCycleOptions): Promise<CronCycle
     startedAt,
     durationMs: 0,
   };
+  const finish = (): CronCycleResult => {
+    result.durationMs = now().getTime() - startedAt.getTime();
+    return result;
+  };
   for (const provider of providers) {
     for (const account of provider.accounts) {
+      // The account boundary (Story 9.2): the accounts above are counted and committed; nothing
+      // further starts once a signal has been handled.
+      if (options.signal?.aborted) return finish();
       const accountId = account.accountId;
       let attempt: AccountAttempt;
       try {
         attempt = await runAccountAttempt(provider, account, options);
       } catch (error) {
+        // An aborted fetch's thrown wait is the shutdown, not this account's failure.
+        if (options.signal?.aborted) return finish();
         // A failure outside the per-message try (a programming fault, not a provider rejection):
         // reported with the account, never as a stack trace, and the cycle moves on.
         result.failures += 1;
@@ -208,14 +228,25 @@ export async function runCronCycle(options: CronCycleOptions): Promise<CronCycle
         continue;
       }
       if (attempt.retryable) {
+        // A shutdown in progress holds the cursor and stops rather than backing off into the loop.
+        if (options.signal?.aborted) return finish();
         logPort.warn(
           `Account "${accountId}" failed its cycle — backing off 30 seconds, then retrying the account's cycle once.`,
           { accountId },
         );
-        await sleep(RETRY_BACKOFF_MS);
+        try {
+          await sleep(RETRY_BACKOFF_MS);
+        } catch (error) {
+          // The shutdown's abort surfaces as a throw from the raced wait; any other fault is a
+          // wiring fault and keeps escaping to the CLI (the CYCLE_FAULT contract).
+          if (options.signal?.aborted) return finish();
+          throw error;
+        }
+        if (options.signal?.aborted) return finish();
         try {
           attempt = await runAccountAttempt(provider, account, options);
         } catch (error) {
+          if (options.signal?.aborted) return finish();
           result.failures += 1;
           result.failedAccounts.push(accountId);
           logPort.error(errorLine(error), { accountId });
@@ -247,6 +278,9 @@ export async function runCronCycle(options: CronCycleOptions): Promise<CronCycle
       // state, so the next cycle re-fetches the window — completed messages answer `alreadyDone`
       // through the store and the failed ones genuinely retry.
       if (progress.errors > 0 || attempt.pending === undefined) continue;
+      // An abort leaves a partly-processed account: hold its cursor so the next run re-fetches the
+      // tail it never saw, and stop without committing (Story 9.2).
+      if (options.signal?.aborted) return finish();
       // Gmail's history id first (mirroring the incremental commit), then the cycle start; the
       // writes are separate, so a partial commit is reported for what it did.
       if (provider.source === "gmail" && provider.gmail !== undefined && attempt.pending.historyId !== undefined) {
@@ -278,6 +312,5 @@ export async function runCronCycle(options: CronCycleOptions): Promise<CronCycle
       }
     }
   }
-  result.durationMs = now().getTime() - startedAt.getTime();
-  return result;
+  return finish();
 }

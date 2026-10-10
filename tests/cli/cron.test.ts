@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { acquireRunLock, releaseRunLock } from "../../src/adapters/lock/runLock.js";
 import type { FetchLike, FetchResponseLike } from "../../src/adapters/m365/M365AuthAdapter.js";
 import { runCron } from "../../src/cli/commands/cron.js";
+import { createShutdown, type ShutdownTarget } from "../../src/cli/shutdown.js";
+import type { LogPort } from "../../src/core/ports/LogPort.js";
 import type { SchedulerPort } from "../../src/core/ports/SchedulerPort.js";
 import type { ModelPort } from "../../src/core/ports/ModelPort.js";
 import type { TokenSet } from "../../src/core/dto/TokenSet.js";
@@ -137,6 +139,23 @@ function deadPid(): number {
   const child = spawnSync(process.execPath, ["-e", ""]);
   if (child.pid === undefined) throw new Error("the probe child did not report a pid");
   return child.pid;
+}
+
+/** A `ShutdownTarget` recorder, so a test can fire the signal itself. */
+function signalTarget(): { target: ShutdownTarget; fire: (signal: "SIGINT" | "SIGTERM") => void } {
+  const listeners = new Map<string, Array<() => void>>();
+  return {
+    target: {
+      on: (signal, listener) => {
+        const forSignal = listeners.get(signal) ?? [];
+        forSignal.push(listener);
+        listeners.set(signal, forSignal);
+      },
+    },
+    fire: (signal) => {
+      for (const listener of listeners.get(signal) ?? []) listener();
+    },
+  };
 }
 
 async function writeAccount(name: string, extra = ""): Promise<void> {
@@ -1068,4 +1087,85 @@ test("--source all with no enabled account on either provider exits 1 with both 
   const errors = capturedLines(stderr).join("");
   expect(errors).toContain("No enabled m365 accounts found");
   expect(errors).toContain("No enabled gmail accounts found");
+});
+test("a SIGINT between cycles clears the interval, drains the in-flight cycle, flushes and exits 0 (SIGINT_IDLE)", async () => {
+  await writeAccount("work");
+  let fetchCalls = 0;
+  let markSecondStarted: () => void = () => {};
+  const secondStarted = new Promise<void>((resolve) => {
+    markSecondStarted = resolve;
+  });
+  let releaseSecond: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    releaseSecond = resolve;
+  });
+  const fetchFn: FetchLike = async () => {
+    fetchCalls += 1;
+    if (fetchCalls === 1) return graphPage([]); // the inline first cycle
+    markSecondStarted();
+    // The loop cycle is genuinely in flight and only the test releases it.
+    await gate;
+    return graphPage([]);
+  };
+
+  const events: string[] = [];
+  const logPort: LogPort = {
+    debug: () => {},
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    flush: async () => {
+      events.push("flush");
+    },
+  };
+  const { target, fire } = signalTarget();
+  const exits: number[] = [];
+  const shutdown = createShutdown({ target, exit: (code) => exits.push(code) });
+  shutdown.attach();
+
+  let controller: AbortController | undefined;
+  const intervals: number[] = [];
+  const scheduler: SchedulerPort = {
+    async runOnce(fn) {
+      await fn();
+    },
+    async runInterval(fn, intervalMs) {
+      intervals.push(intervalMs);
+      controller = new AbortController();
+      // The shipped adapter resolves immediately: the cycle runs on its own from here.
+      void fn().then(() => events.push("cycle-drained"));
+      return controller;
+    },
+  };
+  vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const runPromise = runCron(
+    { source: "m365", account: "all", intervalMinutes: 15 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+      logPort,
+      shutdown,
+    },
+  );
+
+  await secondStarted;
+  fire("SIGINT");
+  await vi.waitFor(() => expect(controller?.signal.aborted).toBe(true));
+  // The drain must wait for the in-flight cycle: no flush has happened while it is gated.
+  expect(events).not.toContain("flush");
+
+  releaseSecond();
+  const code = await runPromise;
+
+  expect(code).toBe(0);
+  expect(exits).toEqual([]); // a handled shutdown, not a forced one
+  expect(events).toEqual(["cycle-drained", "flush"]);
+  expect(intervals).toEqual([900_000]);
+  expect(fetchCalls).toBe(2); // the interval was cleared: no third cycle started
 });

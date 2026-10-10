@@ -59,6 +59,12 @@ export interface BackfillOptions {
   logPort: LogPort;
   /** The provider id stamped on every fetch; defaults to M365's (a Gmail run passes "gmail"). */
   source?: "m365" | "gmail";
+  /**
+   * The graceful-shutdown signal (Story 9.2). Absent for a direct/one-shot caller. When aborted,
+   * both loops stop at their boundary: the in-flight message finishes, no further message or
+   * account starts, and an account abandoned mid-fetch is not counted as failed.
+   */
+  signal?: AbortSignal;
 }
 
 export interface BackfillResult {
@@ -102,6 +108,8 @@ export interface ClassifyMessagesOptions {
   model: ModelPort;
   config: ModelConfig;
   logPort: LogPort;
+  /** Story 9.2's shutdown signal; aborts at the per-message boundary — the current message finishes. */
+  signal?: AbortSignal;
 }
 
 export interface ClassifyMessagesResult {
@@ -126,6 +134,9 @@ export async function classifyMessages(options: ClassifyMessagesOptions): Promis
   let writeFailed = false;
   const context = { accountId };
   for (const message of messages) {
+    // The per-message boundary (Story 9.2): once a signal has been handled, the message just
+    // finished stays finished and no further message is started.
+    if (options.signal?.aborted) break;
     // An empty identity can never key a record: every such message would collapse onto the one
     // `(accountId, "")` pair. It is therefore never looked up and never recorded — the message is
     // simply classified again on the next run, which is the safe half of that trade.
@@ -210,6 +221,11 @@ async function runAccount(
   // A settings file can list the same folder twice; walking the de-duplicated list keeps both the
   // work and the count honest.
   for (const folder of new Set(folders)) {
+    // An abort between folders starts no further fetch; the account is abandoned, not failed.
+    if (options.signal?.aborted) {
+      accountFailed = true;
+      break;
+    }
     try {
       messages.push(
         ...(await mailPort.fetchMessages({
@@ -222,6 +238,9 @@ async function runAccount(
       );
     } catch (error) {
       accountFailed = true;
+      // An interrupt during a provider wait is not this folder's fault: the account is abandoned
+      // with its cursor held, so nothing is logged here (Story 9.2).
+      if (options.signal?.aborted) break;
       logPort.error(errorLine(error), { accountId, folder });
     }
   }
@@ -229,7 +248,17 @@ async function runAccount(
   // partial fetch must never be reported as a clean one.
   if (accountFailed) return { progress, fetched: messages.length, failed: true };
 
-  const flow = await classifyMessages({ accountId, messages, mailPort, store, taxonomy, model, config, logPort });
+  const flow = await classifyMessages({
+    accountId,
+    messages,
+    mailPort,
+    store,
+    taxonomy,
+    model,
+    config,
+    logPort,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
   return { progress: flow.progress, fetched: messages.length, failed: false };
 }
 
@@ -243,11 +272,17 @@ export async function runBackfillAccounts(options: BackfillOptions): Promise<Bac
   const { accounts, logPort } = options;
   const result: BackfillResult = { fetched: 0, labeled: 0, skipped: 0, alreadyDone: 0, errors: 0, failures: 0 };
   for (const account of accounts) {
+    // The account boundary (Story 9.2): the accounts finished above keep their committed cursors;
+    // the interrupted account re-fetches on the next run.
+    if (options.signal?.aborted) break;
     const accountId = account.accountId;
     let outcome: Awaited<ReturnType<typeof runAccount>>;
     try {
       outcome = await runAccount(account, options, logPort);
     } catch (error) {
+      // An aborted fetch surfaces as a throw; the signal — never the error type — says it is a
+      // shutdown, not a failure of this account.
+      if (options.signal?.aborted) break;
       // A failure outside the per-message try (a programming fault, not a provider rejection):
       // reported with the account, never as a stack trace, and the run moves on.
       result.failures += 1;
@@ -255,6 +290,8 @@ export async function runBackfillAccounts(options: BackfillOptions): Promise<Bac
       continue;
     }
     if (outcome.failed) {
+      // An account abandoned by an interrupt holds its cursor and is not a failed account.
+      if (options.signal?.aborted) break;
       result.failures += 1;
       continue;
     }

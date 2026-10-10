@@ -73,6 +73,8 @@ export function createConsoleLogPort(): LogPort {
     info: (message, context) => writeLine(process.stdout, "info", message, context),
     warn: (message, context) => writeLine(process.stderr, "warn", message, context),
     error: (message, context) => writeLine(process.stderr, "error", message, context),
+    // The console writes straight through, so there is nothing to drain (Story 9.2's flush seam).
+    flush: async () => {},
   };
 }
 

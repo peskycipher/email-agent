@@ -814,3 +814,71 @@ test("the cycle reports its start and duration from the injected clock (DURATION
     { accountName: "work", date: new Date(CYCLE_START.getTime() + 2_500) },
   ]);
 });
+
+test("a signal during the flat retry wait ends the wait, abandons the account and commits no cursor (SIGINT_IN_BACKOFF)", async () => {
+  const log = recordingLogPort();
+  const state = memoryState({ work: { lastRunTimestamp: "2026-10-10T08:00:00.000Z" } });
+  const port = portDouble({ fetchMessages: () => { throw new Error("transient fetch failure"); } });
+  const store = memoryStore();
+  const controller = new AbortController();
+  const sleeps: number[] = [];
+  // The raced wait: the signal lands inside the 30s flat retry, ending it before the ladder runs.
+  const sleep = async (ms: number): Promise<void> => {
+    sleeps.push(ms);
+    controller.abort();
+    throw new Error("wait interrupted by shutdown");
+  };
+
+  const result = await runCronCycle({
+    providers: [m365Provider(port.port, state, ["work"])],
+    store: store.store,
+    taxonomy: TAXONOMY,
+    model: modelDouble().model,
+    config: MODEL_CONFIG,
+    logPort: log.logPort,
+    now: () => CYCLE_START,
+    sleep,
+    signal: controller.signal,
+  });
+
+  expect(sleeps).toEqual([RETRY_BACKOFF_MS]);
+  // The interrupted account is abandoned, not failed: no failure count, no "failed again" line.
+  expect(result.failures).toBe(0);
+  expect(result.failedAccounts).toEqual([]);
+  expect(log.entries.some((entry) => entry.message.includes("failed again"))).toBe(false);
+  // Its cursor is held, so the next cycle re-fetches the window.
+  expect(state.timestampWrites).toEqual([]);
+});
+
+test("a signal mid-classify lets that message finish but the account commits no cursor (STATE_PARTIAL)", async () => {
+  const log = recordingLogPort();
+  const state = memoryState({ work: { lastRunTimestamp: "2026-10-10T08:00:00.000Z" } });
+  const port = portDouble({ fetchMessages: (opts) => [message("m1", opts.accountId), message("m2", opts.accountId)] });
+  const store = memoryStore();
+  const controller = new AbortController();
+  // The signal lands while the first message is being classified; that message still completes.
+  const model: ModelPort = {
+    async complete() {
+      controller.abort();
+      return { labels: ["Crypto"] };
+    },
+  };
+
+  const result = await runCronCycle({
+    providers: [m365Provider(port.port, state, ["work"])],
+    store: store.store,
+    taxonomy: TAXONOMY,
+    model,
+    config: MODEL_CONFIG,
+    logPort: log.logPort,
+    now: () => CYCLE_START,
+    signal: controller.signal,
+  });
+
+  // The in-flight message landed its write and record...
+  expect(port.writeCalls.map((call) => call.messageId)).toEqual(["m1"]);
+  expect(store.recordCalls.map((call) => call.internetMessageId)).toEqual(["<m1@example.com>"]);
+  // ...but the account committed no cursor, so the next run re-fetches the unprocessed tail.
+  expect(state.timestampWrites).toEqual([]);
+  expect(result.failures).toBe(0);
+});

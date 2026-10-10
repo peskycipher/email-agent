@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { defaultHandlers, runCli } from "./main.js";
+import { createShutdown } from "./shutdown.js";
 
 /**
  * Whether this module is the process's entry point. Only then does it parse argv, so a test can
@@ -22,5 +23,11 @@ function isEntryPoint(entry: string | undefined): boolean {
 }
 
 if (isEntryPoint(process.argv[1])) {
-  process.exitCode = await runCli(process.argv, defaultHandlers);
+  // The coordinator is created only for a real entry-point run; a test that imports this file
+  // registers no process handler. `--backfill`/`--cron` attach it inside `createProgram`.
+  const shutdown = createShutdown();
+  process.exitCode = await runCli(process.argv, defaultHandlers, shutdown);
+  // A handled shutdown always exits 0 (the Decisions), even when a command was cut short and
+  // returned a non-zero code.
+  if (shutdown.handled) process.exitCode = 0;
 }

@@ -5,6 +5,7 @@ import { runAuth } from "../../src/cli/commands/auth.js";
 import { runBackfill } from "../../src/cli/commands/backfill.js";
 import { runCron } from "../../src/cli/commands/cron.js";
 import { runSyncCategories } from "../../src/cli/commands/sync-categories.js";
+import { createShutdown, type ShutdownTarget } from "../../src/cli/shutdown.js";
 
 type HandlerName = keyof CliHandlers;
 
@@ -29,6 +30,35 @@ function recordingHandlers(codes: Partial<Record<HandlerName, number>> = {}): {
 /** Mirrors the shipped `process.argv`: `argv[0]` is node, `argv[1]` the script, then user args. */
 function argv(...args: string[]): string[] {
   return ["node", "email-classify", ...args];
+}
+
+/** A `ShutdownTarget` recorder, so the signal seam's registrations are observable. */
+function signalTarget(): { target: ShutdownTarget; registrations: string[] } {
+  const registrations: string[] = [];
+  return { registrations, target: { on: (signal) => registrations.push(signal) } };
+}
+
+/** Handlers that record the runtime seam `createProgram` hands the two signal-handling routes. */
+function runtimeRecordingHandlers(): {
+  handlers: CliHandlers;
+  runtimes: Array<{ handler: HandlerName; runtime: unknown }>;
+} {
+  const runtimes: Array<{ handler: HandlerName; runtime: unknown }> = [];
+  return {
+    runtimes,
+    handlers: {
+      runAuth: async () => 0,
+      runSyncCategories: async () => 0,
+      runBackfill: async (_options, runtime) => {
+        runtimes.push({ handler: "runBackfill", runtime });
+        return 0;
+      },
+      runCron: async (_options, runtime) => {
+        runtimes.push({ handler: "runCron", runtime });
+        return 0;
+      },
+    },
+  };
 }
 
 function capturedLines(spy: ReturnType<typeof vi.spyOn>): string[] {
@@ -186,6 +216,43 @@ test("--cron --source all routes to runCron instead of a routing error (SOURCE_A
     { handler: "runCron", options: { source: "all", account: "all", intervalMinutes: 15 } },
   ]);
   expect(stderr).not.toHaveBeenCalled();
+});
+
+test("--cron attaches the coordinator and hands it to runCron (SIGNAL_ROUTING)", async () => {
+  const { target, registrations } = signalTarget();
+  const shutdown = createShutdown({ target, exit: () => {} });
+  const { handlers, runtimes } = runtimeRecordingHandlers();
+
+  const code = await runCli(argv("--cron", "--source", "m365"), handlers, shutdown);
+
+  expect(code).toBe(0);
+  expect(registrations).toEqual(["SIGINT", "SIGTERM"]);
+  expect(runtimes).toEqual([{ handler: "runCron", runtime: { shutdown } }]);
+});
+
+test("--backfill attaches the coordinator and hands it to runBackfill (SIGNAL_ROUTING)", async () => {
+  const { target, registrations } = signalTarget();
+  const shutdown = createShutdown({ target, exit: () => {} });
+  const { handlers, runtimes } = runtimeRecordingHandlers();
+
+  const code = await runCli(argv("--backfill", "--source", "gmail"), handlers, shutdown);
+
+  expect(code).toBe(0);
+  expect(registrations).toEqual(["SIGINT", "SIGTERM"]);
+  expect(runtimes).toEqual([{ handler: "runBackfill", runtime: { shutdown } }]);
+});
+
+test("--auth and --sync-categories never attach the coordinator (SIGNAL_ROUTING)", async () => {
+  const { target, registrations } = signalTarget();
+  const shutdown = createShutdown({ target, exit: () => {} });
+  const { handlers, runtimes } = runtimeRecordingHandlers();
+
+  await runCli(argv("--auth", "m365", "--account", "work"), handlers, shutdown);
+  await runCli(argv("--sync-categories"), handlers, shutdown);
+
+  // The two lock-free routes take no signal handler and receive no runtime seam.
+  expect(registrations).toEqual([]);
+  expect(runtimes).toEqual([]);
 });
 
 test("a handler's non-zero code becomes the CLI exit code (NON-ZERO handler)", async () => {

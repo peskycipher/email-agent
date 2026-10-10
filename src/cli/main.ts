@@ -1,21 +1,23 @@
 import { Command } from "commander";
 import { runAuth } from "./commands/auth.js";
-import { runBackfill } from "./commands/backfill.js";
-import { runCron } from "./commands/cron.js";
+import { runBackfill, type BackfillRuntime } from "./commands/backfill.js";
+import { runCron, type CronRuntime } from "./commands/cron.js";
 import { runSyncCategories } from "./commands/sync-categories.js";
 import { resolveCliCommand, type CliOptions } from "./dispatch.js";
+import type { ShutdownCoordinator } from "./shutdown.js";
 
 /**
  * The four command entry points the CLI can run, one member per `run*`. Kept as an interface so
  * `createProgram` can be driven by fakes in tests and `defaultHandlers` can be asserted to wire
- * the real imports. The optional runtime parameters the real functions accept are omitted here:
- * a handler is only ever called with its command options from the entry point.
+ * the real imports. `runAuth`/`runSyncCategories` take only their command options; the two
+ * signal-handling routes also take the runtime seam, which is where `createProgram` threads the
+ * shutdown coordinator.
  */
 export interface CliHandlers {
   runAuth: (options: { provider: string; account: string }) => Promise<number>;
   runSyncCategories: (options: { account: string }) => Promise<number>;
-  runBackfill: (options: { source: "m365" | "gmail"; account: string; since?: Date; batchSize?: number }) => Promise<number>;
-  runCron: (options: { source: "m365" | "gmail" | "all"; account: string; intervalMinutes: number }) => Promise<number>;
+  runBackfill: (options: { source: "m365" | "gmail"; account: string; since?: Date; batchSize?: number }, runtime?: BackfillRuntime) => Promise<number>;
+  runCron: (options: { source: "m365" | "gmail" | "all"; account: string; intervalMinutes: number }, runtime?: CronRuntime) => Promise<number>;
 }
 
 /** The shipped wiring: the real command functions, identity-stable for the entry-point pin. */
@@ -30,8 +32,12 @@ export const defaultHandlers: CliHandlers = {
  * Build the commander program without parsing argv or running anything, so a test can import and
  * drive it. `resolveCliCommand` stays the only routing authority; failures are reported on stderr
  * and the observable exit code is left on `process.exitCode`.
+ *
+ * `shutdown` is the entry point's coordinator (Story 9.2). Only `--backfill` and `--cron` attach it —
+ * the two long-running routes — and those two handlers receive it through their runtime seam;
+ * `--auth` and `--sync-categories` never register a signal handler.
  */
-export function createProgram(handlers: CliHandlers): Command {
+export function createProgram(handlers: CliHandlers, shutdown?: ShutdownCoordinator): Command {
   const program = new Command();
 
   program
@@ -68,20 +74,28 @@ export function createProgram(handlers: CliHandlers): Command {
         return;
       }
       if (command.kind === "backfill") {
-        process.exitCode = await handlers.runBackfill({
-          source: command.source,
-          account: command.account,
-          ...(command.since === undefined ? {} : { since: command.since }),
-          ...(command.batchSize === undefined ? {} : { batchSize: command.batchSize }),
-        });
+        shutdown?.attach();
+        process.exitCode = await handlers.runBackfill(
+          {
+            source: command.source,
+            account: command.account,
+            ...(command.since === undefined ? {} : { since: command.since }),
+            ...(command.batchSize === undefined ? {} : { batchSize: command.batchSize }),
+          },
+          shutdown === undefined ? undefined : { shutdown },
+        );
         return;
       }
       if (command.kind === "cron") {
-        process.exitCode = await handlers.runCron({
-          source: command.source,
-          account: command.account,
-          intervalMinutes: command.intervalMinutes,
-        });
+        shutdown?.attach();
+        process.exitCode = await handlers.runCron(
+          {
+            source: command.source,
+            account: command.account,
+            intervalMinutes: command.intervalMinutes,
+          },
+          shutdown === undefined ? undefined : { shutdown },
+        );
         return;
       }
       process.exitCode = await handlers.runAuth({ provider: command.provider, account: command.account });
@@ -100,9 +114,9 @@ export function createProgram(handlers: CliHandlers): Command {
  * no `exitOverride`), so they terminate the process instead of returning — the same behaviour the
  * executable had before this seam existed.
  */
-export async function runCli(argv: readonly string[], handlers: CliHandlers): Promise<number> {
+export async function runCli(argv: readonly string[], handlers: CliHandlers, shutdown?: ShutdownCoordinator): Promise<number> {
   process.exitCode = 0;
-  const program = createProgram(handlers);
+  const program = createProgram(handlers, shutdown);
   await program.parseAsync(argv);
   return typeof process.exitCode === "number" ? process.exitCode : 0;
 }
