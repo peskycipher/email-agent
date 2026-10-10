@@ -13,6 +13,7 @@ import {
 import { M365Adapter } from "../../adapters/m365/M365Adapter.js";
 import { M365AuthAdapter, type FetchLike } from "../../adapters/m365/M365AuthAdapter.js";
 import { readAccountState, writeLastHistoryId, writeLastRunTimestamp, type StateFileOptions } from "../../adapters/config/stateFile.js";
+import { acquireRunLock, releaseRunLock, type RunLockOptions } from "../../adapters/lock/runLock.js";
 import { KeychainTokenStore } from "../../adapters/token/KeychainTokenStore.js";
 import type { LogPort } from "../../core/ports/LogPort.js";
 import type { TokenPort } from "../../core/ports/TokenPort.js";
@@ -79,12 +80,27 @@ function noAccountsHint(plan: IncrementalProviderPlan, account: string): string 
 }
 
 /**
+ * Releases the run lock, reporting a failure as one line without changing the run's exit code:
+ * the stale-pid rule frees the file on the next run either way. Duplicated in `backfill.ts`,
+ * which takes the same lock.
+ */
+function releaseLock(options: RunLockOptions): void {
+  try {
+    releaseRunLock(options);
+  } catch (error) {
+    process.stderr.write(`${errorLine(error)}\n`);
+  }
+}
+
+/**
  * Temporary `--cron --source <m365|gmail> --account <name|all>` command (human scope decision,
  * 2026-10-09): lists the enabled accounts for the requested provider and fetches only what is new
  * per account through `fetchIncremental` (m365 from the stored `lastRunTimestamp`, Gmail from the
  * stored `lastHistoryId` with its expiry fallback), with per-account isolation, a per-account count
  * and a counted failure line, and the failure count mapped to the exit code. Nothing is classified
- * or written back. Looped by Story 8.3; replaced by Epic 11's DI container and `main.ts`.
+ * or written back. Holds the same process lock `--backfill` takes, so a concurrent run of either
+ * exits 1 before anything is fetched (Story 8.2). Looped by Story 8.3; replaced by Epic 11's DI
+ * container and `main.ts`.
  */
 export async function runCron(options: CronCommandOptions, runtime: CronRuntime = {}): Promise<number> {
   const configDir = runtime.configDir === undefined ? {} : { configDir: runtime.configDir };
@@ -104,7 +120,8 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
   });
   const gmailAdapter = new GmailAdapter({
     fetchFn,
-    getAccessToken: (accountName) => gmailAuth.getAccessToken(accountName),
+    getAccessToken: gmailAuth.getAccessToken.bind(gmailAuth),
+    logPort,
   });
   const plans: Record<CronCommandOptions["source"], IncrementalProviderPlan> = {
     m365: {
@@ -117,7 +134,11 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
         ...(entry.folders === undefined ? {} : { folders: entry.folders }),
         ...(entry.batchSize === undefined ? {} : { batchSize: entry.batchSize }),
       }),
-      port: new M365Adapter({ fetchFn, getAccessToken: (accountName) => m365Auth.getAccessToken(accountName) }),
+      port: new M365Adapter({
+        fetchFn,
+        getAccessToken: m365Auth.getAccessToken.bind(m365Auth),
+        logPort,
+      }),
     },
     gmail: {
       provider: "gmail",
@@ -166,17 +187,33 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
     return 1;
   }
 
+  // The lock is taken only once this invocation is known to have accounts to run, so a rejected
+  // selection reports its own hint rather than a busy lock (Story 8.2).
+  const lock: RunLockOptions = { ...configDir, pid: process.pid };
+  try {
+    acquireRunLock(lock);
+  } catch (error) {
+    process.stderr.write(`${errorLine(error)}\n`);
+    return 1;
+  }
   const accounts = selected.map((entry) => plan.planFor(entry));
-  const { fetched, failures, accountsFetched } = await fetchIncremental({
-    accounts,
-    mailPort: plan.port,
-    logPort,
-    source: plan.provider,
-    readAccountState: (accountName) => readAccountState(accountName, stateOptions),
-    writeLastRunTimestamp: (accountName, date) => writeLastRunTimestamp(accountName, date, stateOptions),
-    ...(plan.gmail === undefined ? {} : { gmail: plan.gmail }),
-    ...(runtime.now === undefined ? {} : { now: runtime.now }),
-  });
+  let outcome: Awaited<ReturnType<typeof fetchIncremental>>;
+  try {
+    outcome = await fetchIncremental({
+      accounts,
+      mailPort: plan.port,
+      logPort,
+      source: plan.provider,
+      readAccountState: (accountName) => readAccountState(accountName, stateOptions),
+      writeLastRunTimestamp: (accountName, date) => writeLastRunTimestamp(accountName, date, stateOptions),
+      ...(plan.gmail === undefined ? {} : { gmail: plan.gmail }),
+      ...(runtime.now === undefined ? {} : { now: runtime.now }),
+    });
+  } finally {
+    // The lock covers the per-account state files this cycle writes; every exit path releases it.
+    releaseLock(lock);
+  }
+  const { fetched, failures, accountsFetched } = outcome;
   const total = selected.length + relevantErrors.length;
   const totalFailures = failures + relevantErrors.length;
   if (totalFailures > 0) {

@@ -166,3 +166,36 @@ test("--cron --sync-categories is rejected", () => {
   expect(command.kind).toBe("error");
   expect(command.kind === "error" ? command.message : "").toContain("--cron and --sync-categories");
 });
+
+test("--since parses a date and --batch-size drives the plan", () => {
+  const since = new Date("2026-01-01");
+  const command = resolveCliCommand({ backfill: true, since: "2026-01-01", batchSize: "100" });
+  expect(command.kind).toBe("backfill");
+  expect(command.kind === "backfill" ? command.since : undefined).toEqual(since);
+  expect(command.kind === "backfill" ? command.batchSize : undefined).toBe(100);
+});
+
+test("--since rejects a non-ISO value", () => {
+  const command = resolveCliCommand({ backfill: true, since: "garbage" });
+  expect(command.kind).toBe("error");
+  const nonIso = resolveCliCommand({ backfill: true, since: "Feb 1 2026" });
+  expect(nonIso.kind).toBe("error");
+});
+
+test("--since rejects a nonexistent calendar date", () => {
+  const command = resolveCliCommand({ backfill: true, since: "2026-02-30" });
+  expect(command.kind).toBe("error");
+});
+
+test("--batch-size rejects a non-integer and non-positive value", () => {
+  const command = resolveCliCommand({ backfill: true, batchSize: "abc" });
+  expect(command.kind).toBe("error");
+  const commandZero = resolveCliCommand({ backfill: true, batchSize: "0" });
+  expect(commandZero.kind).toBe("error");
+});
+
+test("--since and --batch-size require --backfill", () => {
+  const command = resolveCliCommand({ cron: true, since: "2026-01-01", batchSize: "50" });
+  expect(command.kind).toBe("error");
+  expect(command.kind === "error" ? command.message : "").toContain("--since/--batch-size require --backfill");
+});

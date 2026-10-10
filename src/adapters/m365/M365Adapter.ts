@@ -2,7 +2,8 @@ import type { FetchOpts } from "../../core/dto/FetchOpts.js";
 import type { LabelDef } from "../../core/dto/LabelDef.js";
 import type { MessageDTO } from "../../core/dto/MessageDTO.js";
 import type { TokenSet } from "../../core/dto/TokenSet.js";
-import { mapGraphMessage } from "./messageMapper.js";
+import type { LogPort } from "../../core/ports/LogPort.js";
+import { mapGraphMessage, readCategories } from "./messageMapper.js";
 import type { FetchLike, FetchResponseLike } from "./M365AuthAdapter.js";
 
 /** Graph's per-mailbox master categories: one GET to list them, one POST per missing category. */
@@ -28,7 +29,8 @@ type FetchInit = Parameters<FetchLike>[1];
 export type M365AdapterErrorCode =
   | "LIST_CATEGORIES_FAILED"
   | "CREATE_CATEGORY_FAILED"
-  | "LIST_MESSAGES_FAILED";
+  | "LIST_MESSAGES_FAILED"
+  | "WRITE_LABELS_FAILED";
 
 /**
  * Typed at the adapter boundary so the CLI renders one actionable line (AD-4) —
@@ -52,6 +54,8 @@ export interface M365AdapterDeps {
   fetchFn: FetchLike;
   /** Story 2.1's silent-refresh seam (`M365AuthAdapter.getAccessToken`); Graph work never talks to Entra directly. */
   getAccessToken(accountName: string, options?: { forceRefresh?: boolean }): Promise<TokenSet>;
+  /** Epic 7's 404 warning for moved messages; the caller supplies the orchestration log seam. */
+  logPort: LogPort;
 }
 
 function authorizationHeader(token: string): Record<string, string> {
@@ -66,6 +70,14 @@ function getRequest(headers: Record<string, string>): FetchInit {
 function postRequest(headers: Record<string, string>, payload: Record<string, string>): FetchInit {
   return {
     method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  };
+}
+
+function patchRequest(headers: Record<string, string>, payload: Record<string, unknown>): FetchInit {
+  return {
+    method: "PATCH",
     headers: { ...headers, "content-type": "application/json" },
     body: JSON.stringify(payload),
   };
@@ -115,16 +127,18 @@ async function readJsonObject(response: FetchResponseLike): Promise<Record<strin
 
 /**
  * M365 Graph work over plain `fetch` (no Graph SDK — Story 2.1's decision,
- * and `tests/adapters/**` stay stdlib-only). `ensureCategories` and `fetchMessages`
- * are implemented; `writeLabels` belongs to Epic 7.
+ * and `tests/adapters/**` stay stdlib-only). `ensureCategories`, `fetchMessages`
+ * and `writeLabels` are implemented.
  */
 export class M365Adapter {
   private readonly fetchFn: FetchLike;
   private readonly getAccessToken: M365AdapterDeps["getAccessToken"];
+  private readonly logPort: LogPort;
 
   constructor(deps: M365AdapterDeps) {
     this.fetchFn = deps.fetchFn;
     this.getAccessToken = deps.getAccessToken;
+    this.logPort = deps.logPort;
   }
 
   /**
@@ -234,6 +248,107 @@ export class M365Adapter {
       isFirstPage = false;
     }
     return messages;
+  }
+
+  /**
+   * Add-only label write for a single message (Story 7.1). Reads the message's current
+   * `categories` from Graph, then PATCHes with the union of existing + predicted labels.
+   * Nothing is removed; duplicates collapse; a per-message 404 is logged and absorbed
+   * so one moved message cannot fail a batch.
+   */
+  async writeLabels(accountId: string, messageId: string, labels: string[]): Promise<void> {
+    if (labels.length === 0) return;
+    try {
+      await this.runWriteLabels(accountId, messageId, labels);
+    } catch (error) {
+      if (error instanceof M365AdapterError && error.status === 401) {
+        const refreshed = (await this.getAccessToken(accountId, { forceRefresh: true })).accessToken;
+        await this.runWriteLabels(accountId, messageId, labels, refreshed);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private async runWriteLabels(
+    accountId: string,
+    messageId: string,
+    labels: string[],
+    token?: string,
+  ): Promise<void> {
+    const effectiveToken = token ?? (await this.getAccessToken(accountId)).accessToken;
+    const url = M365Adapter.messageUrl(messageId);
+
+    const readResponse = await this.send(
+      `${url}?$select=categories`,
+      getRequest(authorizationHeader(effectiveToken)),
+      accountId,
+      "WRITE_LABELS_FAILED",
+    );
+    if (readResponse.status === 404) {
+      this.warnMessageNotFound(accountId, messageId);
+      return;
+    }
+    if (!readResponse.ok) {
+      throw new M365AdapterError(
+        "WRITE_LABELS_FAILED",
+        accountId,
+        `Microsoft Graph refused to read message categories for account "${accountId}" (HTTP ${readResponse.status}).`,
+        readResponse.status,
+      );
+    }
+
+    const body = await readJsonObject(readResponse);
+    if (typeof body !== "object" || body === null || !Array.isArray(body.categories)) {
+      throw new M365AdapterError(
+        "WRITE_LABELS_FAILED",
+        accountId,
+        `Microsoft Graph returned message "${messageId}" without a categories list for account "${accountId}".`,
+      );
+    }
+
+    const existing = readCategories(body);
+    const existingSet = new Set(existing);
+    const union: string[] = [...existing];
+    for (const label of labels) {
+      if (!existingSet.has(label)) {
+        union.push(label);
+        existingSet.add(label);
+      }
+    }
+
+    if (union.length === existing.length) return;
+
+    const patchResponse = await this.send(
+      url,
+      patchRequest(authorizationHeader(effectiveToken), { categories: union }),
+      accountId,
+      "WRITE_LABELS_FAILED",
+    );
+    if (patchResponse.status === 404) {
+      this.warnMessageNotFound(accountId, messageId);
+      return;
+    }
+    if (!patchResponse.ok) {
+      throw new M365AdapterError(
+        "WRITE_LABELS_FAILED",
+        accountId,
+        `Microsoft Graph refused to write labels to message "${messageId}" for account "${accountId}" (HTTP ${patchResponse.status}).`,
+        patchResponse.status,
+      );
+    }
+  }
+
+  private static messageUrl(messageId: string): string {
+    return `${MESSAGES_URL}/${encodeURIComponent(messageId)}`;
+  }
+
+  /** The one warning shared by the read and PATCH 404 paths: a moved message is skipped, not fatal. */
+  private warnMessageNotFound(accountId: string, messageId: string): void {
+    this.logPort.warn(
+      `Message "${messageId}" was not found for account "${accountId}" — skipping label write.`,
+      { accountId, messageId },
+    );
   }
 
   private async listCategoryNames(accountId: string, token: string): Promise<Set<string>> {

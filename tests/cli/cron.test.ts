@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { acquireRunLock } from "../../src/adapters/lock/runLock.js";
 import type { FetchLike, FetchResponseLike } from "../../src/adapters/m365/M365AuthAdapter.js";
 import { runCron } from "../../src/cli/commands/cron.js";
 import type { TokenSet } from "../../src/core/dto/TokenSet.js";
@@ -77,6 +79,13 @@ function memoryTokenStore(tokens: Record<string, TokenSet>): TokenPort {
 
 function capturedLines(spy: ReturnType<typeof vi.spyOn>): string[] {
   return spy.mock.calls.map((call) => String(call[0]));
+}
+
+/** A pid no process holds: a child that has already exited. */
+function deadPid(): number {
+  const child = spawnSync(process.execPath, ["-e", ""]);
+  if (child.pid === undefined) throw new Error("the probe child did not report a pid");
+  return child.pid;
 }
 
 async function writeAccount(name: string, extra = ""): Promise<void> {
@@ -314,7 +323,10 @@ function gmailListPage(ids: string[]): FetchResponseLike {
   return jsonResponse({ messages: ids.map((id) => ({ id })) });
 }
 
-/** A `multipart/mixed` batch response, one metadata detail per id — with a per-part Content-ID. */
+/**
+ * A `multipart/mixed` batch response, one metadata detail per id — with a per-part Content-ID.
+ * The identity is the `Message-ID` header: a real Gmail detail has no top-level `internetMessageId`.
+ */
 function gmailBatchResponse(ids: string[], boundary = "batch_cli"): FetchResponseLike {
   const parts = ids.map(
     (id, index) =>
@@ -322,7 +334,6 @@ function gmailBatchResponse(ids: string[], boundary = "batch_cli"): FetchRespons
       `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n` +
       `${JSON.stringify({
         id,
-        internetMessageId: `<${id}@example.com>`,
         labelIds: ["INBOX"],
         snippet: `Preview ${id}`,
         internalDate: "1759999999000",
@@ -330,6 +341,7 @@ function gmailBatchResponse(ids: string[], boundary = "batch_cli"): FetchRespons
           headers: [
             { name: "From", value: `Sender ${id} <${id}@example.com>` },
             { name: "Subject", value: `Subject ${id}` },
+            { name: "Message-ID", value: `<${id}@example.com>` },
           ],
         },
       })}\r\n\r\n`,
@@ -466,7 +478,6 @@ test("--cron --source gmail skips a purged message's 404 part with a warn naming
     (status === 200
       ? `${JSON.stringify({
           id,
-          internetMessageId: `<${id}@example.com>`,
           labelIds: ["INBOX"],
           snippet: `Preview ${id}`,
           internalDate: "1759999999000",
@@ -474,6 +485,7 @@ test("--cron --source gmail skips a purged message's 404 part with a warn naming
             headers: [
               { name: "From", value: `Sender ${id} <${id}@example.com>` },
               { name: "Subject", value: `Subject ${id}` },
+              { name: "Message-ID", value: `<${id}@example.com>` },
             ],
           },
         })}\r\n\r\n`
@@ -658,4 +670,71 @@ test("an m365 and a gmail account sharing a name each keep their own cursor file
   expect(await readFile(statePath("shared", "gmail"), "utf8")).toContain('"lastRunTimestamp"');
   const m365State = JSON.parse(await readFile(statePath("shared", "m365"), "utf8")) as Record<string, string>;
   expect(Object.keys(m365State)).toEqual(["lastRunTimestamp"]);
+});
+
+test("--cron exits 1 with the AC's line when a run already holds the lock (CONCURRENT_RUN)", async () => {
+  await writeAccount("work");
+  await writeState("work", { lastRunTimestamp: STORED_ISO });
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  // A live run holds the lock; this test process stands in for it.
+  acquireRunLock({ configDir, pid: process.pid });
+
+  const code = await runCron(
+    { source: "m365", account: "all" },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      now: () => CYCLE_START,
+    },
+  );
+
+  expect(code).toBe(1);
+  expect(requests).toHaveLength(0);
+  expect(capturedLines(stdout)).toHaveLength(0);
+  expect(capturedLines(stderr).join("")).toContain("another email-classify run is in progress");
+  // The held lock is not the failed cycle's to remove.
+  expect(await readFile(statePath("work"), "utf8")).toContain(STORED_ISO);
+});
+
+test("--cron takes over a lock file left by a dead pid and proceeds (STALE_LOCK)", async () => {
+  await writeAccount("work");
+  await writeState("work", { lastRunTimestamp: STORED_ISO });
+  await writeFile(join(configDir, "run.lock"), `${deadPid()}\n`, "utf8");
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"])]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runCron(
+    { source: "m365", account: "all" },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      now: () => CYCLE_START,
+    },
+  );
+
+  expect(code).toBe(0);
+  expect(capturedLines(stderr)).toHaveLength(0);
+  expect(requests).toHaveLength(1);
+  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
+});
+
+test("--cron releases the lock on every exit path, including a failing cycle (RELEASE_ON_FAILURE)", async () => {
+  await writeAccount("work");
+  const { fetchFn } = recordingFetch([]);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  // No token for the account: its cycle fails and the run exits 1.
+  const code = await runCron(
+    { source: "m365", account: "all" },
+    { fetchFn, tokenStore: memoryTokenStore({}), configDir, now: () => CYCLE_START },
+  );
+
+  expect(code).toBe(1);
+  expect(capturedLines(stderr).join("")).toContain("1 of 1 m365 account(s) failed.");
+  await expect(readFile(join(configDir, "run.lock"), "utf8")).rejects.toThrow();
 });

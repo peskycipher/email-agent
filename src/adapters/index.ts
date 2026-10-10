@@ -53,6 +53,36 @@ export type { LoadTaxonomyOptions, TaxonomyErrorCode } from "./config/taxonomy.j
 export { completeWithRetry, labelSetSchema, validateLabelSet } from "./model/labelSetValidation.js";
 export type { CompleteWithRetryOptions, LabelSetValidation } from "./model/labelSetValidation.js";
 
+export { JevAdapter } from "./model/JevAdapter.js";
+export type {
+  JevAdapterDeps,
+  JevClient,
+  JevClientOptions,
+  JevNoulQuestion,
+  JevSystemOneRequest,
+  JevSystemOneResult,
+} from "./model/JevAdapter.js";
+
+export { buildLabelSetResponseSchema, OpenAIAdapter } from "./model/OpenAIAdapter.js";
+export type {
+  OpenAIAdapterDeps,
+  OpenAIChatClient,
+  OpenAIChatCompletion,
+  OpenAIChatParams,
+  OpenAIClientOptions,
+} from "./model/OpenAIAdapter.js";
+
+export {
+  createModelAdapter,
+  defaultModelClientFactories,
+  DEFAULT_MODEL_CONFIG,
+  ModelAdapterError,
+} from "./model/modelAdapterFactory.js";
+export type {
+  ModelAdapterDeps,
+  ModelAdapterErrorCode,
+} from "./model/modelAdapterFactory.js";
+
 export {
   accountStateDir,
   readAccountState,
@@ -62,3 +92,10 @@ export {
   StateFileError,
 } from "./config/stateFile.js";
 export type { AccountState, StateFileErrorCode, StateFileOptions } from "./config/stateFile.js";
+
+export { IdempotencyStore, IdempotencyStoreError } from "./idempotency/sqliteIdempotencyStore.js";
+export type { IdempotencyStoreErrorCode, IdempotencyStoreOptions } from "./idempotency/sqliteIdempotencyStore.js";
+export { idempotencyKey } from "./idempotency/key.js";
+
+export { acquireRunLock, releaseRunLock, runLockPath, RunLockError } from "./lock/runLock.js";
+export type { RunLockErrorCode, RunLockOptions } from "./lock/runLock.js";

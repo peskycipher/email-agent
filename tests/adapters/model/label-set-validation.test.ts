@@ -7,7 +7,8 @@ import {
 import type { LabelDef } from "../../../src/core/dto/LabelDef.js";
 import type { ModelConfig } from "../../../src/core/dto/ModelConfig.js";
 import type { LogContext, LogPort } from "../../../src/core/ports/LogPort.js";
-import type { JsonSchema, ModelPort } from "../../../src/core/ports/ModelPort.js";
+import type { ModelPort } from "../../../src/core/ports/ModelPort.js";
+import type { PromptParts } from "../../../src/core/skill/prompt.js";
 
 /** A frozen-taxonomy label; membership is checked against `name` only. */
 function label(name: string, description: string): LabelDef {
@@ -21,25 +22,22 @@ const TAXONOMY: LabelDef[] = [
 
 const CONFIG: ModelConfig = {
   provider: "jev",
-  model: "system1",
+  model: "jev-latest",
   apiKeyEnvVar: "TYPESAFE_API_KEY",
   temperature: 0.1,
   maxTokens: 500,
 };
 
-const SCHEMA: JsonSchema = {
-  type: "object",
-  properties: { labels: { type: "array", items: { type: "string" } } },
-  required: ["labels"],
-  additionalProperties: false,
+const PROMPT: PromptParts = {
+  system: "You classify an email against a fixed label taxonomy.",
+  user: "Subject: Quarterly invoice\n\nBody: Please find the invoice attached.",
 };
 
-const PROMPT = "Subject: Quarterly invoice\n\nBody: Please find the invoice attached.";
 const CONTEXT: LogContext = { accountId: "personal", internetMessageId: "<msg-1@example.com>" };
 
 interface ModelCall {
-  prompt: string;
-  schema: JsonSchema;
+  prompt: PromptParts;
+  taxonomy: LabelDef[];
   config: ModelConfig;
 }
 
@@ -50,8 +48,8 @@ interface ModelCall {
 function scriptedModel(responses: unknown[]): { model: ModelPort; calls: ModelCall[] } {
   const calls: ModelCall[] = [];
   const model: ModelPort = {
-    async complete(prompt, schema, config) {
-      calls.push({ prompt, schema, config });
+    async complete(prompt, taxonomy, config) {
+      calls.push({ prompt, taxonomy, config });
       return responses[Math.min(calls.length - 1, responses.length - 1)];
     },
   };
@@ -153,7 +151,6 @@ test("HAPPY is accepted on the first call and is never retried", async () => {
   const labels = await completeWithRetry({
     model,
     prompt: PROMPT,
-    schema: SCHEMA,
     config: CONFIG,
     taxonomy: TAXONOMY,
     log: log.logPort,
@@ -172,7 +169,6 @@ test("EMPTY VALID is accepted with no retry and no error log", async () => {
   const labels = await completeWithRetry({
     model,
     prompt: PROMPT,
-    schema: SCHEMA,
     config: CONFIG,
     taxonomy: TAXONOMY,
     log: log.logPort,
@@ -190,7 +186,6 @@ test("MALFORMED is retried to the budget and falls back to an empty set with one
   const labels = await completeWithRetry({
     model,
     prompt: PROMPT,
-    schema: SCHEMA,
     config: CONFIG,
     taxonomy: TAXONOMY,
     log: log.logPort,
@@ -218,7 +213,6 @@ test("LABEL NOT IN TAXONOMY is retried and falls back with the rejection reason 
   const labels = await completeWithRetry({
     model,
     prompt: PROMPT,
-    schema: SCHEMA,
     config: CONFIG,
     taxonomy: TAXONOMY,
     log: log.logPort,
@@ -237,7 +231,6 @@ test("LATE RECOVERY accepts a valid second attempt and logs nothing", async () =
   const labels = await completeWithRetry({
     model,
     prompt: PROMPT,
-    schema: SCHEMA,
     config: CONFIG,
     taxonomy: TAXONOMY,
     log: log.logPort,
@@ -259,7 +252,6 @@ test("LATE RECOVERY accepts a valid reply on the third and final attempt", async
   const labels = await completeWithRetry({
     model,
     prompt: PROMPT,
-    schema: SCHEMA,
     config: CONFIG,
     taxonomy: TAXONOMY,
     log: log.logPort,
@@ -274,8 +266,8 @@ test("PROVIDER ERROR re-throws to the caller instead of returning an empty set",
   const providerError = new Error("provider refused");
   const calls: ModelCall[] = [];
   const model: ModelPort = {
-    async complete(prompt, schema, config) {
-      calls.push({ prompt, schema, config });
+    async complete(prompt, taxonomy, config) {
+      calls.push({ prompt, taxonomy, config });
       throw providerError;
     },
   };
@@ -285,7 +277,6 @@ test("PROVIDER ERROR re-throws to the caller instead of returning an empty set",
     completeWithRetry({
       model,
       prompt: PROMPT,
-      schema: SCHEMA,
       config: CONFIG,
       taxonomy: TAXONOMY,
       log: log.logPort,
@@ -299,7 +290,7 @@ test("PROVIDER ERROR re-throws to the caller instead of returning an empty set",
   expect(log.entries).toEqual([]);
 });
 
-test("every attempt carries the unchanged prompt, schema and configured temperature", async () => {
+test("every attempt carries the unchanged PromptParts and configured temperature", async () => {
   const config: ModelConfig = { ...CONFIG, temperature: 0.42 };
   const { model, calls } = scriptedModel([{ labels: "nope" }]);
   const log = recordingLogPort();
@@ -307,7 +298,6 @@ test("every attempt carries the unchanged prompt, schema and configured temperat
   await completeWithRetry({
     model,
     prompt: PROMPT,
-    schema: SCHEMA,
     config,
     taxonomy: TAXONOMY,
     log: log.logPort,
@@ -316,7 +306,7 @@ test("every attempt carries the unchanged prompt, schema and configured temperat
   expect(calls).toHaveLength(3);
   for (const call of calls) {
     expect(call.prompt).toBe(PROMPT);
-    expect(call.schema).toBe(SCHEMA);
+    expect(call.taxonomy).toBe(TAXONOMY);
     expect(call.config).toBe(config);
     expect(call.config.temperature).toBe(0.42);
   }

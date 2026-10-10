@@ -498,14 +498,15 @@ So that **swapping models requires only a config change**.
 
 **Acceptance Criteria:**
 
-**Given** the classification engine calls `ModelPort`
-**When** it calls `complete(prompt, schema, config)`
-**Then** `JevModelAdapter` uses `@typesafe-ai/sdk`, reads API key from `TYPESAFE_API_KEY` env var
-**And** `OpenAIModelAdapter` uses OpenAI SDK, reads API key from `config.apiKeyEnvVar`
-**And** both implement `ModelPort` identically
-**And** `config.provider` selects adapter: `"jev" | "openai" | "anthropic" | "custom"`
-**And** custom provider supported via `extraParams` in config
-**And** default config: `provider="jev"`, `model="system1"`, `apiKeyEnvVar="TYPESAFE_API_KEY"`, `temperature=0.1`, `maxTokens=500`
+**Given** the classification engine calls `ModelPort` (reconciled to the classification seam — spine AD-3, Story 6.3 decision 1)
+**When** it calls `complete(prompt: PromptParts, taxonomy, config)`
+**Then** `JevAdapter` uses `@typesafe-ai/sdk`, reads the API key from the env var named by `config.apiKeyEnvVar` (default `TYPESAFE_API_KEY`)
+**And** `OpenAIAdapter` uses the OpenAI SDK, reading the API key from `config.apiKeyEnvVar`
+**And** both implement `ModelPort` identically; no `JsonSchema` crosses the port
+**And** the factory selects the adapter: `"jev" | "openai"` implemented, `"custom"` routed to the OpenAI adapter (`extraParams` as client options), `"anthropic"` a typed `UNSUPPORTED_PROVIDER` naming the remedy
+**And** Jev maps the prompt halves to one joined `state` string and one `noul` question per taxonomy label, thresholded at `config.labelThreshold ?? 0.5`; `temperature`/`maxTokens` are not sent to Jev (the API rejects unknown request fields — verified 2026-10-09)
+**And** wiring-time validation: the factory rejects an unknown provider and an unresolvable `apiKeyEnvVar` at construction
+**And** default config: `provider="jev"`, `model="jev-latest"` (the original `system1` is a model-class name; the API's models are `jev-latest` and `jev-preview`), `apiKeyEnvVar="TYPESAFE_API_KEY"`, `temperature=0.1`, `maxTokens=500`
 
 ### Story 6.4: Single-Call Classification Function
 
@@ -516,13 +517,12 @@ So that **each message is classified in one model call with full observability**
 **Acceptance Criteria:**
 
 **Given** a `MessageDTO` and the active taxonomy
-**When** `classify(message, taxonomy, modelConfig)` is called
-**Then** it builds the prompt from the template, calls `ModelPort.complete()`, validates the output
+**When** `classify(options: ClassifyOptions)` is called with `{ message, taxonomy, model: ModelPort, config: ModelConfig, logPort: LogPort, context? }` (reconciled 2026-10-09, Story 6.4 decisions 6-7 — composition in `orch/classify.ts`, options-object idiom per 6.2's precedent)
+**Then** it builds the prompt from the template (6.1's `buildPrompt`, core-pure), calls `ModelPort.complete()` through 6.2's `completeWithRetry`, validates the output
 **And** returns `LabelSet` (validated labels array)
 **And** latency per message < 3s p95 on Jev System1 (target, not hard SLA)
 **And** token usage logged per message (input/output tokens)
-**And** function is pure: no I/O, no side effects, no external deps
-**And** all I/O happens in adapters outside this function
+**And** engine logic stays pure: `buildPrompt` is zero-dep core; all I/O arrives via the injected `ModelPort`/`LogPort` from the application layer
 
 ---
 

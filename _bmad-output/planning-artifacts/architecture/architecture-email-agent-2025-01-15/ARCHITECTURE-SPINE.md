@@ -38,8 +38,8 @@ companions: []
         ▼                      ▼                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      SKILL CORE                             │
-│  classify(message: MessageDTO, taxonomy, config): LabelSet  │
-│  (pure function, zero I/O, zero deps)                       │
+│  buildPrompt: pure prompt builder (core, zero deps)         │
+│  composition: orch/classify.ts (Story 6.4 decisions 6-7)    │
 └─────────────────────────────────────────────────────────────┘
         ▲                      ▲                      ▲
         │                      │                      │
@@ -61,7 +61,7 @@ companions: []
 
 - **Binds:** `ClassificationEngine`, all harnesses
 - **Prevents:** Harness-specific logic leaking into classification (model calls, API clients, file I/O)
-- **Rule:** `classify(message: MessageDTO, taxonomy: Taxonomy, modelConfig: ModelConfig): Promise<LabelSet>` — single async function, no side effects. All I/O happens in adapters outside the core.
+- **Rule (reconciled 2026-10-09, Story 6.4 decisions 6-7):** engine logic stays pure in core (`buildPrompt`, DTOs, ports — zero deps, no side effects); the composed `classify` lives in the application layer as `classify(options: ClassifyOptions)` carrying `{ message, taxonomy, model: ModelPort, config: ModelConfig, logPort: LogPort, context? }`. All I/O arrives via the injected `ModelPort`/`LogPort` — never an adapter import.
 
 ### AD-2 — MessageDTO is the single shared data shape
 
@@ -71,9 +71,10 @@ companions: []
 
 ### AD-3 — ModelClient is an adapter (port: `ModelPort`)
 
-- **Binds:** `ClassificationEngine`, `JevModelAdapter`, `OpenAIModelAdapter`, future adapters
+- **Binds:** `ClassificationEngine`, `JevAdapter`, `OpenAIAdapter`, `ModelAdapterFactory`, future adapters
 - **Prevents:** Model-specific code in ClassificationEngine; hardcoded Jev calls
-- **Rule:** `ModelPort = { complete(prompt: string, schema: JsonSchema, config: ModelConfig): Promise<unknown> }`. ClassificationEngine calls `modelPort.complete()` with rendered prompt + output schema. Adapters implement provider-specific auth, request/response shaping, retry.
+- **Rule:** `ModelPort = { complete(prompt: PromptParts, taxonomy: Taxonomy, config: ModelConfig): Promise<unknown> }` — the *classification* seam, not a generic completion seam (Story 6.3 decision 1, 2026-10-09, replaces the earlier `complete(prompt, schema, config)` shape: `JsonSchema` was consumed by no adapter and the Jev API cannot honor one — `@typesafe-ai/sdk` takes typed `noul`/`choice` questions only, extra request fields reject with 400; verified live 2026-10-09). ClassificationEngine calls `modelPort.complete()` with Story 6.1's rendered prompt halves and the merged taxonomy. Adapters own provider auth, wire-format shaping (Jev: one noul question per label, threshold `config.labelThreshold ?? 0.5`; OpenAI: internal strict JSON schema from the taxonomy) and their own SDK-level retries; the orchestrator owns retry-with-backoff for transport failures (PRD FR-1).
+- **Default config:** `provider="jev"`, `model="jev-latest"` (the AC's `system1` is a System-One model-*class* name; the API's models are `jev-latest` and `jev-preview`), `apiKeyEnvVar="TYPESAFE_API_KEY"`, `temperature=0.1`, `maxTokens=500`.
 
 ### AD-4 — TokenStore is an adapter (port: `TokenPort`)
 
@@ -182,7 +183,6 @@ email-classify/
 │   │   │   ├── TokenSet.ts
 │   │   │   └── FetchOpts.ts
 │   │   ├── skill/
-│   │   │   ├── classify.ts           # pure function: classify(message, taxonomy, modelConfig, modelPort) -> LabelSet
 │   │   │   ├── prompt.ts             # prompt template + few-shots
 │   │   │   ├── schema.ts             # Zod schema for LabelSet output
 │   │   │   └── taxonomy.ts           # loads taxonomy.yaml
@@ -228,6 +228,7 @@ email-classify/
 │   │
 │   └── orch/                        # orchestration (depends on core ports)
 │       ├── backfill.ts               # backfill flow
+│       ├── classify.ts               # composition: buildPrompt + completeWithRetry (Story 6.4 decision 6)
 │       ├── cron.ts                   # cron flow
 │       └── sync.ts                   # category/label sync
 │
@@ -244,7 +245,7 @@ email-classify/
 
 | Capability / Area | Lives in | Governed by |
 | --- | --- | --- |
-| Classification (FR-10, FR-11, FR-12) | `core/skill/classify.ts` | AD-1, AD-2, AD-3 |
+| Classification (FR-10, FR-11, FR-12) — engine logic (`buildPrompt`) in `core/skill/prompt.ts`, composition (`classify`) in `orch/classify.ts` (Story 6.4 decision 6; the composed unit composes core prompt-build with the adapter-layer conversation per 6.2's schema-home) | `orch/classify.ts` + `core/skill/prompt.ts` | AD-1, AD-2, AD-3 |
 | M365 Auth (FR-1, multi-account) | `adapters/m365/M365AuthAdapter.ts` (one per account) | AD-4, AD-8 |
 | Gmail Auth (FR-2, multi-account) | `adapters/gmail/GmailAuthAdapter.ts` (one per account) | AD-4, AD-8 |
 | Taxonomy load + user overrides | `adapters/config/taxonomy.ts` | AD-9 |

@@ -6,6 +6,10 @@ export interface CliOptions {
   backfill?: boolean;
   cron?: boolean;
   source?: string;
+  /** `--backfill` lower time bound (Story 8.1); parsed to a `Date` in the resolver. */
+  since?: string;
+  /** `--backfill` per-account fetch batch; validated here, clamped by the adapter. */
+  batchSize?: string;
 }
 
 /**
@@ -16,7 +20,7 @@ export interface CliOptions {
 export type CliCommand =
   | { kind: "auth"; provider: string; account: string }
   | { kind: "sync"; account: string }
-  | { kind: "backfill"; source: "m365" | "gmail"; account: string }
+  | { kind: "backfill"; source: "m365" | "gmail"; account: string; since?: Date; batchSize?: number }
   | { kind: "cron"; source: "m365" | "gmail"; account: string }
   | { kind: "error"; message: string };
 
@@ -42,7 +46,39 @@ function resolveBackfill(options: CliOptions): CliCommand {
     return { kind: "error", message: `Unknown --source "${source}" — supported sources are "m365" and "gmail".` };
   }
   // `--account` defaults to "all": backfill is meant to run for every enabled account.
-  return { kind: "backfill", source, account: options.account ?? "all" };
+  // The two optional bounds are validated here so a malformed one fails before any account is listed.
+  const since = parseSince(options.since);
+  if (since === null) {
+    return { kind: "error", message: `--since "${options.since}" is not a valid date — use an ISO-8601 date (e.g. 2026-01-01).` };
+  }
+  const batchSize = parseBatchSize(options.batchSize);
+  if (batchSize === null) {
+    return { kind: "error", message: `--batch-size "${options.batchSize}" is not a positive integer.` };
+  }
+  return {
+    kind: "backfill",
+    source,
+    account: options.account ?? "all",
+    ...(since === undefined ? {} : { since }),
+    ...(batchSize === undefined ? {} : { batchSize }),
+  };
+}
+
+/** `undefined` when unset; `null` when set but unparseable, so the caller can name the bad value. */
+function parseSince(raw: string | undefined): Date | undefined | null {
+  if (raw === undefined) return undefined;
+  const value = raw.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? null : date;
+}
+
+/** `undefined` when unset; `null` when set but not a positive integer. The ceiling stays the adapter's. */
+function parseBatchSize(raw: string | undefined): number | undefined | null {
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw.trim())) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 1 ? value : null;
 }
 
 /**
@@ -71,6 +107,10 @@ function resolveCron(options: CliOptions): CliCommand {
 }
 
 export function resolveCliCommand(options: CliOptions): CliCommand {
+  if (options.backfill !== true && (options.since !== undefined || options.batchSize !== undefined)) {
+    return { kind: "error", message: "--since/--batch-size require --backfill." };
+  }
+
   if (options.backfill === true) return resolveBackfill(options);
   if (options.cron === true) return resolveCron(options);
 

@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-08-2026 10:25
-last_updated: 10-09-2026 20:29
+last_updated: 10-10-2026 23:29
 project: email-agent
 project_key: NOKEY
 tracking_system: file-system
@@ -41,15 +41,15 @@ development_status:
   1-3-dtos-shared-types-with-accountid: done
   epic-1-retrospective: done
 
-  epic-2: in-progress
+  epic-2: done
   2-1-m365-device-code-authentication-multi-account-accountname-va: done
-  epic-2-retrospective: optional
+  epic-2-retrospective: done
 
-  epic-3: in-progress
+  epic-3: done
   3-1-gmail-oauth-user-consent-flow-multi-account-accountname-vali: done
-  epic-3-retrospective: optional
+  epic-3-retrospective: done
 
-  epic-4: in-progress
+  epic-4: done
   4-1-taxonomy-definition-user-overrides: done
   4-2-m365-master-category-sync-multi-account: done
   4-3-gmail-label-sync-multi-account: done
@@ -62,21 +62,21 @@ development_status:
   5-4-gmail-incremental-message-fetch-cron-multi-account-with-hist: done
   epic-5-retrospective: done
 
-  epic-6: in-progress
+  epic-6: done
   6-1-classification-prompt-template: done
   6-2-output-schema-validation-zod: done
-  6-3-model-abstraction-layer-modelport: backlog
-  6-4-single-call-classification-function: backlog
-  epic-6-retrospective: optional
+  6-3-model-abstraction-layer-modelport: done
+  6-4-single-call-classification-function: done
+  epic-6-retrospective: done
 
-  epic-7: backlog
-  7-1-m365-label-write-multi-account: backlog
-  7-2-gmail-label-write-multi-account: backlog
-  epic-7-retrospective: optional
+  epic-7: done
+  7-1-m365-label-write-multi-account: done
+  7-2-gmail-label-write-multi-account: done
+  epic-7-retrospective: done
 
-  epic-8: backlog
-  8-1-backfill-mode-execution-multi-account: backlog
-  8-2-idempotency-resume-multi-account: backlog
+  epic-8: in-progress
+  8-1-backfill-mode-execution-multi-account: done
+  8-2-idempotency-resume-multi-account: done
   8-3-cron-mode-loop-multi-account: backlog
   epic-8-retrospective: optional
 
@@ -101,20 +101,20 @@ action_items:
     epic: 1
     action: "Add .env.* variants to .gitignore (keep any .env.example unignored)"
     owner: "Loki"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-08.md"
   - id: "epic-1-retro-item-2-reconcile-epics-md-71-nfr4-dependency-ar"
     epic: 1
     action: "Reconcile epics.md:71 NFR4 dependency arrow to include orch"
     owner: "Loki"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-08.md"
   - id: "epic-1-retro-item-3-add-a-runnable-external-import-guard-for"
     epic: 1
     action: "Add a runnable external-import guard for src/core/** so a package import
       fails bun run lint"
     owner: "Loki"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-08.md"
   - id: "epic-4-retro-item-4-guard-a-mistyped-top-level-config-yaml-k"
     epic: 4
@@ -219,3 +219,59 @@ action_items:
     owner: "Loki"
     status: open
     ref: "_bmad-output/implementation-artifacts/epic-5-retro-2026-10-09.md"
+  - id: "epic-2-retro-item-1-add-offline-access-to-m365-scopes"
+    epic: 2
+    action: "Add offline_access to M365_SCOPES (or document why it is not needed)"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-10-09.md"
+  - id: "epic-2-retro-item-2-run-the-live-entra-smoke-or-close-it"
+    epic: 2
+    action: "Run the live Entra smoke (needs a real Entra registration), or close
+      it by adding offline_access defensively"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-10-09.md"
+  - id: "epic-2-retro-item-3-field-validate-tokenset-in-parse-tokenset"
+    epic: 2
+    action: "Field-validate TokenSet in KeychainTokenStore.parseTokenSet (replace
+      the final as TokenSet cast with a Zod check)"
+    owner: "dev agent"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-10-09.md"
+  - id: "epic-3-retro-item-1-reconcile-architecture-spine-gmailauthadapter-implements-tokenport"
+    epic: 3
+    action: "Reconcile ARCHITECTURE-SPINE.md:199 to match the shipped GmailAuthAdapter
+      constructor (tokenStore: TokenPort), mirroring the m365 deviation at :194"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-10-09.md"
+  - id: "epic-3-retro-item-2-decide-the-reserve-loopback-port-race"
+    epic: 3
+    action: "Decide the reserveLoopbackPort reserve→rebind race: either accept the
+      CONSENT_UNAVAILABLE retry as the resolution, or change the authorize seam to
+      own the server"
+    owner: "dev agent + Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-10-09.md"
+  - id: "epic-6-retro-item-1-renegotiate-6-1-frozen-prompt-framing"
+    epic: 6
+    action: "Renegotiate 6-1's frozen prompt framing: drop the JSON wire framing from
+      buildSystem, keep the provider-neutral lines (label sourcing, precision, empty-valid)"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-10-09.md"
+  - id: "epic-6-retro-item-2-reconcile-prd-490-jev-json-assumption"
+    epic: 6
+    action: "Reconcile prd.md:490 Jev-returns-JSON assumption to the as-built typed-questions
+      reality"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-10-09.md"
+  - id: "epic-6-retro-item-3-measure-sm-3-when-the-loop-wires"
+    epic: 6
+    action: "Measure SM-3 (50-message spot-check) when Epic 8/11 wire fetch-to-classify;
+      use labelProbs to tune labelThreshold"
+    owner: "Loki + Epic 8"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-10-09.md"

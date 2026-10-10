@@ -14,6 +14,7 @@ import {
   type FetchResponseLike,
 } from "../../../src/adapters/m365/M365AuthAdapter.js";
 import type { LabelDef } from "../../../src/core/dto/LabelDef.js";
+import type { LogContext, LogPort } from "../../../src/core/ports/LogPort.js";
 import type { TokenSet } from "../../../src/core/dto/TokenSet.js";
 
 const LISTS_URL = "https://graph.microsoft.com/v1.0/me/outlook/masterCategories";
@@ -100,6 +101,30 @@ function tokenSource(tokens: TokenSet = ACCESS_TOKEN): {
   };
 }
 
+function logPortRecorder(): {
+  logPort: LogPort;
+  warnings: Array<{ message: string; context?: LogContext }>;
+} {
+  const warnings: Array<{ message: string; context?: LogContext }> = [];
+  return {
+    logPort: {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (message, context) => warnings.push({ message, context }),
+      error: () => undefined,
+    },
+    warnings,
+  };
+}
+
+/** The adapter's required log seam for tests that do not assert on warnings. */
+const SILENT_LOG_PORT: LogPort = {
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};
+
 let configDir: string;
 
 beforeEach(async () => {
@@ -120,7 +145,7 @@ test("creates one POST per taxonomy label with its displayName and preset colour
     ...labels.map(() => jsonResponse({ id: "created" }, true, 201)),
     jsonResponse({ value: labels.map((label) => ({ id: label.name, displayName: label.name })) }),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: token.getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: token.getAccessToken });
 
   await adapter.ensureCategories("work", labels);
 
@@ -151,7 +176,7 @@ test("re-running against an already-synced account creates nothing (IDEMPOTENT)"
   const { fetchFn, requests } = scriptedFetch([
     jsonResponse({ value: LABELS.map((label) => ({ id: label.name, displayName: label.name })) }),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.ensureCategories("work", LABELS);
 
@@ -169,7 +194,7 @@ test("creates only the absent labels and leaves the existing ones alone (PARTIAL
     }),
     jsonResponse({ id: "created" }, true, 201),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.ensureCategories("work", LABELS);
 
@@ -185,7 +210,7 @@ test("follows @odata.nextLink to exhaustion before deciding what is missing (PAG
     jsonResponse({ value: [{ id: "c2", displayName: "Crypto" }] }),
     jsonResponse({ id: "created" }, true, 201),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.ensureCategories("work", LABELS);
 
@@ -202,7 +227,7 @@ test("a label carrying preset12 is POSTed with that exact colour (COLOUR)", asyn
     gmailColor: "#D1D5DB",
   };
   const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] }), jsonResponse({}, true, 201)]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.ensureCategories("work", [label]);
 
@@ -214,7 +239,7 @@ test("matches displayName exactly and case-sensitively", async () => {
     jsonResponse({ value: [{ id: "c1", displayName: "action needed" }] }),
     jsonResponse({}, true, 201),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.ensureCategories("work", [LABELS[0] as LabelDef]);
 
@@ -226,7 +251,7 @@ test("a non-2xx list response is a typed error naming the account and status (AP
   const { fetchFn, requests } = scriptedFetch([
     jsonResponse({ error: { code: "Forbidden", message: "SECRET-PAYLOAD" } }, false, 403),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter.ensureCategories("work", LABELS).catch((err: unknown) => err)) as M365AdapterError;
 
@@ -245,7 +270,7 @@ test("a throttled create surfaces as a typed error with no retry (THROTTLED)", a
     jsonResponse({ value: [] }),
     jsonResponse({ error: { code: "TooManyRequests", message: "SECRET-PAYLOAD" } }, false, 429),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter.ensureCategories("work", [LABELS[0] as LabelDef]).catch((err: unknown) => err)) as
     M365AdapterError;
@@ -261,7 +286,7 @@ test("a throttled create surfaces as a typed error with no retry (THROTTLED)", a
 
 test("a list response without a category list is a typed error, never a mass-create", async () => {
   const { fetchFn, requests } = scriptedFetch([jsonResponse({ "@odata.context": "..." })]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter.ensureCategories("work", LABELS).catch((err: unknown) => err)) as M365AdapterError;
 
@@ -273,7 +298,7 @@ test("an unreachable Graph is reported without the thrown cause (network)", asyn
   const fetchFn: FetchLike = async () => {
     throw new TypeError("fetch failed: connect ECONNREFUSED");
   };
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter.ensureCategories("work", LABELS).catch((err: unknown) => err)) as M365AdapterError;
 
@@ -289,6 +314,7 @@ test("the token seam's typed error propagates unchanged without any Graph call (
   );
   const { fetchFn, requests } = scriptedFetch([]);
   const adapter = new M365Adapter({
+    logPort: SILENT_LOG_PORT,
     fetchFn,
     getAccessToken: async () => {
       throw authError;
@@ -303,7 +329,7 @@ test("the token seam's typed error propagates unchanged without any Graph call (
 
 test("a create POST returning a generic non-2xx is a typed error carrying its status (API_ERROR)", async () => {
   const { fetchFn } = scriptedFetch([jsonResponse({ value: [] }), jsonResponse({}, false, 500)]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter.ensureCategories("work", [LABELS[0] as LabelDef]).catch((err: unknown) => err)) as
     M365AdapterError;
@@ -320,7 +346,7 @@ test("a non-2xx on a later page fails the list before anything is created (PAGED
     jsonResponse({ value: [{ id: "c1", displayName: "Action Needed" }], "@odata.nextLink": nextLink }),
     jsonResponse({}, false, 503),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter.ensureCategories("work", LABELS).catch((err: unknown) => err)) as M365AdapterError;
 
@@ -348,7 +374,7 @@ test("a 401 on the category list refreshes the token once and retries (UNAUTHORI
     jsonResponse({ id: "created" }, true, 201),
     jsonResponse({ id: "created" }, true, 201),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken });
 
   await adapter.ensureCategories("work", LABELS);
 
@@ -376,7 +402,7 @@ test("a 401 on a category create refreshes the token once and retries the whole 
     jsonResponse({ id: "created" }, true, 201),
     jsonResponse({ id: "created" }, true, 201),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken });
 
   await adapter.ensureCategories("work", LABELS.slice(0, 2));
 
@@ -396,7 +422,7 @@ test("a 401 that persists after forceRefresh is a typed failure (UNAUTHORIZED_RE
     jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
     jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken });
 
   const error = (await adapter.ensureCategories("work", LABELS).catch((err: unknown) => err)) as M365AdapterError;
 
@@ -410,7 +436,7 @@ test("a 401 that persists after forceRefresh is a typed failure (UNAUTHORIZED_RE
 test("the same name given twice is created only once", async () => {
   const label = LABELS[0] as LabelDef;
   const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] }), jsonResponse({}, true, 201)]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.ensureCategories("work", [label, label]);
 
@@ -422,7 +448,7 @@ test("fetches one page with $top, $select, the Bearer header and a bounded signa
     jsonResponse({ value: [graphMessage("m1"), graphMessage("m2")] }),
   ]);
   const token = tokenSource();
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: token.getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: token.getAccessToken });
 
   const messages = await adapter.fetchMessages({ source: "m365", accountId: "work" });
 
@@ -442,7 +468,7 @@ test("fetches one page with $top, $select, the Bearer header and a bounded signa
 
 test("an unset batchSize defaults $top to 50 (DEFAULT_BATCH)", async () => {
   const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] })]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.fetchMessages({ source: "m365", accountId: "work", batchSize: undefined });
 
@@ -457,7 +483,7 @@ const batchCases: Array<[number, string]> = [
 
 test.each(batchCases)("clamps batchSize %i to $top=%s (BATCH_SIZE)", async (batchSize, top) => {
   const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] })]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.fetchMessages({ source: "m365", accountId: "work", batchSize });
 
@@ -466,7 +492,7 @@ test.each(batchCases)("clamps batchSize %i to $top=%s (BATCH_SIZE)", async (batc
 
 test("scopes the request to the configured mail folder (FOLDER)", async () => {
   const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] })]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.fetchMessages({ source: "m365", accountId: "work", folder: "Inbox" });
 
@@ -478,7 +504,7 @@ test("an incremental fetch adds $filter and $orderby to the first page (HAPPY, O
   const { fetchFn, requests } = scriptedFetch([
     jsonResponse({ value: [graphMessage("m1"), graphMessage("m2")] }),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const messages = await adapter.fetchMessages({ source: "m365", accountId: "work", since: SINCE });
 
@@ -493,7 +519,7 @@ test("an incremental fetch adds $filter and $orderby to the first page (HAPPY, O
 
 test("without since the URL carries neither $filter nor $orderby (NO_STATE)", async () => {
   const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] })]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.fetchMessages({ source: "m365", accountId: "work" });
 
@@ -504,7 +530,7 @@ test("without since the URL carries neither $filter nor $orderby (NO_STATE)", as
 
 test("the filter's ISO value is percent-encoded, not interpolated raw (FILTER_ENCODING)", async () => {
   const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] })]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.fetchMessages({ source: "m365", accountId: "work", since: new Date(SINCE_ISO) });
 
@@ -515,7 +541,7 @@ test("the filter's ISO value is percent-encoded, not interpolated raw (FILTER_EN
 
 test("a folder-scoped incremental fetch carries the filter too (FOLDER)", async () => {
   const { fetchFn, requests } = scriptedFetch([jsonResponse({ value: [] })]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   await adapter.fetchMessages({ source: "m365", accountId: "work", folder: "Inbox", since: SINCE });
 
@@ -531,7 +557,7 @@ test("follows @odata.nextLink page by page, in order, using the link verbatim (P
     jsonResponse({ value: [graphMessage("m2")], "@odata.nextLink": page3 }),
     jsonResponse({ value: [graphMessage("m3")] }),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const messages = await adapter.fetchMessages({ source: "m365", accountId: "work" });
 
@@ -558,7 +584,7 @@ test("maps the selected Graph fields onto the canonical DTO (MAPPING)", async ()
       ],
     }),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const [message] = await adapter.fetchMessages({ source: "m365", accountId: "work" });
 
@@ -585,6 +611,7 @@ test("the token seam's rejection fails the fetch with no Graph call (AUTH)", asy
   );
   const { fetchFn, requests } = scriptedFetch([]);
   const adapter = new M365Adapter({
+    logPort: SILENT_LOG_PORT,
     fetchFn,
     getAccessToken: async () => {
       throw authError;
@@ -611,7 +638,7 @@ test("a 401 on the first page refreshes the token once and retries (UNAUTHORIZED
     jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
     jsonResponse({ value: [graphMessage("m1")] }),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken });
 
   const messages = await adapter.fetchMessages({ source: "m365", accountId: "work" });
 
@@ -632,7 +659,7 @@ test("a 401 that persists after forceRefresh is a typed failure (UNAUTHORIZED_RE
     jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
     jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken });
 
   const error = (await adapter.fetchMessages({ source: "m365", accountId: "work" }).catch((err: unknown) => err)) as M365AdapterError;
 
@@ -649,7 +676,7 @@ test("a 401 on a later page is not retried; nextLink URLs are not safe to replay
     jsonResponse({ value: [graphMessage("m1")], "@odata.nextLink": page2 }),
     jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter.fetchMessages({ source: "m365", accountId: "work" }).catch((err: unknown) => err)) as M365AdapterError;
 
@@ -663,7 +690,7 @@ test("a 403 on the first page is a typed error naming account and status (API_ER
   const { fetchFn, requests } = scriptedFetch([
     jsonResponse({ error: { code: "Forbidden", message: "SECRET-PAYLOAD" } }, false, 403),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter
     .fetchMessages({ source: "m365", accountId: "work" })
@@ -685,7 +712,7 @@ test("a 500 on the second page rejects the whole fetch, never a partial array (M
     jsonResponse({ value: [graphMessage("m1")], "@odata.nextLink": page2 }),
     jsonResponse({}, false, 500),
   ]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter
     .fetchMessages({ source: "m365", accountId: "work" })
@@ -699,7 +726,7 @@ test("a 500 on the second page rejects the whole fetch, never a partial array (M
 
 test("a 200 without a value array is a typed error, never an empty result (MALFORMED)", async () => {
   const { fetchFn, requests } = scriptedFetch([jsonResponse({ "@odata.context": "..." })]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter
     .fetchMessages({ source: "m365", accountId: "work" })
@@ -712,7 +739,7 @@ test("a 200 without a value array is a typed error, never an empty result (MALFO
 
 test("a 429 on a page is a typed failure with no retry (THROTTLED)", async () => {
   const { fetchFn, requests } = scriptedFetch([jsonResponse({}, false, 429)]);
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter
     .fetchMessages({ source: "m365", accountId: "work" })
@@ -728,12 +755,230 @@ test("an unreachable Graph is a typed error without the thrown cause (network)",
   const fetchFn: FetchLike = async () => {
     throw new TypeError("fetch failed: connect ECONNREFUSED");
   };
-  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken });
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
 
   const error = (await adapter
     .fetchMessages({ source: "m365", accountId: "work" })
     .catch((err: unknown) => err)) as M365AdapterError;
 
   expect(error.code).toBe("LIST_MESSAGES_FAILED");
+  expect(error.message).toBe('Microsoft Graph could not be reached for account "work".');
+});
+
+test("writes the union of existing and predicted categories (HAPPY)", async () => {
+  const messageId = "AAMkAG==";
+  const encodedId = encodeURIComponent(messageId);
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ categories: ["Blue"] }),
+    jsonResponse({}, true, 200),
+  ]);
+  const { logPort, warnings } = logPortRecorder();
+  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken, logPort });
+
+  await adapter.writeLabels("work", messageId, ["Crypto"]);
+
+  expect(requests).toHaveLength(2);
+  expect(requests[0]?.method).toBe("GET");
+  expect(requests[0]?.url).toBe(`${MESSAGES_URL}/${encodedId}?$select=categories`);
+  expect(requests[1]?.method).toBe("PATCH");
+  expect(requests[1]?.url).toBe(`${MESSAGES_URL}/${encodedId}`);
+  expect(requests[1]?.body).toEqual({ categories: ["Blue", "Crypto"] });
+  expect(warnings).toHaveLength(0);
+});
+
+test("skips PATCH when the message already carries every predicted label (IDEMPOTENT)", async () => {
+  const { fetchFn, requests } = scriptedFetch([jsonResponse({ categories: ["Crypto", "Blue"] })]);
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
+
+  await adapter.writeLabels("work", "m1", ["Crypto"]);
+
+  expect(requests).toHaveLength(1);
+  expect(requests[0]?.method).toBe("GET");
+});
+
+test("returns without network calls or a token fetch when the predicted set is empty (EMPTY_SET)", async () => {
+  const { fetchFn, requests } = scriptedFetch([]);
+  const token = tokenSource();
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: token.getAccessToken });
+
+  await adapter.writeLabels("work", "m1", []);
+
+  expect(requests).toHaveLength(0);
+  // The early return must precede token acquisition: an empty set is a no-write, not
+  // a silent-refresh round trip (which could prompt for credentials).
+  expect(token.calls).toHaveLength(0);
+});
+
+test("leaves unrelated existing categories untouched (SUBSUMED)", async () => {
+  const { fetchFn, requests } = scriptedFetch([jsonResponse({ categories: ["Blue", "Crypto", "Red"] })]);
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
+
+  await adapter.writeLabels("work", "m1", ["Blue"]);
+
+  expect(requests).toHaveLength(1);
+});
+
+test("collapses duplicate predicted labels in the PATCH body (DUPLICATE_INPUT)", async () => {
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ categories: [] }),
+    jsonResponse({}, true, 200),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
+
+  await adapter.writeLabels("work", "m1", ["Crypto", "Crypto"]);
+
+  expect(requests).toHaveLength(2);
+  expect(requests[1]?.body).toEqual({ categories: ["Crypto"] });
+});
+
+test("treats differing case as a new category (CASE_MISMATCH)", async () => {
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ categories: ["crypto"] }),
+    jsonResponse({}, true, 200),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
+
+  await adapter.writeLabels("work", "m1", ["Crypto"]);
+
+  expect(requests[1]?.body).toEqual({ categories: ["crypto", "Crypto"] });
+});
+
+test("absorbs a 404 from the read and logs a warning (NOT_FOUND)", async () => {
+  const messageId = "moved";
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ error: { code: "ErrorItemNotFound" } }, false, 404),
+  ]);
+  const { logPort, warnings } = logPortRecorder();
+  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken, logPort });
+
+  await expect(adapter.writeLabels("work", messageId, ["Crypto"])).resolves.toBeUndefined();
+
+  expect(requests).toHaveLength(1);
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]?.message).toContain("work");
+  expect(warnings[0]?.message).toContain(messageId);
+  expect(warnings[0]?.context).toEqual({ accountId: "work", messageId });
+});
+
+test("absorbs a 404 from the PATCH and logs a warning (NOT_FOUND_PATCH)", async () => {
+  const messageId = "moved";
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ categories: [] }),
+    jsonResponse({ error: { code: "ErrorItemNotFound" } }, false, 404),
+  ]);
+  const { logPort, warnings } = logPortRecorder();
+  const adapter = new M365Adapter({ fetchFn, getAccessToken: tokenSource().getAccessToken, logPort });
+
+  await expect(adapter.writeLabels("work", messageId, ["Crypto"])).resolves.toBeUndefined();
+
+  expect(requests).toHaveLength(2);
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]?.message).toContain("work");
+  expect(warnings[0]?.message).toContain(messageId);
+});
+
+test("refreshes the token once on a 401 and replays the whole operation (UNAUTHORIZED)", async () => {
+  const calls: { accountId: string; forceRefresh?: boolean }[] = [];
+  const getAccessToken = async (accountId: string, options?: { forceRefresh?: boolean }) => {
+    calls.push({ accountId, forceRefresh: options?.forceRefresh });
+    return {
+      accessToken: calls.length === 1 ? "access-1" : "access-2",
+      expiresAt: 9_999_999_999,
+      scopes: ["Mail.ReadWrite"],
+    };
+  };
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
+    jsonResponse({ categories: [] }),
+    jsonResponse({}, true, 200),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken });
+
+  await adapter.writeLabels("work", "m1", ["Crypto"]);
+
+  expect(calls).toEqual([{ accountId: "work" }, { accountId: "work", forceRefresh: true }]);
+  expect(requests).toHaveLength(3);
+  expect(requests[0]?.headers.authorization).toBe("Bearer access-1");
+  expect(requests[1]?.headers.authorization).toBe("Bearer access-2");
+  expect(requests[2]?.headers.authorization).toBe("Bearer access-2");
+  expect(requests[2]?.body).toEqual({ categories: ["Crypto"] });
+});
+
+test("a 401 that persists after forceRefresh is a typed failure (UNAUTHORIZED_RETRY_FAILS)", async () => {
+  const calls: { accountId: string; forceRefresh?: boolean }[] = [];
+  const getAccessToken = async (accountId: string, options?: { forceRefresh?: boolean }) => {
+    calls.push({ accountId, forceRefresh: options?.forceRefresh });
+    return { accessToken: "access-2", expiresAt: 9_999_999_999, scopes: ["Mail.ReadWrite"] };
+  };
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
+    jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, false, 401),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken });
+
+  const error = (await adapter.writeLabels("work", "m1", ["Crypto"]).catch((err: unknown) => err)) as M365AdapterError;
+
+  expect(error).toBeInstanceOf(M365AdapterError);
+  expect(error.code).toBe("WRITE_LABELS_FAILED");
+  expect(error.status).toBe(401);
+  expect(calls).toHaveLength(2);
+  expect(requests).toHaveLength(2);
+});
+
+test("a non-2xx read response is a typed error naming account and status (API_ERROR)", async () => {
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ error: { code: "Forbidden", message: "SECRET-PAYLOAD" } }, false, 403),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
+
+  const error = (await adapter.writeLabels("work", "m1", ["Crypto"]).catch((err: unknown) => err)) as M365AdapterError;
+
+  expect(error).toBeInstanceOf(M365AdapterError);
+  expect(error.code).toBe("WRITE_LABELS_FAILED");
+  expect(error.accountId).toBe("work");
+  expect(error.status).toBe(403);
+  expect(error.message).toContain('account "work"');
+  expect(error.message).toContain("403");
+  expect(error.message).not.toContain("SECRET-PAYLOAD");
+  expect(requests).toHaveLength(1);
+});
+
+test("a non-2xx PATCH response is a typed error naming account and status (API_ERROR_PATCH)", async () => {
+  const { fetchFn, requests } = scriptedFetch([
+    jsonResponse({ categories: [] }),
+    jsonResponse({ error: { code: "ServiceUnavailable", message: "SECRET-PAYLOAD" } }, false, 503),
+  ]);
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
+
+  const error = (await adapter.writeLabels("work", "m1", ["Crypto"]).catch((err: unknown) => err)) as M365AdapterError;
+
+  expect(error).toBeInstanceOf(M365AdapterError);
+  expect(error.code).toBe("WRITE_LABELS_FAILED");
+  expect(error.status).toBe(503);
+  expect(error.message).not.toContain("SECRET-PAYLOAD");
+  expect(requests).toHaveLength(2);
+});
+
+test("a read body without a categories array is a typed error, never a PATCH (MALFORMED)", async () => {
+  const { fetchFn, requests } = scriptedFetch([jsonResponse({ "@odata.context": "..." })]);
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
+
+  const error = (await adapter.writeLabels("work", "m1", ["Crypto"]).catch((err: unknown) => err)) as M365AdapterError;
+
+  expect(error).toBeInstanceOf(M365AdapterError);
+  expect(error.code).toBe("WRITE_LABELS_FAILED");
+  expect(requests).toHaveLength(1);
+  expect(requests.every((request) => request.method === "GET")).toBe(true);
+});
+
+test("an unreachable Graph is a typed error without the thrown cause (network)", async () => {
+  const fetchFn: FetchLike = async () => {
+    throw new TypeError("fetch failed: connect ECONNREFUSED");
+  };
+  const adapter = new M365Adapter({ fetchFn, logPort: SILENT_LOG_PORT, getAccessToken: tokenSource().getAccessToken });
+
+  const error = (await adapter.writeLabels("work", "m1", ["Crypto"]).catch((err: unknown) => err)) as M365AdapterError;
+
+  expect(error.code).toBe("WRITE_LABELS_FAILED");
   expect(error.message).toBe('Microsoft Graph could not be reached for account "work".');
 });

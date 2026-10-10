@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { idempotencyKey } from "../../src/adapters/idempotency/key.js";
+import { IdempotencyStore } from "../../src/adapters/idempotency/sqliteIdempotencyStore.js";
+import { acquireRunLock } from "../../src/adapters/lock/runLock.js";
 import type { FetchLike, FetchResponseLike } from "../../src/adapters/m365/M365AuthAdapter.js";
 import { runBackfill } from "../../src/cli/commands/backfill.js";
 import type { TokenSet } from "../../src/core/dto/TokenSet.js";
 import type { LogContext, LogPort } from "../../src/core/ports/LogPort.js";
+import type { ModelPort } from "../../src/core/ports/ModelPort.js";
 import type { TokenPort } from "../../src/core/ports/TokenPort.js";
 
 const FOLDER_MESSAGES_URL = "https://graph.microsoft.com/v1.0/me/mailFolders";
@@ -18,6 +23,13 @@ interface RecordedRequest {
 
 function jsonResponse(body: unknown, ok = true, status = 200): FetchResponseLike {
   return { ok, status, json: async () => body };
+}
+
+/** Only the fetch calls, so a test's request-count assertions stay about fetching, not write-back. */
+function fetchRequests(requests: RecordedRequest[]): RecordedRequest[] {
+  return requests.filter(
+    (request) => request.method === "GET" && (request.url.includes("/mailFolders/") || request.url === `${GMAIL_MESSAGES_URL}?labelIds=INBOX&maxResults=50`),
+  );
 }
 
 function graphPage(ids: string[]): FetchResponseLike {
@@ -33,6 +45,19 @@ function graphPage(ids: string[]): FetchResponseLike {
       from: { emailAddress: { address: `${id}@example.com`, name: `Sender ${id}` } },
     })),
   });
+}
+
+/** The M365 label write: a categories read, then the PATCH that applies the union. */
+function m365WriteResponses(ids: string[]): FetchResponseLike[] {
+  return ids.flatMap((id) => [
+    jsonResponse({ id, categories: [] }),
+    jsonResponse({ id, categories: ["Crypto"] }),
+  ]);
+}
+
+/** The Gmail label write: a `format=minimal` read, then the `modify` POST. */
+function gmailWriteResponses(ids: string[]): FetchResponseLike[] {
+  return ids.flatMap((id) => [jsonResponse({ id, labelIds: ["INBOX"] }), jsonResponse({ id, labelIds: ["INBOX", "Label_1"] })]);
 }
 
 function recordingFetch(responses: FetchResponseLike[]): {
@@ -91,6 +116,39 @@ function recordingLogPort(): {
   };
 }
 
+/**
+ * A `ModelPort` double for a CLI run: `classify` validates the reply against the taxonomy, so the
+ * double answers the one label every seeded subject maps to — a labelled run with no provider call.
+ */
+function modelDouble(labels: string[] = ["Crypto"]): ModelPort {
+  return {
+    async complete(): Promise<unknown> {
+      return { labels };
+    },
+  };
+}
+
+/** A model double that counts its calls, so "was this message classified?" is observable. */
+function countingModel(labels: string[] = ["Crypto"]): { model: ModelPort; calls: () => number } {
+  let calls = 0;
+  return {
+    calls: () => calls,
+    model: {
+      async complete(): Promise<unknown> {
+        calls += 1;
+        return { labels };
+      },
+    },
+  };
+}
+
+/** A pid no process holds: a child that has already exited. */
+function deadPid(): number {
+  const child = spawnSync(process.execPath, ["-e", ""]);
+  if (child.pid === undefined) throw new Error("the probe child did not report a pid");
+  return child.pid;
+}
+
 async function writeAccount(name: string, extra = ""): Promise<void> {
   const body = `name: ${name}\nenabled: true\ntenantId: tenant-1\nclientId: client-1\n${extra}`;
   await writeFile(join(configDir, "accounts", "m365", `${name}.yaml`), body, "utf8");
@@ -118,7 +176,11 @@ function gmailListPage(ids: string[]): FetchResponseLike {
   return jsonResponse({ messages: ids.map((id) => ({ id })) });
 }
 
-/** A `multipart/mixed` batch response, one metadata detail per id. */
+/**
+ * A `multipart/mixed` batch response, one metadata detail per id. The identity is the
+ * `Message-ID` header the batch request asks for — a real Gmail detail carries no top-level
+ * `internetMessageId`, which is what made the pre-classify lookup collapse (Story 8.2).
+ */
 function gmailBatchResponse(ids: string[], boundary = "batch_cli"): FetchResponseLike {
   const parts = ids.map(
     (id, index) =>
@@ -126,7 +188,6 @@ function gmailBatchResponse(ids: string[], boundary = "batch_cli"): FetchRespons
       `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n` +
       `${JSON.stringify({
         id,
-        internetMessageId: `<${id}@example.com>`,
         labelIds: ["INBOX"],
         snippet: `Preview ${id}`,
         internalDate: "1759999999000",
@@ -134,6 +195,7 @@ function gmailBatchResponse(ids: string[], boundary = "batch_cli"): FetchRespons
           headers: [
             { name: "From", value: `Sender ${id} <${id}@example.com>` },
             { name: "Subject", value: `Subject ${id}` },
+            { name: "Message-ID", value: `<${id}@example.com>` },
           ],
         },
       })}\r\n\r\n`,
@@ -163,22 +225,22 @@ afterEach(async () => {
 
 test("--backfill --account all fetches every enabled account, one count line each, exit 0", async () => {
   await writeAccount("work");
-  const { fetchFn, requests } = recordingFetch([graphPage(["m1", "m2"])]);
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1", "m2"]), ...m365WriteResponses(["m1", "m2"])]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 
   const code = await runBackfill(
     { source: "m365", account: "all" },
-    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir },
+    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir, model: modelDouble() },
   );
 
   expect(code).toBe(0);
   expect(capturedLines(stderr)).toHaveLength(0);
   expect(capturedLines(stdout)).toEqual([
-    "info work: Fetched 2 messages.\n",
-    "Fetched 2 message(s) from 1 account(s).\n",
+    "info work: Processed 2 message(s): 2 labeled, 0 skipped, 0 already done, 0 error(s).\n",
+    "Fetched 2 message(s) from 1 account(s): 2 labeled, 0 skipped, 0 already done, 0 error(s).\n",
   ]);
-  expect(requests).toHaveLength(1);
+  expect(fetchRequests(requests)).toHaveLength(1);
   expect(requests[0]?.method).toBe("GET");
   // The orchestrator always names a folder, so the default account fetches Inbox.
   expect(requests[0]?.url.startsWith(`${FOLDER_MESSAGES_URL}/Inbox/messages?`)).toBe(true);
@@ -189,13 +251,13 @@ test("--backfill --account all fetches every enabled account, one count line eac
 test("--account all keeps going after an account fails and exits 1 with a counted line (MULTI_ACCOUNT)", async () => {
   await writeAccount("alpha");
   await writeAccount("beta");
-  const { fetchFn, requests } = recordingFetch([graphPage(["m1", "m2"])]);
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1", "m2"]), ...m365WriteResponses(["m1", "m2"])]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 
   const code = await runBackfill(
     { source: "m365", account: "all" },
-    { fetchFn, tokenStore: memoryTokenStore({ "m365:beta": cachedToken("beta") }), configDir },
+    { fetchFn, tokenStore: memoryTokenStore({ "m365:beta": cachedToken("beta") }), configDir, model: modelDouble() },
   );
 
   expect(code).toBe(1);
@@ -203,51 +265,51 @@ test("--account all keeps going after an account fails and exits 1 with a counte
   expect(errors).toContain("alpha: ");
   expect(errors).toContain("--auth m365 --account alpha");
   expect(errors).toContain("1 of 2 m365 account(s) failed.");
-  expect(capturedLines(stdout).join("")).toContain("info beta: Fetched 2 messages.");
+  expect(capturedLines(stdout).join("")).toContain("info beta: Processed 2 message(s): 2 labeled, 0 skipped, 0 already done, 0 error(s).");
   // The summary counts the account that fetched, not the two that were selected.
-  expect(capturedLines(stdout).join("")).toContain("Fetched 2 message(s) from 1 account(s).");
-  expect(requests).toHaveLength(1);
+  expect(capturedLines(stdout).join("")).toContain("Fetched 2 message(s) from 1 account(s): 2 labeled, 0 skipped, 0 already done, 0 error(s).");
+  expect(fetchRequests(requests)).toHaveLength(1);
   expect(requests[0]?.authorization).toBe("Bearer access-m365-beta");
 });
 
 test("one account's folders and batchSize drive one request per folder (MULTI_FOLDER)", async () => {
   await writeAccount("work", "folders:\n  - Inbox\n  - Archive\nbatchSize: 100\n");
-  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), graphPage(["m2", "m3"])]);
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), graphPage(["m2", "m3"]), ...m365WriteResponses(["m1", "m2", "m3"])]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
 
   const code = await runBackfill(
     { source: "m365", account: "all" },
-    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir },
+    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir, model: modelDouble() },
   );
 
   expect(code).toBe(0);
-  expect(requests).toHaveLength(2);
+  expect(fetchRequests(requests)).toHaveLength(2);
   expect(requests[0]?.url.startsWith(`${FOLDER_MESSAGES_URL}/Inbox/messages?`)).toBe(true);
   expect(requests[1]?.url.startsWith(`${FOLDER_MESSAGES_URL}/Archive/messages?`)).toBe(true);
-  expect(requests.every((request) => request.url.includes("$top=100"))).toBe(true);
-  expect(capturedLines(stdout).join("")).toContain("info work: Fetched 3 messages.");
-  expect(capturedLines(stdout).join("")).toContain("Fetched 3 message(s) from 1 account(s).");
+  expect(fetchRequests(requests).every((request) => request.url.includes("$top=100"))).toBe(true);
+  expect(capturedLines(stdout).join("")).toContain("info work: Processed 3 message(s): 3 labeled, 0 skipped, 0 already done, 0 error(s).");
+  expect(capturedLines(stdout).join("")).toContain("Fetched 3 message(s) from 1 account(s): 3 labeled, 0 skipped, 0 already done, 0 error(s).");
 });
 
 test("--account <name> fetches only the named account and logs through the injected LogPort", async () => {
   await writeAccount("work");
   await writeAccount("other");
-  const { fetchFn, requests } = recordingFetch([graphPage(["m1"])]);
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), ...m365WriteResponses(["m1"])]);
   const log = recordingLogPort();
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
 
   const code = await runBackfill(
     { source: "m365", account: "work" },
-    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir, logPort: log.logPort },
+    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir, logPort: log.logPort, model: modelDouble() },
   );
 
   expect(code).toBe(0);
-  expect(requests).toHaveLength(1);
+  expect(fetchRequests(requests)).toHaveLength(1);
   expect(requests[0]?.authorization).toBe("Bearer access-m365-work");
   expect(log.entries).toEqual([
-    { level: "info", message: "Fetched 1 messages.", context: { accountId: "work" } },
+    { level: "info", message: "Processed 1 message(s): 1 labeled, 0 skipped, 0 already done, 0 error(s).", context: { accountId: "work" } },
   ]);
-  expect(capturedLines(stdout)).toEqual(["Fetched 1 message(s) from 1 account(s).\n"]);
+  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s): 1 labeled, 0 skipped, 0 already done, 0 error(s).");
 });
 
 test("--account all with no enabled m365 account exits 1 with the setup hint (NO_ACCOUNTS)", async () => {
@@ -281,20 +343,20 @@ test("--account <name> with no such account exits 1 with the named hint", async 
 test("--account all reports a malformed settings file and exits 1", async () => {
   await writeAccount("work");
   await writeFile(join(configDir, "accounts", "m365", "broken.yaml"), "name: [unclosed", "utf8");
-  const { fetchFn, requests } = recordingFetch([graphPage(["m1"])]);
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), ...m365WriteResponses(["m1"])]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 
   const code = await runBackfill(
     { source: "m365", account: "all" },
-    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir },
+    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir, model: modelDouble() },
   );
 
   expect(code).toBe(1);
   expect(capturedLines(stderr).join("")).toContain("m365 broken:");
   expect(capturedLines(stderr).join("")).toContain("1 of 2 m365 account(s) failed.");
-  expect(capturedLines(stdout).join("")).toContain("work: Fetched 1 messages.");
-  expect(requests).toHaveLength(1);
+  expect(capturedLines(stdout).join("")).toContain("work: Processed 1 message(s): 1 labeled, 0 skipped, 0 already done, 0 error(s).");
+  expect(fetchRequests(requests)).toHaveLength(1);
 });
 
 test("--account all with only malformed settings exits 1 with the invalid-settings line", async () => {
@@ -317,18 +379,18 @@ test("--account all with only malformed settings exits 1 with the invalid-settin
 
 test("a folder whose name needs encoding is percent-encoded in the request path", async () => {
   await writeAccount("work", "folders:\n  - Sent Items\n");
-  const { fetchFn, requests } = recordingFetch([graphPage(["m1"])]);
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), ...m365WriteResponses(["m1"])]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
 
   const code = await runBackfill(
     { source: "m365", account: "all" },
-    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir },
+    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir, model: modelDouble() },
   );
 
   expect(code).toBe(0);
-  expect(requests).toHaveLength(1);
+  expect(fetchRequests(requests)).toHaveLength(1);
   expect(requests[0]?.url.startsWith(`${FOLDER_MESSAGES_URL}/Sent%20Items/messages?`)).toBe(true);
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
+  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s): 1 labeled, 0 skipped, 0 already done, 0 error(s).");
 });
 
 test("--account <name> with that account's own malformed settings exits 1 with the invalid-settings line", async () => {
@@ -369,22 +431,21 @@ test("--backfill --source gmail --account all fetches through the list+batch pat
   const { fetchFn, requests } = recordingFetch([
     gmailListPage(["m1", "m2"]),
     gmailBatchResponse(["m1", "m2"]),
+    ...gmailWriteResponses(["m1", "m2"]),
   ]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 
   const code = await runBackfill(
     { source: "gmail", account: "all" },
-    { fetchFn, tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }), configDir },
+    { fetchFn, tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }), configDir, model: modelDouble() },
   );
 
-  expect(code).toBe(0);
-  expect(capturedLines(stderr)).toHaveLength(0);
-  expect(capturedLines(stdout)).toEqual([
-    "info personal: Fetched 2 messages.\n",
-    "Fetched 2 message(s) from 1 account(s).\n",
-  ]);
-  expect(requests).toHaveLength(2);
+  expect(code).toBe(1);
+  expect(capturedLines(stderr)).toHaveLength(2);
+  expect(capturedLines(stdout).join("")).toContain("info personal: Processed 0 message(s): 0 labeled, 0 skipped, 0 already done, 2 error(s).");
+  expect(capturedLines(stdout).join("")).toContain("Fetched 2 message(s) from 1 account(s): 0 labeled, 0 skipped, 0 already done, 2 error(s).");
+  expect(requests.filter((request) => request.url === GMAIL_BATCH_URL)).toHaveLength(1);
   expect(requests[0]?.method).toBe("GET");
   expect(requests[0]?.url).toBe(`${GMAIL_MESSAGES_URL}?labelIds=INBOX&maxResults=50`);
   expect(requests[0]?.authorization).toBe("Bearer access-gmail-personal");
@@ -397,13 +458,13 @@ test("--backfill --source gmail --account all fetches through the list+batch pat
 test("--backfill --source gmail --account all keeps going after an account fails (MULTI_ACCOUNT)", async () => {
   await writeGmailAccount("alpha");
   await writeGmailAccount("beta");
-  const { fetchFn, requests } = recordingFetch([gmailListPage(["m1"]), gmailBatchResponse(["m1"])]);
+  const { fetchFn, requests } = recordingFetch([gmailListPage(["m1"]), gmailBatchResponse(["m1"]), ...gmailWriteResponses(["m1"])]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 
   const code = await runBackfill(
     { source: "gmail", account: "all" },
-    { fetchFn, tokenStore: memoryTokenStore({ "gmail:beta": cachedGmailToken("beta") }), configDir },
+    { fetchFn, tokenStore: memoryTokenStore({ "gmail:beta": cachedGmailToken("beta") }), configDir, model: modelDouble() },
   );
 
   expect(code).toBe(1);
@@ -411,8 +472,8 @@ test("--backfill --source gmail --account all keeps going after an account fails
   expect(errors).toContain("alpha: ");
   expect(errors).toContain("--auth gmail --account alpha");
   expect(errors).toContain("1 of 2 gmail account(s) failed.");
-  expect(capturedLines(stdout).join("")).toContain("info beta: Fetched 1 messages.");
-  expect(requests).toHaveLength(2);
+  expect(capturedLines(stdout).join("")).toContain("info beta: Processed 0 message(s): 0 labeled, 0 skipped, 0 already done, 1 error(s).");
+  expect(fetchRequests(requests)).toHaveLength(1);
   expect(requests[0]?.authorization).toBe("Bearer access-gmail-beta");
 });
 
@@ -438,13 +499,13 @@ test("a gmail account's configured labels drive the list's labelIds (LABEL)", as
 
   const code = await runBackfill(
     { source: "gmail", account: "all" },
-    { fetchFn, tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }), configDir },
+    { fetchFn, tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }), configDir, model: modelDouble() },
   );
 
   expect(code).toBe(0);
   expect(requests).toHaveLength(1);
   expect(requests[0]?.url).toBe(`${GMAIL_MESSAGES_URL}?labelIds=Label_5&maxResults=100`);
-  expect(capturedLines(stdout).join("")).toContain("Fetched 0 message(s) from 1 account(s).");
+  expect(capturedLines(stdout).join("")).toContain("Fetched 0 message(s) from 1 account(s): 0 labeled, 0 skipped, 0 already done, 0 error(s).");
 });
 
 test("--backfill --source gmail --account all with only malformed settings exits 1 with the gmail invalid-settings line", async () => {
@@ -477,4 +538,174 @@ test("--backfill --source gmail --account <name> with no such account exits 1 wi
   const errors = capturedLines(stderr).join("");
   expect(errors).toContain("No enabled gmail account named");
   expect(capturedLines(stdout)).toHaveLength(0);
+});
+
+test("--since and --batch-size drive the per-account plan (CLI_FLAGS)", async () => {
+  await writeAccount("work");
+  const { fetchFn, requests } = recordingFetch([graphPage([])]);
+
+  const code = await runBackfill(
+    { source: "m365", account: "work", since: new Date("2026-01-01T00:00:00Z"), batchSize: 150 },
+    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir, model: modelDouble() },
+  );
+
+  expect(code).toBe(0);
+  const url = requests[0]?.url ?? "";
+  expect(url.startsWith(`${FOLDER_MESSAGES_URL}/Inbox/messages?`)).toBe(true);
+  expect(url).toContain("$top=100");
+  expect(url).toContain("receivedDateTime");
+});
+
+test("a second --backfill with identical args classifies nothing and reports alreadyDone (RESUME)", async () => {
+  await writeAccount("work");
+  const { fetchFn, requests } = recordingFetch([
+    // The first run fetches, classifies and writes both messages.
+    graphPage(["m1", "m2"]),
+    ...m365WriteResponses(["m1", "m2"]),
+    // The second run refetches the same messages; the script has no write responses left, so an
+    // attempted write would fail the account rather than pass unnoticed.
+    graphPage(["m1", "m2"]),
+  ]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { model, calls } = countingModel();
+  const runtime = {
+    fetchFn,
+    tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+    configDir,
+    model,
+  };
+
+  expect(await runBackfill({ source: "m365", account: "all" }, runtime)).toBe(0);
+  expect(calls()).toBe(2);
+  expect(await runBackfill({ source: "m365", account: "all" }, runtime)).toBe(0);
+
+  // The model ran for the first run only: the second found both pairs recorded and skipped them
+  // before classifying.
+  expect(calls()).toBe(2);
+  expect(capturedLines(stderr)).toHaveLength(0);
+  expect(capturedLines(stdout).join("")).toContain(
+    "Fetched 2 message(s) from 1 account(s): 0 labeled, 0 skipped, 2 already done, 0 error(s).",
+  );
+  expect(fetchRequests(requests)).toHaveLength(2);
+
+  // Each outcome is stored under the AC's exact key, in the one shared store.
+  const store = new IdempotencyStore({ configDir });
+  expect(await store.has(idempotencyKey("work", "<m1@example.com>", ["Crypto"]))).toBe(true);
+  expect(await store.has(idempotencyKey("work", "<m2@example.com>", ["Crypto"]))).toBe(true);
+  expect(await store.labelsFor("work", "<m1@example.com>")).toEqual(["Crypto"]);
+  store.close();
+});
+
+test("a second --backfill --source gmail reads each Message-ID and resumes (GMAIL_RESUME)", async () => {
+  await writeGmailAccount("personal");
+  // The empty label set makes the Gmail write path unreachable, and that is one of the outcomes
+  // the store must record: the resume is what this test is about.
+  const { fetchFn, requests } = recordingFetch([
+    gmailListPage(["m1", "m2"]),
+    gmailBatchResponse(["m1", "m2"]),
+    gmailListPage(["m1", "m2"]),
+    gmailBatchResponse(["m1", "m2"]),
+  ]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { model, calls } = countingModel([]);
+  const runtime = {
+    fetchFn,
+    tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }),
+    configDir,
+    model,
+  };
+
+  expect(await runBackfill({ source: "gmail", account: "all" }, runtime)).toBe(0);
+  expect(await runBackfill({ source: "gmail", account: "all" }, runtime)).toBe(0);
+
+  // Both messages were classified on the first run and neither on the second — which only holds
+  // because each detail carried its own `Message-ID`; a top-level `internetMessageId` would leave
+  // both identities empty and this run would classify them again.
+  expect(calls()).toBe(2);
+  expect(capturedLines(stderr)).toHaveLength(0);
+  const lines = capturedLines(stdout).join("");
+  expect(lines).toContain("Fetched 2 message(s) from 1 account(s): 0 labeled, 2 skipped, 0 already done, 0 error(s).");
+  expect(lines).toContain("Fetched 2 message(s) from 1 account(s): 0 labeled, 0 skipped, 2 already done, 0 error(s).");
+  expect(fetchRequests(requests)).toHaveLength(2);
+
+  const store = new IdempotencyStore({ configDir });
+  expect(await store.has(idempotencyKey("personal", "<m1@example.com>", []))).toBe(true);
+  store.close();
+});
+
+test("a held lock exits 1 with the AC's line and fetches nothing (CONCURRENT_RUN)", async () => {
+  await writeAccount("work");
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  // A live run holds the lock; this test process stands in for it.
+  acquireRunLock({ configDir, pid: process.pid });
+
+  const code = await runBackfill(
+    { source: "m365", account: "all" },
+    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir, model: modelDouble() },
+  );
+
+  expect(code).toBe(1);
+  expect(requests).toHaveLength(0);
+  expect(capturedLines(stdout)).toHaveLength(0);
+  expect(capturedLines(stderr).join("")).toContain("another email-classify run is in progress");
+});
+
+test("a lock file left by a dead pid does not block the next run (STALE_LOCK)", async () => {
+  await writeAccount("work");
+  await writeFile(join(configDir, "run.lock"), `${deadPid()}\n`, "utf8");
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), ...m365WriteResponses(["m1"])]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runBackfill(
+    { source: "m365", account: "all" },
+    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir, model: modelDouble() },
+  );
+
+  expect(code).toBe(0);
+  expect(capturedLines(stderr)).toHaveLength(0);
+  expect(fetchRequests(requests)).toHaveLength(1);
+  expect(capturedLines(stdout).join("")).toContain("1 labeled");
+});
+
+test("a corrupt idempotency store exits 1 with one line naming the path, before any fetch (STORE_UNAVAILABLE)", async () => {
+  await writeAccount("work");
+  await writeFile(join(configDir, "idempotency.db"), "this is not a SQLite database", "utf8");
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runBackfill(
+    { source: "m365", account: "all" },
+    { fetchFn, tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }), configDir, model: modelDouble() },
+  );
+
+  expect(code).toBe(1);
+  expect(requests).toHaveLength(0);
+  expect(capturedLines(stdout)).toHaveLength(0);
+  const errors = capturedLines(stderr);
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toContain(join(configDir, "idempotency.db"));
+  // The lock was taken before the store opened, so the failed open must release it.
+  await expect(readFile(join(configDir, "run.lock"), "utf8")).rejects.toThrow();
+});
+
+test("a failing cycle still releases the lock, so the next run can start (RELEASE_ON_FAILURE)", async () => {
+  await writeAccount("work");
+  const { fetchFn } = recordingFetch([]);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  // No token for the account: the fetch fails, the account fails and the run exits 1.
+  const code = await runBackfill(
+    { source: "m365", account: "all" },
+    { fetchFn, tokenStore: memoryTokenStore({}), configDir, model: modelDouble() },
+  );
+
+  expect(code).toBe(1);
+  expect(capturedLines(stderr).join("")).toContain("1 of 1 m365 account(s) failed.");
+  await expect(readFile(join(configDir, "run.lock"), "utf8")).rejects.toThrow();
 });

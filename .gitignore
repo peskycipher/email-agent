@@ -11,6 +11,8 @@ package-lock.json
 # local config & secrets
 config.yaml
 .env
+.env.*
+!.env.example
 
 # bmad workflow session logs (party-mode memories, etc.) — not project source
 _bmad-output/party-mode/

@@ -6,7 +6,6 @@ function gmailDetail(overrides: Record<string, unknown> = {}): Record<string, un
   return {
     id: "18f0a",
     threadId: "18f0a",
-    internetMessageId: "<invoice@example.com>",
     labelIds: ["INBOX", "UNREAD"],
     snippet: "Your invoice is attached.",
     // 2025-10-09T08:53:19.000Z as Gmail's epoch-millisecond string.
@@ -15,6 +14,8 @@ function gmailDetail(overrides: Record<string, unknown> = {}): Record<string, un
       headers: [
         { name: "From", value: "Billing <billing@example.com>" },
         { name: "Subject", value: "Your invoice" },
+        // The identity the batch request asks for; the `Message` resource has no top-level field.
+        { name: "Message-ID", value: "<invoice@example.com>" },
       ],
     },
     ...overrides,
@@ -57,6 +58,25 @@ test("a detail missing subject, snippet, labelIds and headers degrades to empty 
     // No UNREAD label is present, so the absence reading makes the message read.
     isRead: true,
   });
+});
+
+test("the identity comes from the Message-ID header, never a top-level field (IDENTITY)", () => {
+  // Gmail's `Message` resource has no `internetMessageId`; a detail carrying one is a fixture
+  // artefact, and reading it would give every real message the same empty identity.
+  expect(mapGmailMessage({ id: "m1", internetMessageId: "<invented@example.com>" }, "personal").internetMessageId).toBe(
+    "",
+  );
+  expect(
+    mapGmailMessage(
+      gmailDetail({ payload: { headers: [{ name: "Message-ID", value: "<real@example.com>" }] } }),
+      "personal",
+    ).internetMessageId,
+  ).toBe("<real@example.com>");
+  // A header whose name is present but not a string degrades like every other missing field.
+  expect(
+    mapGmailMessage(gmailDetail({ payload: { headers: [{ name: "Message-ID", value: 7 }] } }), "personal")
+      .internetMessageId,
+  ).toBe("");
 });
 
 test("labelIds containing UNREAD marks the message unread (UNREAD)", () => {

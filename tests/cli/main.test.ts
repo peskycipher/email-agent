@@ -71,13 +71,14 @@ const EXAMPLES_BLOCK = [
   "  $ email-classify --backfill --source m365 --account work",
   "  $ email-classify --backfill --source m365 --account all",
   "  $ email-classify --backfill --source gmail --account all",
+  "  $ email-classify --backfill --source gmail --account all --since 2026-01-01 --batch-size 100",
   "  $ email-classify --cron --source m365 --account work",
   "  $ email-classify --cron --source m365 --account all",
   "  $ email-classify --cron --source gmail --account work",
   "  $ email-classify --cron --source gmail --account all",
 ].join("\n");
 
-test("createProgram pins the program name, every flag description and all twelve examples", () => {
+test("createProgram pins the program name, every flag description and all thirteen examples", () => {
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const { handlers } = recordingHandlers();
   const program = createProgram(handlers);
@@ -95,7 +96,7 @@ test("createProgram pins the program name, every flag description and all twelve
     ["--sync-categories", "ensure the taxonomy's labels exist as M365 master categories and Gmail labels"],
     [
       "--backfill",
-      "fetch every selected account's messages (m365 or gmail backfill; nothing is written back)",
+      "fetch, classify and label every selected account's messages (m365 or gmail backfill; labels are written back)",
     ],
     [
       "--cron",
@@ -105,11 +106,21 @@ test("createProgram pins the program name, every flag description and all twelve
       "--source",
       'message source for --backfill/--cron; "m365" or "gmail" (defaults to "m365"; "all" is not a provider)',
     ],
+    ["--since", "--backfill only: fetch messages received on or after this date (default: all time)"],
+    [
+      "--batch-size",
+      "--backfill only: per-account fetch batch, clamped to the provider's maximum (default: 50)",
+    ],
   ]);
 
   program.outputHelp();
 
   expect(capturedLines(stdout).join("")).toContain(EXAMPLES_BLOCK);
+  // The durable state a run leaves behind is user-facing: the lock it takes and the store a
+  // resumed run reads (Story 8.2).
+  const help = capturedLines(stdout).join("");
+  expect(help).toContain("~/.config/email-classify/run.lock");
+  expect(help).toContain("~/.config/email-classify/idempotency.db");
 });
 
 test("--auth gmail --account work calls runAuth and exits 0 (AUTH)", async () => {

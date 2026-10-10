@@ -14,7 +14,7 @@ import { resolveCliCommand, type CliOptions } from "./dispatch.js";
 export interface CliHandlers {
   runAuth: (options: { provider: string; account: string }) => Promise<number>;
   runSyncCategories: (options: { account: string }) => Promise<number>;
-  runBackfill: (options: { source: "m365" | "gmail"; account: string }) => Promise<number>;
+  runBackfill: (options: { source: "m365" | "gmail"; account: string; since?: Date; batchSize?: number }) => Promise<number>;
   runCron: (options: { source: "m365" | "gmail"; account: string }) => Promise<number>;
 }
 
@@ -43,15 +43,17 @@ export function createProgram(handlers: CliHandlers): Command {
       "account to act on (a per-account settings name, or 'all' for every enabled account; defaults to 'all' for --sync-categories, --backfill and --cron)",
     )
     .option("--sync-categories", "ensure the taxonomy's labels exist as M365 master categories and Gmail labels")
-    .option("--backfill", "fetch every selected account's messages (m365 or gmail backfill; nothing is written back)")
+    .option("--backfill", "fetch, classify and label every selected account's messages (m365 or gmail backfill; labels are written back)")
     .option("--cron", "fetch only what is new per selected account (m365 or gmail incremental; the gmail window is the account's INBOX only; nothing is written back)")
     .option(
       "--source <provider>",
       'message source for --backfill/--cron; "m365" or "gmail" (defaults to "m365"; "all" is not a provider)',
     )
+    .option("--since <date>", "--backfill only: fetch messages received on or after this date (default: all time)")
+    .option("--batch-size <n>", "--backfill only: per-account fetch batch, clamped to the provider's maximum (default: 50)")
     .addHelpText(
       "after",
-      "\nExamples:\n  $ email-classify --auth m365 --account work\n  $ email-classify --auth m365 --account all\n  $ email-classify --auth gmail --account personal\n  $ email-classify --auth gmail --account all\n  $ email-classify --sync-categories --account all\n  $ email-classify --backfill --source m365 --account work\n  $ email-classify --backfill --source m365 --account all\n  $ email-classify --backfill --source gmail --account all\n  $ email-classify --cron --source m365 --account work\n  $ email-classify --cron --source m365 --account all\n  $ email-classify --cron --source gmail --account work\n  $ email-classify --cron --source gmail --account all\n",
+      "\nExamples:\n  $ email-classify --auth m365 --account work\n  $ email-classify --auth m365 --account all\n  $ email-classify --auth gmail --account personal\n  $ email-classify --auth gmail --account all\n  $ email-classify --sync-categories --account all\n  $ email-classify --backfill --source m365 --account work\n  $ email-classify --backfill --source m365 --account all\n  $ email-classify --backfill --source gmail --account all\n  $ email-classify --backfill --source gmail --account all --since 2026-01-01 --batch-size 100\n  $ email-classify --cron --source m365 --account work\n  $ email-classify --cron --source m365 --account all\n  $ email-classify --cron --source gmail --account work\n  $ email-classify --cron --source gmail --account all\n\nState: --backfill and --cron take ~/.config/email-classify/run.lock for the run, so a second invocation exits 1 instead of racing; --cron resumes each account from its own stored cursor. --backfill also records every completed message in ~/.config/email-classify/idempotency.db, so a run that dies resumes where it stopped — delete that file to force a full re-classification. --auth and --sync-categories never take the lock.\n",
     )
     .action(async (options: CliOptions) => {
       const command = resolveCliCommand(options);
@@ -65,7 +67,12 @@ export function createProgram(handlers: CliHandlers): Command {
         return;
       }
       if (command.kind === "backfill") {
-        process.exitCode = await handlers.runBackfill({ source: command.source, account: command.account });
+        process.exitCode = await handlers.runBackfill({
+          source: command.source,
+          account: command.account,
+          ...(command.since === undefined ? {} : { since: command.since }),
+          ...(command.batchSize === undefined ? {} : { batchSize: command.batchSize }),
+        });
         return;
       }
       if (command.kind === "cron") {
