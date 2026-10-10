@@ -3,9 +3,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireRunLock } from "../../src/adapters/lock/runLock.js";
+import { acquireRunLock, releaseRunLock } from "../../src/adapters/lock/runLock.js";
 import type { FetchLike, FetchResponseLike } from "../../src/adapters/m365/M365AuthAdapter.js";
 import { runCron } from "../../src/cli/commands/cron.js";
+import type { SchedulerPort } from "../../src/core/ports/SchedulerPort.js";
+import type { ModelPort } from "../../src/core/ports/ModelPort.js";
 import type { TokenSet } from "../../src/core/dto/TokenSet.js";
 import type { TokenPort } from "../../src/core/ports/TokenPort.js";
 
@@ -13,6 +15,8 @@ const FOLDER_MESSAGES_URL = "https://graph.microsoft.com/v1.0/me/mailFolders";
 const STORED_ISO = "2026-10-08T08:00:00.000Z";
 const STORED_ENCODED = "2026-10-08T08%3A00%3A00.000Z";
 const CYCLE_START = new Date("2026-10-09T12:00:00.000Z");
+/** The default interval's next-cycle instant: 15 minutes after a fixed cycle start. */
+const NEXT_AT_DEFAULT = new Date("2026-10-09T12:15:00.000Z");
 
 interface RecordedRequest {
   url: string;
@@ -37,6 +41,14 @@ function graphPage(ids: string[]): FetchResponseLike {
       from: { emailAddress: { address: `${id}@example.com`, name: `Sender ${id}` } },
     })),
   });
+}
+
+/** The M365 label write: a categories read, then the PATCH that applies the union. */
+function m365WriteResponses(ids: string[]): FetchResponseLike[] {
+  return ids.flatMap((id) => [
+    jsonResponse({ id, categories: [] }),
+    jsonResponse({ id, categories: ["Crypto"] }),
+  ]);
 }
 
 function recordingFetch(responses: FetchResponseLike[]): {
@@ -81,6 +93,40 @@ function capturedLines(spy: ReturnType<typeof vi.spyOn>): string[] {
   return spy.mock.calls.map((call) => String(call[0]));
 }
 
+/**
+ * A `ModelPort` double for a CLI cycle: `classify` validates the reply against the shipped
+ * taxonomy, so the double answers the one label every seeded subject maps to.
+ */
+function modelDouble(): ModelPort {
+  return {
+    async complete(): Promise<unknown> {
+      return { labels: ["Crypto"] };
+    },
+  };
+}
+
+/**
+ * A scheduler double: the inline first cycle runs through `runOnce`, then `runInterval` runs
+ * `ticks` further cycles and records the interval it was handed. `ticks: 0` pins the one-cycle
+ * shape; the loop tests raise it so no real interval is ever scheduled.
+ */
+function loopScheduler(ticks: number): { scheduler: SchedulerPort; intervals: number[] } {
+  const intervals: number[] = [];
+  return {
+    intervals,
+    scheduler: {
+      async runOnce(fn) {
+        await fn();
+      },
+      async runInterval(fn, intervalMs) {
+        intervals.push(intervalMs);
+        for (let tick = 0; tick < ticks; tick += 1) await fn();
+        return new AbortController();
+      },
+    },
+  };
+}
+
 /** A pid no process holds: a child that has already exited. */
 function deadPid(): number {
   const child = spawnSync(process.execPath, ["-e", ""]);
@@ -116,49 +162,124 @@ afterEach(async () => {
   await rm(configDir, { recursive: true, force: true });
 });
 
-test("--cron fetches only messages since the stored timestamp and advances the state (HAPPY)", async () => {
+test("one cycle fetches what is new since the stored timestamp, classifies, writes back and advances the state (HAPPY_CYCLE)", async () => {
   await writeAccount("work");
   await writeState("work", { lastRunTimestamp: STORED_ISO });
-  const { fetchFn, requests } = recordingFetch([graphPage(["m1", "m2"])]);
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1", "m2"]), ...m365WriteResponses(["m1", "m2"])]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
 
   const code = await runCron(
-    { source: "m365", account: "all" },
+    { source: "m365", account: "all", intervalMinutes: 15 },
     {
       fetchFn,
       tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
       configDir,
       now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
     },
   );
 
   expect(code).toBe(0);
   expect(capturedLines(stderr)).toHaveLength(0);
-  expect(requests).toHaveLength(1);
+  // The cycle's own lines: the per-account progress the logPort writes, then the one cycle line.
+  const out = capturedLines(stdout).join("");
+  expect(out).toContain("info work: Fetched 2 messages.\n");
+  expect(out).toContain("info work: Processed 2 message(s): 2 labeled, 0 skipped, 0 already done, 0 error(s).\n");
+  expect(out).toContain(
+    `Cron cycle started ${CYCLE_START.toISOString()}: 2 fetched, 2 labeled, 0 skipped, 0 already done, 0 error(s), ` +
+      `took 0ms — next cycle at ${NEXT_AT_DEFAULT.toISOString()}.\n`,
+  );
   expect(requests[0]?.url.startsWith(`${FOLDER_MESSAGES_URL}/Inbox/messages?`)).toBe(true);
   expect(requests[0]?.url).toContain(`$filter=receivedDateTime ge ${STORED_ENCODED}`);
-  expect(requests[0]?.url).toContain("$orderby=receivedDateTime asc");
   expect(requests[0]?.authorization).toBe("Bearer access-m365-work");
+  // The label write landed once per message: a categories read, then the PATCH.
+  expect(requests.filter((request) => request.method === "PATCH")).toHaveLength(2);
   // The persisted timestamp is the cycle start, not the newest message.
   expect(JSON.parse(await readFile(statePath("work"), "utf8"))).toEqual({
     lastRunTimestamp: CYCLE_START.toISOString(),
   });
-  expect(capturedLines(stdout).join("")).toContain("Fetched 2 message(s) from 1 account(s).");
 });
 
-test("--cron without a state file sends no filter and creates the state on success (NO_STATE)", async () => {
+test("a looped run cycles at the interval, each cycle incremental from the last (LOOP)", async () => {
   await writeAccount("work");
-  const { fetchFn, requests } = recordingFetch([graphPage(["m1"])]);
+  await writeState("work", { lastRunTimestamp: STORED_ISO });
+  const { fetchFn, requests } = recordingFetch([
+    graphPage(["m1"]),
+    ...m365WriteResponses(["m1"]),
+    graphPage([]),
+    graphPage([]),
+  ]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler, intervals } = loopScheduler(2);
 
   const code = await runCron(
-    { source: "m365", account: "all" },
+    { source: "m365", account: "all", intervalMinutes: 15 },
     {
       fetchFn,
       tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
       configDir,
       now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+    },
+  );
+
+  expect(code).toBe(0);
+  // The loop was handed the interval in milliseconds: three cycles ran (the inline one plus two ticks).
+  expect(intervals).toEqual([900_000]);
+  const lines = capturedLines(stdout).join("");
+  expect(lines.match(/Cron cycle started /g)).toHaveLength(3);
+  // The later cycles are bounded by the cycle start the first one committed.
+  const bounded = requests.filter((request) => request.url.includes(`$filter=receivedDateTime ge ${CYCLE_START.toISOString().replace(/:/g, "%3A")}`));
+  expect(bounded).toHaveLength(2);
+  expect(JSON.parse(await readFile(statePath("work"), "utf8"))).toEqual({
+    lastRunTimestamp: CYCLE_START.toISOString(),
+  });
+});
+
+test("--interval threads through as the cycle interval and the next-cycle time (INTERVAL)", async () => {
+  await writeAccount("work");
+  const { fetchFn } = recordingFetch([graphPage([]), graphPage([])]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const { scheduler, intervals } = loopScheduler(1);
+
+  const code = await runCron(
+    { source: "m365", account: "all", intervalMinutes: 5 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+    },
+  );
+
+  expect(code).toBe(0);
+  expect(intervals).toEqual([300_000]);
+  const nextAt = new Date("2026-10-09T12:05:00.000Z").toISOString();
+  expect(capturedLines(stdout).join("")).toContain(`— next cycle at ${nextAt}.`);
+});
+
+test("--cron without a state file sends no filter and creates the state on success (FIRST_CYCLE)", async () => {
+  await writeAccount("work");
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), ...m365WriteResponses(["m1"])]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
+
+  const code = await runCron(
+    { source: "m365", account: "all", intervalMinutes: 15 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
     },
   );
 
@@ -168,36 +289,41 @@ test("--cron without a state file sends no filter and creates the state on succe
   expect(JSON.parse(await readFile(statePath("work"), "utf8"))).toEqual({
     lastRunTimestamp: CYCLE_START.toISOString(),
   });
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
+  expect(capturedLines(stdout).join("")).toContain("1 fetched, 1 labeled");
 });
 
-test("--cron --account all keeps going after an account fails and exits 1 with a counted line (ACCOUNT_FAILURE)", async () => {
+test("one account's failed cycle is named in the cycle's failure line while the other still runs (ACCOUNT_ISOLATION)", async () => {
   await writeAccount("alpha");
   await writeAccount("beta");
   await writeState("alpha", { lastRunTimestamp: "2026-10-07T07:00:00.000Z" });
   await writeState("beta", { lastRunTimestamp: STORED_ISO });
   const alphaBefore = await readFile(statePath("alpha"), "utf8");
-  const { fetchFn, requests } = recordingFetch([graphPage(["m1"])]);
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), ...m365WriteResponses(["m1"])]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
 
   const code = await runCron(
-    { source: "m365", account: "all" },
+    { source: "m365", account: "all", intervalMinutes: 15 },
     {
       fetchFn,
-      // alpha has no token, so its fetch fails before any request; beta fetches.
+      // alpha has no token, so its fetch fails before any request; beta fetches and labels.
       tokenStore: memoryTokenStore({ "m365:beta": cachedToken("beta") }),
       configDir,
       now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+      sleep: async () => {},
     },
   );
 
-  expect(code).toBe(1);
+  // The loop starts regardless: a failed account never stops the others, and in loop mode there is
+  // no terminal exit code — the account is named in the cycle's own failure line instead.
+  expect(code).toBe(0);
   const errors = capturedLines(stderr).join("");
   expect(errors).toContain("alpha: ");
-  expect(errors).toContain("1 of 2 m365 account(s) failed.");
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
-  expect(requests).toHaveLength(1);
+  expect(errors).toContain("1 of 2 account(s) failed this cycle: alpha.");
+  expect(capturedLines(stdout).join("")).toContain("1 fetched, 1 labeled");
   expect(requests[0]?.authorization).toBe("Bearer access-m365-beta");
   // The failed account's stored state is byte-for-byte untouched; the healthy one advanced.
   expect(await readFile(statePath("alpha"), "utf8")).toBe(alphaBefore);
@@ -211,7 +337,10 @@ test("--cron --account all with no enabled m365 account exits 1 with the setup h
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 
-  const code = await runCron({ source: "m365", account: "all" }, { fetchFn, configDir });
+  const code = await runCron(
+    { source: "m365", account: "all", intervalMinutes: 15 },
+    { fetchFn, configDir, scheduler: loopScheduler(0).scheduler },
+  );
 
   expect(code).toBe(1);
   expect(requests).toHaveLength(0);
@@ -227,63 +356,63 @@ test("--cron --account <name> targets that one account only", async () => {
   await writeAccount("work");
   await writeAccount("other");
   await writeState("work", { lastRunTimestamp: STORED_ISO });
-  const { fetchFn, requests } = recordingFetch([graphPage(["m1"])]);
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), ...m365WriteResponses(["m1"])]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
 
   const code = await runCron(
-    { source: "m365", account: "work" },
+    { source: "m365", account: "work", intervalMinutes: 15 },
     {
       fetchFn,
       tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
       configDir,
       now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
     },
   );
 
   expect(code).toBe(0);
-  expect(requests).toHaveLength(1);
   expect(requests[0]?.authorization).toBe("Bearer access-m365-work");
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
+  expect(capturedLines(stdout).join("")).toContain("1 fetched, 1 labeled");
   await expect(readFile(statePath("other"), "utf8")).rejects.toThrow();
 });
 
-test("--cron --account all counts an account with malformed settings as a failure (ACCOUNT_FAILURE)", async () => {
+test("a fetch failure backs off 30 seconds, retries the account's cycle once, and a second failure holds the cursor (FETCH_ERROR)", async () => {
   await writeAccount("work");
-  await writeFile(join(configDir, "accounts", "m365", "broken.yaml"), "name: [unclosed\n", "utf8");
-  const { fetchFn } = recordingFetch([graphPage(["m1"])]);
+  await writeState("work", { lastRunTimestamp: STORED_ISO });
+  const { fetchFn, requests } = recordingFetch([]);
+  const sleeps: number[] = [];
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
 
   const code = await runCron(
-    { source: "m365", account: "all" },
+    { source: "m365", account: "all", intervalMinutes: 15 },
     {
       fetchFn,
-      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      // No token: the fetch fails before any request, on both the attempt and its one retry.
+      tokenStore: memoryTokenStore({}),
       configDir,
       now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+      sleep: async (ms) => { sleeps.push(ms); },
     },
   );
 
-  expect(code).toBe(1);
+  expect(code).toBe(0);
+  expect(sleeps).toEqual([30_000]);
   const errors = capturedLines(stderr).join("");
-  expect(errors).toContain("m365 broken: ");
-  expect(errors).toContain("1 of 2 m365 account(s) failed.");
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
-});
-
-test("--cron --account all with only malformed settings reports invalid settings, not the setup hint", async () => {
-  await writeFile(join(configDir, "accounts", "m365", "broken.yaml"), "name: [unclosed\n", "utf8");
-  const { fetchFn } = recordingFetch([]);
-  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-
-  const code = await runCron({ source: "m365", account: "all" }, { fetchFn, configDir });
-
-  expect(code).toBe(1);
-  const errors = capturedLines(stderr).join("");
-  expect(errors).toContain("1 m365 account(s) have invalid settings");
-  expect(errors).not.toContain("No enabled m365 accounts found");
-  expect(capturedLines(stdout)).toHaveLength(0);
+  expect(errors).toContain("work: ");
+  expect(errors).toContain('Account "work" failed again after one retry');
+  expect(errors).toContain("1 of 1 account(s) failed this cycle: work.");
+  // The failed account's cursor stayed held.
+  expect(JSON.parse(await readFile(statePath("work"), "utf8"))).toEqual({
+    lastRunTimestamp: STORED_ISO,
+  });
+  expect(capturedLines(stdout).join("")).toContain("0 fetched");
+  expect(requests).toHaveLength(0);
 });
 
 const GMAIL_PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile";
@@ -323,6 +452,11 @@ function gmailListPage(ids: string[]): FetchResponseLike {
   return jsonResponse({ messages: ids.map((id) => ({ id })) });
 }
 
+/** The Gmail label write: a `format=minimal` read, then the `modify` POST. */
+function gmailWriteResponses(ids: string[]): FetchResponseLike[] {
+  return ids.flatMap((id) => [jsonResponse({ id, labelIds: ["INBOX"] }), jsonResponse({ id, labelIds: ["INBOX", "Label_1"] })]);
+}
+
 /**
  * A `multipart/mixed` batch response, one metadata detail per id — with a per-part Content-ID.
  * The identity is the `Message-ID` header: a real Gmail detail has no top-level `internetMessageId`.
@@ -356,37 +490,65 @@ function gmailBatchResponse(ids: string[], boundary = "batch_cli"): FetchRespons
   } as FetchResponseLike;
 }
 
-test("--cron --source gmail resumes from the stored history id and advances both keys (HAPPY_HISTORY)", async () => {
+/**
+ * `users.labels.list` for the cycle's `ensureCategories` call: the default taxonomy's every label
+ * already exists, so nothing is created. `Crypto` carries the id the write fixtures script.
+ */
+function gmailLabelsList(): FetchResponseLike {
+  const names = [
+    "Crypto",
+    "Action Needed",
+    "Waiting/Follow-up",
+    "Important",
+    "Invoices",
+    "Business",
+    "Family/Friends",
+    "Newsletters",
+    "Promos",
+    "Notifications",
+    "Real-estate",
+  ];
+  return jsonResponse({
+    labels: names.map((name, index) => ({ id: index === 0 ? "Label_1" : `Label_${index + 1}`, name })),
+  });
+}
+
+test("--cron --source gmail resumes from the stored history id, classifies and advances both keys (HAPPY_HISTORY)", async () => {
   await writeGmailAccount("personal");
   await writeState("personal", { lastHistoryId: "H1" }, "gmail");
-  const { fetchFn, requests } = recordingFetch([gmailHistoryPage("H2", ["m1"]), gmailBatchResponse(["m1"])]);
+  const { fetchFn, requests } = recordingFetch([
+    gmailHistoryPage("H2", ["m1"]),
+    gmailBatchResponse(["m1"]),
+    gmailLabelsList(),
+    ...gmailWriteResponses(["m1"]),
+  ]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
 
   const code = await runCron(
-    { source: "gmail", account: "personal" },
+    { source: "gmail", account: "personal", intervalMinutes: 15 },
     {
       fetchFn,
       tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }),
       configDir,
       now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
     },
   );
 
   expect(code).toBe(0);
   expect(capturedLines(stderr)).toHaveLength(0);
-  // One history GET and one batch POST: only the added message is fetched, never the whole INBOX.
-  expect(requests).toHaveLength(2);
-  expect(requests[0]?.method).toBe("GET");
+  // One history GET, one detail batch, then the label write's read + modify per message.
+  expect(requests.map((request) => request.method)).toEqual(["GET", "POST", "GET", "GET", "POST"]);
   expect(requests[0]?.url).toBe(`${GMAIL_HISTORY_URL}?startHistoryId=H1&labelId=INBOX`);
   expect(requests[0]?.authorization).toBe("Bearer access-gmail-personal");
-  expect(requests[1]?.url).toBe(GMAIL_BATCH_URL);
-  expect(requests.some((request) => request.url.startsWith(GMAIL_MESSAGES_URL))).toBe(false);
   expect(JSON.parse(await readFile(statePath("personal", "gmail"), "utf8"))).toEqual({
     lastHistoryId: "H2",
     lastRunTimestamp: CYCLE_START.toISOString(),
   });
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
+  expect(capturedLines(stdout).join("")).toContain("1 fetched, 1 labeled");
 });
 
 test("--cron --source gmail with no state reads the profile first and walks the INBOX (FIRST_RUN_NO_STATE)", async () => {
@@ -396,22 +558,27 @@ test("--cron --source gmail with no state reads the profile first and walks the 
     gmailProfile("H5"),
     gmailListPage(["m1"]),
     gmailBatchResponse(["m1"]),
+    gmailLabelsList(),
+    ...gmailWriteResponses(["m1"]),
   ]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
 
   const code = await runCron(
-    { source: "gmail", account: "all" },
+    { source: "gmail", account: "all", intervalMinutes: 15 },
     {
       fetchFn,
       tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }),
       configDir,
       now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
     },
   );
 
   expect(code).toBe(0);
-  // Profile first, then the whole INBOX — no history walk to resume from.
-  expect(requests.map((request) => request.url)).toEqual([
+  // Profile first, then the whole INBOX — no history walk to resume from — then the write.
+  expect(requests.slice(0, 3).map((request) => request.url)).toEqual([
     GMAIL_PROFILE_URL,
     `${GMAIL_MESSAGES_URL}?labelIds=INBOX&maxResults=50`,
     GMAIL_BATCH_URL,
@@ -421,7 +588,7 @@ test("--cron --source gmail with no state reads the profile first and walks the 
     lastHistoryId: "H5",
     lastRunTimestamp: CYCLE_START.toISOString(),
   });
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
+  expect(capturedLines(stdout).join("")).toContain("1 fetched, 1 labeled");
 });
 
 test("--cron --source gmail on an expired history warns by name and falls back to the INBOX walk (HISTORY_EXPIRED)", async () => {
@@ -432,27 +599,31 @@ test("--cron --source gmail on an expired history warns by name and falls back t
     gmailProfile("H2"),
     gmailListPage(["m1"]),
     gmailBatchResponse(["m1"]),
+    gmailLabelsList(),
+    ...gmailWriteResponses(["m1"]),
   ]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
 
   const code = await runCron(
-    { source: "gmail", account: "all" },
+    { source: "gmail", account: "all", intervalMinutes: 15 },
     {
       fetchFn,
       tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }),
       configDir,
       now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
     },
   );
 
-  // Warned, not failed: the account is still fetched and the exit code reflects success.
+  // Warned, not failed: the account is still fetched, classified and advanced.
   expect(code).toBe(0);
   const errors = capturedLines(stderr).join("");
   expect(errors).toContain("warn personal: ");
   expect(errors).toContain("has expired");
-  expect(errors).not.toContain("error");
-  expect(requests.map((request) => request.url)).toEqual([
+  expect(requests.slice(0, 4).map((request) => request.url)).toEqual([
     `${GMAIL_HISTORY_URL}?startHistoryId=old&labelId=INBOX`,
     GMAIL_PROFILE_URL,
     // The stored cycle start bounds the fallback on the wire: epoch 1791446400 steps back one
@@ -464,230 +635,149 @@ test("--cron --source gmail on an expired history warns by name and falls back t
     lastHistoryId: "H2",
     lastRunTimestamp: CYCLE_START.toISOString(),
   });
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
+  expect(capturedLines(stdout).join("")).toContain("1 fetched, 1 labeled");
 });
 
-test("--cron --source gmail skips a purged message's 404 part with a warn naming the id (PART_DELETED)", async () => {
-  await writeGmailAccount("personal");
-  await writeState("personal", { lastHistoryId: "H1" }, "gmail");
-  // One part per named id: the purged message's part answers 404, the surviving one maps to a detail.
-  const boundary = "batch_cli";
-  const detailPart = (id: string, index: number, status = 200): string =>
-    `--${boundary}\r\nContent-Type: application/http\r\nContent-ID: <response-message-${index}>\r\n\r\n` +
-    `HTTP/1.1 ${status === 200 ? "200 OK" : "404 Not Found"}\r\nContent-Type: application/json\r\n\r\n` +
-    (status === 200
-      ? `${JSON.stringify({
-          id,
-          labelIds: ["INBOX"],
-          snippet: `Preview ${id}`,
-          internalDate: "1759999999000",
-          payload: {
-            headers: [
-              { name: "From", value: `Sender ${id} <${id}@example.com>` },
-              { name: "Subject", value: `Subject ${id}` },
-              { name: "Message-ID", value: `<${id}@example.com>` },
-            ],
-          },
-        })}\r\n\r\n`
-      : `{"error":{"code":404,"message":"Requested entity was not found."}}\r\n\r\n`);
-  const purgedBatch = {
-    ok: true,
-    status: 200,
-    headers: { get: () => `multipart/mixed; boundary="${boundary}"` },
-    json: async () => ({}),
-    text: async () => detailPart("m1", 1) + detailPart("purged", 2, 404) + `--${boundary}--\r\n`,
-  } as FetchResponseLike;
-  const { fetchFn, requests } = recordingFetch([gmailHistoryPage("H2", ["m1", "purged"]), purgedBatch]);
+test("an m365 and a gmail account sharing a name each keep their own cursor file, and --source all runs both in one cycle (SOURCE_ALL)", async () => {
+  await writeAccount("shared");
+  await writeGmailAccount("shared");
+  await writeState("shared", { lastHistoryId: "H1" }, "gmail");
+  const { fetchFn, requests } = recordingFetch([
+    // The m365 half of the one cycle: fetch, then the write.
+    graphPage(["m1"]),
+    ...m365WriteResponses(["m1"]),
+    // The gmail half: history walk, detail batch, the cycle's label ensure, then the write.
+    gmailHistoryPage("H2", ["g1"]),
+    gmailBatchResponse(["g1"]),
+    gmailLabelsList(),
+    ...gmailWriteResponses(["g1"]),
+  ]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
 
   const code = await runCron(
-    { source: "gmail", account: "all" },
+    { source: "all", account: "shared", intervalMinutes: 15 },
     {
       fetchFn,
-      tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }),
+      tokenStore: memoryTokenStore({
+        "m365:shared": cachedToken("shared"),
+        "gmail:shared": cachedGmailToken("shared"),
+      }),
       configDir,
       now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
     },
   );
 
   expect(code).toBe(0);
-  const errors = capturedLines(stderr).join("");
-  expect(errors).toContain("warn personal: ");
-  expect(errors).toContain("purged");
-  expect(errors).not.toContain("error");
-  // The surviving message was fetched; the cycle succeeded and still recorded state.
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
-  expect(JSON.parse(await readFile(statePath("personal", "gmail"), "utf8"))).toEqual({
+  // One cycle line covering both providers' accounts.
+  expect(capturedLines(stdout).join("")).toContain("2 fetched, 2 labeled");
+  // Each provider's cursor advanced in its own namespaced file.
+  expect(JSON.parse(await readFile(statePath("shared", "m365"), "utf8"))).toEqual({
+    lastRunTimestamp: CYCLE_START.toISOString(),
+  });
+  expect(JSON.parse(await readFile(statePath("shared", "gmail"), "utf8"))).toEqual({
     lastHistoryId: "H2",
     lastRunTimestamp: CYCLE_START.toISOString(),
   });
-  expect(requests).toHaveLength(2);
+  // The m365 fetch ran through the m365 token, the gmail history walk through the gmail one.
+  expect(requests.find((request) => request.url.startsWith(`${FOLDER_MESSAGES_URL}/`))?.authorization).toBe("Bearer access-m365-shared");
+  expect(requests.find((request) => request.url.startsWith(GMAIL_HISTORY_URL))?.authorization).toBe("Bearer access-gmail-shared");
 });
 
-test("--cron --source gmail keeps going after an account fails and exits 1 with a counted line (MULTI_ACCOUNT)", async () => {
-  await writeGmailAccount("alpha");
-  await writeGmailAccount("beta");
-  await writeState("alpha", { lastHistoryId: "H1", lastRunTimestamp: STORED_ISO }, "gmail");
-  await writeState("beta", { lastHistoryId: "H1", lastRunTimestamp: STORED_ISO }, "gmail");
-  const alphaBefore = await readFile(statePath("alpha", "gmail"), "utf8");
-  const { fetchFn, requests } = recordingFetch([gmailHistoryPage("H2", ["m1"]), gmailBatchResponse(["m1"])]);
-  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-
-  const code = await runCron(
-    { source: "gmail", account: "all" },
-    {
-      fetchFn,
-      // alpha has no token, so its cycle fails before any request; beta fetches.
-      tokenStore: memoryTokenStore({ "gmail:beta": cachedGmailToken("beta") }),
-      configDir,
-      now: () => CYCLE_START,
-    },
-  );
-
-  expect(code).toBe(1);
-  const errors = capturedLines(stderr).join("");
-  expect(errors).toContain("alpha: ");
-  expect(errors).toContain("1 of 2 gmail account(s) failed.");
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
-  expect(requests).toHaveLength(2);
-  expect(requests[0]?.authorization).toBe("Bearer access-gmail-beta");
-  // The failed account's stored state is byte-for-byte untouched; the healthy one advanced.
-  expect(await readFile(statePath("alpha", "gmail"), "utf8")).toBe(alphaBefore);
-  expect(JSON.parse(await readFile(statePath("beta", "gmail"), "utf8"))).toEqual({
-    lastHistoryId: "H2",
-    lastRunTimestamp: CYCLE_START.toISOString(),
-  });
-});
-
-test("--cron --source gmail --account all counts an account with malformed settings as a failure (INVALID_SETTINGS)", async () => {
-  await writeGmailAccount("personal");
-  await writeState("personal", { lastHistoryId: "H1" }, "gmail");
-  await writeFile(join(configDir, "accounts", "gmail", "broken.yaml"), "name: [unclosed\n", "utf8");
-  const { fetchFn, requests } = recordingFetch([gmailHistoryPage("H2", ["m1"]), gmailBatchResponse(["m1"])]);
-  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-
-  const code = await runCron(
-    { source: "gmail", account: "all" },
-    {
-      fetchFn,
-      tokenStore: memoryTokenStore({ "gmail:personal": cachedGmailToken("personal") }),
-      configDir,
-      now: () => CYCLE_START,
-    },
-  );
-
-  expect(code).toBe(1);
-  const errors = capturedLines(stderr).join("");
-  expect(errors).toContain("gmail broken: ");
-  expect(errors).toContain("1 of 2 gmail account(s) failed.");
-  // The valid account still ran.
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
-  expect(requests).toHaveLength(2);
-});
-
-test("--cron --source gmail --account all with no enabled gmail account exits 1 with the setup hint (NO_ACCOUNTS)", async () => {
-  const { fetchFn, requests } = recordingFetch([]);
-  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-
-  const code = await runCron({ source: "gmail", account: "all" }, { fetchFn, configDir });
-
-  expect(code).toBe(1);
-  expect(requests).toHaveLength(0);
-  expect(capturedLines(stdout)).toHaveLength(0);
-  const errors = capturedLines(stderr).join("");
-  expect(errors).toContain("No enabled gmail accounts found");
-  expect(errors).toContain("~/.config/email-classify/accounts/gmail/<name>.yaml");
-  // A failed setup must not leave a state file behind.
-  await expect(readFile(statePath("personal", "gmail"), "utf8")).rejects.toThrow();
-});
-
-test("--cron --source gmail --account <name> with no such account exits 1 with the named hint", async () => {
-  const { fetchFn, requests } = recordingFetch([]);
-  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-
-  const code = await runCron({ source: "gmail", account: "ghost" }, { fetchFn, configDir });
-
-  expect(code).toBe(1);
-  expect(requests).toHaveLength(0);
-  const errors = capturedLines(stderr).join("");
-  expect(errors).toContain('No enabled gmail account named "ghost" found');
-  expect(errors).toContain("accounts/gmail/ghost.yaml");
-  expect(capturedLines(stdout)).toHaveLength(0);
-});
-
-test("an m365 and a gmail account sharing a name each keep their own cursor file (EC2)", async () => {
-  await writeAccount("shared");
-  await writeGmailAccount("shared");
-  await writeState("shared", { lastHistoryId: "H1" }, "gmail");
-  const { fetchFn: gmailFetch, requests: gmailRequests } = recordingFetch([
-    jsonResponse({}, false, 404),
-    gmailProfile("H2"),
-    gmailListPage(["m1"]),
-    gmailBatchResponse(["m1"]),
-  ]);
-  // Gmail's cycle writes only its own namespaced file — never the m365 account's bound.
-  const gmailCode = await runCron(
-    { source: "gmail", account: "shared" },
-    {
-      fetchFn: gmailFetch,
-      tokenStore: memoryTokenStore({ "gmail:shared": cachedGmailToken("shared") }),
-      configDir,
-      now: () => CYCLE_START,
-    },
-  );
-  expect(gmailCode).toBe(0);
-  expect(await readFile(statePath("shared", "gmail"), "utf8")).toContain('"lastHistoryId": "H2"');
-  // The m365 cursor file does not exist: Gmail never wrote it.
-  await expect(readFile(statePath("shared", "m365"), "utf8")).rejects.toThrow();
-  expect(gmailRequests.map((request) => request.url)).toEqual([
-    `${GMAIL_HISTORY_URL}?startHistoryId=H1&labelId=INBOX`,
-    GMAIL_PROFILE_URL,
-    // No stored gmail cycle start, so the fallback walk carries no bound.
-    `${GMAIL_MESSAGES_URL}?labelIds=INBOX&maxResults=50`,
-    GMAIL_BATCH_URL,
-  ]);
-
-  // The m365 cycle reads and writes only its own file: no gmail-bound filter leaks in.
-  const { fetchFn: m365Fetch, requests: m365Requests } = recordingFetch([graphPage(["m1"])]);
-  const m365Code = await runCron(
-    { source: "m365", account: "shared" },
-    {
-      fetchFn: m365Fetch,
-      tokenStore: memoryTokenStore({ "m365:shared": cachedToken("shared") }),
-      configDir,
-      now: () => CYCLE_START,
-    },
-  );
-  expect(m365Code).toBe(0);
-  // No $filter — m365's cursor was absent, so gmail's gmail-<name>.json could not bound it.
-  expect(m365Requests[0]?.url).not.toContain("$filter");
-  // The gmail cursor file is untouched by m365's cycle-start write.
-  expect(await readFile(statePath("shared", "gmail"), "utf8")).toContain('"lastRunTimestamp"');
-  const m365State = JSON.parse(await readFile(statePath("shared", "m365"), "utf8")) as Record<string, string>;
-  expect(Object.keys(m365State)).toEqual(["lastRunTimestamp"]);
-});
-
-test("--cron exits 1 with the AC's line when a run already holds the lock (CONCURRENT_RUN)", async () => {
+test("--interval 1440 reaches the scheduler as 86_400_000 ms (INTERVAL_MAX)", async () => {
   await writeAccount("work");
-  await writeState("work", { lastRunTimestamp: STORED_ISO });
-  const { fetchFn, requests } = recordingFetch([]);
-  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-  // A live run holds the lock; this test process stands in for it.
-  acquireRunLock({ configDir, pid: process.pid });
+  const { fetchFn } = recordingFetch([graphPage([])]);
+  vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const { scheduler, intervals } = loopScheduler(0);
 
   const code = await runCron(
-    { source: "m365", account: "all" },
+    { source: "m365", account: "all", intervalMinutes: 1440 },
     {
       fetchFn,
       tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
       configDir,
       now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+    },
+  );
+
+  expect(code).toBe(0);
+  expect(intervals).toEqual([86_400_000]);
+});
+
+test("--cron --account all counts an account with malformed settings as a failure and still cycles the valid one (ACCOUNT_FAILURE)", async () => {
+  await mkdir(join(configDir, "accounts", "m365"), { recursive: true });
+  await writeFile(join(configDir, "accounts", "m365", "broken.yaml"), "name: [unclosed\n", "utf8");
+  await writeAccount("work");
+  await writeState("work", { lastRunTimestamp: STORED_ISO });
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), ...m365WriteResponses(["m1"])]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
+
+  const code = await runCron(
+    { source: "m365", account: "all", intervalMinutes: 15 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+    },
+  );
+
+  // The malformed account is named in its own selection line; the valid one still cycles.
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("m365 broken: ");
+  expect(code).toBe(0);
+  expect(capturedLines(stdout).join("")).toContain("1 fetched, 1 labeled");
+});
+
+test("--cron --account all with only malformed settings reports them and exits 1, without the setup hint (ACCOUNT_FAILURE)", async () => {
+  await mkdir(join(configDir, "accounts", "m365"), { recursive: true });
+  await writeFile(join(configDir, "accounts", "m365", "broken.yaml"), "name: [unclosed\n", "utf8");
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runCron(
+    { source: "m365", account: "all", intervalMinutes: 15 },
+    { fetchFn, configDir, scheduler: loopScheduler(0).scheduler },
+  );
+
+  expect(code).toBe(1);
+  expect(requests).toHaveLength(0);
+  expect(capturedLines(stdout)).toHaveLength(0);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("m365 broken: ");
+  // Invalid settings read as the rejection, not the setup hint.
+  expect(errors).not.toContain("No enabled m365 accounts found");
+});
+
+test("--cron exits 1 with the AC's line and starts no loop when a run already holds the lock (CONCURRENT_RUN)", async () => {
+  await writeAccount("work");
+  await writeState("work", { lastRunTimestamp: STORED_ISO });
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler, intervals } = loopScheduler(2);
+  // A live run holds the lock; this test process stands in for it.
+  acquireRunLock({ configDir, pid: process.pid });
+
+  const code = await runCron(
+    { source: "m365", account: "all", intervalMinutes: 15 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
     },
   );
 
@@ -695,46 +785,154 @@ test("--cron exits 1 with the AC's line when a run already holds the lock (CONCU
   expect(requests).toHaveLength(0);
   expect(capturedLines(stdout)).toHaveLength(0);
   expect(capturedLines(stderr).join("")).toContain("another email-classify run is in progress");
+  // The loop never started: no interval was handed to the scheduler.
+  expect(intervals).toEqual([]);
   // The held lock is not the failed cycle's to remove.
   expect(await readFile(statePath("work"), "utf8")).toContain(STORED_ISO);
+});
+
+test("a tick that finds the lock held by an interleaved --backfill logs the line, skips its cycle and the next tick proceeds (PER_CYCLE_LOCK)", async () => {
+  await writeAccount("work");
+  const { fetchFn } = recordingFetch([graphPage([]), graphPage([])]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const lock = { configDir, pid: process.pid };
+  const tick = async (fn: () => Promise<void>): Promise<void> => {
+    // A backfill takes the lock in the gap between cycles...
+    acquireRunLock(lock);
+    await fn();
+    // ...and finishes before the next tick fires.
+    releaseRunLock(lock);
+  };
+  const scheduler: SchedulerPort = {
+    async runOnce(fn) {
+      await fn();
+    },
+    async runInterval(fn, intervalMs) {
+      expect(intervalMs).toBe(900_000);
+      await tick(fn);
+      await fn();
+      return new AbortController();
+    },
+  };
+
+  const code = await runCron(
+    { source: "m365", account: "all", intervalMinutes: 15 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+    },
+  );
+
+  expect(code).toBe(0);
+  const out = capturedLines(stdout).join("");
+  // The inline first cycle plus the free second tick ran; the locked tick wrote no cycle line.
+  expect(out.match(/Cron cycle started /g)).toHaveLength(2);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("another email-classify run is in progress");
+  // The lock the test held was released, and the cron's own per-cycle lock is gone too.
+  await expect(readFile(join(configDir, "run.lock"), "utf8")).rejects.toThrow();
 });
 
 test("--cron takes over a lock file left by a dead pid and proceeds (STALE_LOCK)", async () => {
   await writeAccount("work");
   await writeState("work", { lastRunTimestamp: STORED_ISO });
   await writeFile(join(configDir, "run.lock"), `${deadPid()}\n`, "utf8");
-  const { fetchFn, requests } = recordingFetch([graphPage(["m1"])]);
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), ...m365WriteResponses(["m1"])]);
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
 
   const code = await runCron(
-    { source: "m365", account: "all" },
+    { source: "m365", account: "all", intervalMinutes: 15 },
     {
       fetchFn,
       tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
       configDir,
       now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
     },
   );
 
   expect(code).toBe(0);
   expect(capturedLines(stderr)).toHaveLength(0);
-  expect(requests).toHaveLength(1);
-  expect(capturedLines(stdout).join("")).toContain("Fetched 1 message(s) from 1 account(s).");
+  expect(requests[0]?.method).toBe("GET");
+  expect(capturedLines(stdout).join("")).toContain("1 fetched, 1 labeled");
 });
 
-test("--cron releases the lock on every exit path, including a failing cycle (RELEASE_ON_FAILURE)", async () => {
+test("--cron releases the lock on every cycle exit path, including a failing one (RELEASE_ON_FAILURE)", async () => {
   await writeAccount("work");
   const { fetchFn } = recordingFetch([]);
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
 
-  // No token for the account: its cycle fails and the run exits 1.
+  // No token for the account: its cycle fails on both the attempt and the retry, and the run
+  // still starts its loop — the failed account is named in the cycle's failure line.
   const code = await runCron(
-    { source: "m365", account: "all" },
-    { fetchFn, tokenStore: memoryTokenStore({}), configDir, now: () => CYCLE_START },
+    { source: "m365", account: "all", intervalMinutes: 15 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({}),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+      sleep: async () => {},
+    },
+  );
+
+  expect(code).toBe(0);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("1 of 1 account(s) failed this cycle: work.");
+  await expect(readFile(join(configDir, "run.lock"), "utf8")).rejects.toThrow();
+});
+
+test("--source all with a provider that has no enabled account still runs the other (SOURCE_ALL_PARTIAL)", async () => {
+  await writeAccount("work");
+  const { fetchFn, requests } = recordingFetch([graphPage(["m1"]), ...m365WriteResponses(["m1"])]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { scheduler } = loopScheduler(0);
+
+  const code = await runCron(
+    { source: "all", account: "all", intervalMinutes: 15 },
+    {
+      fetchFn,
+      tokenStore: memoryTokenStore({ "m365:work": cachedToken("work") }),
+      configDir,
+      now: () => CYCLE_START,
+      model: modelDouble(),
+      scheduler,
+    },
+  );
+
+  expect(code).toBe(0);
+  // The gmail half reported its empty listing; the m365 half still ran its cycle.
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("No enabled gmail accounts found");
+  expect(capturedLines(stdout).join("")).toContain("1 fetched, 1 labeled");
+  expect(requests[0]?.authorization).toBe("Bearer access-m365-work");
+});
+
+test("--source all with no enabled account on either provider exits 1 with both hints (SOURCE_ALL_EMPTY)", async () => {
+  const { fetchFn, requests } = recordingFetch([]);
+  const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+  const code = await runCron(
+    { source: "all", account: "all", intervalMinutes: 15 },
+    { fetchFn, configDir, scheduler: loopScheduler(0).scheduler },
   );
 
   expect(code).toBe(1);
-  expect(capturedLines(stderr).join("")).toContain("1 of 1 m365 account(s) failed.");
-  await expect(readFile(join(configDir, "run.lock"), "utf8")).rejects.toThrow();
+  expect(requests).toHaveLength(0);
+  expect(capturedLines(stdout)).toHaveLength(0);
+  const errors = capturedLines(stderr).join("");
+  expect(errors).toContain("No enabled m365 accounts found");
+  expect(errors).toContain("No enabled gmail accounts found");
 });

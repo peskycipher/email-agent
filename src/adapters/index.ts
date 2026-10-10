@@ -99,3 +99,5 @@ export { idempotencyKey } from "./idempotency/key.js";
 
 export { acquireRunLock, releaseRunLock, runLockPath, RunLockError } from "./lock/runLock.js";
 export type { RunLockErrorCode, RunLockOptions } from "./lock/runLock.js";
+
+export { createScheduler } from "./scheduler/scheduler.js";

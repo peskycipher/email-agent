@@ -1,7 +1,7 @@
 import type { FetchOpts } from "../core/dto/FetchOpts.js";
 import type { MessageDTO } from "../core/dto/MessageDTO.js";
 import type { LogPort } from "../core/ports/LogPort.js";
-import { fetchAllMessages, type FetchAccount, type MessageFetchTarget } from "./fetch.js";
+import { DEFAULT_BATCH_SIZE, DEFAULT_FOLDERS, type FetchAccount, type MessageFetchTarget } from "./fetch.js";
 
 /** The slice of the shared state file this orchestrator reads; kept ISO to stay out of `core`. */
 export interface IncrementalAccountState {
@@ -76,6 +76,54 @@ export interface FetchIncrementalResult {
   accountsFetched: number;
 }
 
+/**
+ * The state one clean incremental fetch produced but has not yet recorded (Story 8.3's DTO egress
+ * seam): the cycle start read before the fetch, plus Gmail's new history id. The caller commits it
+ * — `writeLastRunTimestamp` and, for Gmail, the seam's `writeLastHistoryId` — only once its own
+ * work on the fetched messages finished clean; a caller that holds the pending state re-fetches
+ * the same window next cycle, which the 8.2 store makes cheap.
+ */
+export interface IncrementalPendingState {
+  /** The instant read before the fetch; recorded as `lastRunTimestamp` on commit. */
+  cycleStart: Date;
+  /** Gmail's new history id (absent for m365); recorded as `lastHistoryId` on commit. */
+  historyId?: string;
+}
+
+/**
+ * One account's incremental fetch without any state write (Story 8.3's egress): the fetched
+ * `MessageDTO`s — which `fetchIncremental` discards — plus the pending state the caller commits
+ * only when the account finished clean. `failed` covers the state read and every fetch path, so a
+ * failed account never carries `pending`; its cursor is held by construction.
+ */
+export interface IncrementalAccountEgress {
+  accountId: string;
+  /**
+   * The fetched messages, including any a partly-failed folder walk produced — the caller decides
+   * whether to process them (the committing `fetchIncremental` counts them; a retrying caller
+   * re-fetches the window instead).
+   */
+  messages: MessageDTO[];
+  /** Present iff the fetch completed cleanly; the caller commits it only once the account finished clean. */
+  pending?: IncrementalPendingState;
+  /** True when the state read or the fetch failed — nothing may be committed for the account. */
+  failed: boolean;
+}
+
+/** The per-account seams of `fetchIncrementalAccount`. */
+export interface FetchIncrementalAccountOptions {
+  account: IncrementalAccount;
+  mailPort: MessageFetchTarget;
+  logPort: LogPort;
+  readAccountState: ReadAccountState;
+  /** The provider id stamped on every request; defaults to M365's. */
+  source?: FetchOpts["source"];
+  /** Required when `source` is "gmail". */
+  gmail?: GmailIncrementalSeam;
+  /** The clock seam; the cycle start is read from it before the state read. */
+  now?: () => Date;
+}
+
 /** The epic's cron window: an incremental Gmail cycle always scopes to the INBOX system label (the same label the adapter's history walk hardcodes). */
 const GMAIL_INBOX = "INBOX";
 
@@ -94,40 +142,55 @@ function toPlan(account: IncrementalAccount, lastRunTimestamp: string | undefine
   };
 }
 
-/** One Gmail account's cycle: what it produced and whether the account counts as failed. */
-interface GmailCycleResult {
-  fetched: number;
-  failures: number;
+/**
+ * One account's folder walk: every folder's DTOs, collected, with the same per-account rules
+ * `fetchAllMessages` applies — folder de-duplication, the `DEFAULT_FOLDERS`/`DEFAULT_BATCH_SIZE`
+ * defaults, a per-folder failure logged with its folder that never stops the others, and the
+ * `Fetched N messages.` info line only for a clean walk. `fetch.ts` is frozen (Story 8.3's out of
+ * bounds), so the egress seam re-states its single-account walk here rather than widening that
+ * module's contract to return DTOs.
+ */
+async function walkAccount(
+  plan: FetchAccount,
+  mailPort: MessageFetchTarget,
+  logPort: LogPort,
+  source: FetchOpts["source"],
+): Promise<{ messages: MessageDTO[]; failed: boolean }> {
+  const accountId = plan.accountId;
+  const folders = plan.folders === undefined || plan.folders.length === 0 ? DEFAULT_FOLDERS : plan.folders;
+  const batchSize = plan.batchSize ?? DEFAULT_BATCH_SIZE;
+  const messages: MessageDTO[] = [];
+  let failed = false;
+  // A settings file can list the same folder twice; walking the de-duplicated list keeps both the
+  // work and the count honest.
+  for (const folder of new Set(folders)) {
+    try {
+      messages.push(
+        ...(await mailPort.fetchMessages({
+          source,
+          accountId,
+          folder,
+          batchSize,
+          ...(plan.since === undefined ? {} : { since: plan.since }),
+        })),
+      );
+    } catch (error) {
+      failed = true;
+      logPort.error(errorLine(error), { accountId, folder });
+    }
+  }
+  if (!failed) logPort.info(`Fetched ${messages.length} messages.`, { accountId });
+  return { messages, failed };
 }
 
-/** The per-cycle seams every Gmail path shares. */
-interface GmailCycleSeams {
+/** The Gmail fetch's clean outcome; `failed: true` carries any messages a partly-failed list walk produced. */
+type GmailRawFetch = { failed: true; messages: MessageDTO[] } | { failed: false; messages: MessageDTO[]; historyId: string };
+
+/** The per-fetch Gmail seams (no state writes — the caller commits the pending state). */
+interface GmailFetchSeams {
   mailPort: MessageFetchTarget;
   logPort: LogPort;
   gmail: GmailIncrementalSeam;
-  writeLastRunTimestamp: WriteLastRunTimestamp;
-  cycleStart: Date;
-}
-
-/**
- * Records a Gmail cycle's state — the history id first (empty ids never reach the writer: the
- * state-file writer rejects them), then the cycle start — only ever called after that account's
- * fetch succeeded. A write failure means the next run repeats the work, so it is logged and
- * counted rather than swallowed.
- */
-async function recordGmailState(
-  accountId: string,
-  historyId: string,
-  seams: GmailCycleSeams,
-): Promise<boolean> {
-  try {
-    await seams.gmail.writeLastHistoryId(accountId, historyId);
-    await seams.writeLastRunTimestamp(accountId, seams.cycleStart);
-    return true;
-  } catch (error) {
-    seams.logPort.error(errorLine(error), { accountId });
-    return false;
-  }
 }
 
 /**
@@ -138,11 +201,11 @@ async function recordGmailState(
  * no stored timestamp (the first run) the whole INBOX is walked, so a mailbox is never silently
  * skipped.
  */
-async function fetchGmailListPath(
+async function fetchGmailListRaw(
   account: IncrementalAccount,
   state: IncrementalAccountState,
-  seams: GmailCycleSeams,
-): Promise<GmailCycleResult> {
+  seams: GmailFetchSeams,
+): Promise<GmailRawFetch> {
   const { mailPort, logPort, gmail } = seams;
   const accountId = account.accountId;
   let historyId: string;
@@ -150,36 +213,37 @@ async function fetchGmailListPath(
     historyId = await gmail.history.fetchHistoryId(accountId);
   } catch (error) {
     logPort.error(errorLine(error), { accountId });
-    return { fetched: 0, failures: 1 };
+    return { failed: true, messages: [] };
   }
   const plan: FetchAccount = {
     accountId,
     folders: [GMAIL_INBOX],
     ...(account.batchSize === undefined ? {} : { batchSize: account.batchSize }),
     // The stored cycle start is the walk's lower bound; the adapter turns it into the
-    // stepped-back `q=after:` filter. With the pre-walk profile id recorded below, nothing
+    // stepped-back `q=after:` filter. With the pre-walk profile id returned below, nothing
     // between that id and the walk can land unseen.
     ...(state.lastRunTimestamp === undefined ? {} : { since: new Date(state.lastRunTimestamp) }),
   };
-  const result = await fetchAllMessages({ accounts: [plan], mailPort, logPort, source: "gmail" });
-  if (result.failures > 0) return { fetched: result.fetched, failures: result.failures };
-  const recorded = await recordGmailState(accountId, historyId, seams);
-  return { fetched: result.fetched, failures: recorded ? 0 : 1 };
+  const walked = await walkAccount(plan, mailPort, logPort, "gmail");
+  return walked.failed
+    ? { failed: true, messages: walked.messages }
+    : { failed: false, messages: walked.messages, historyId };
 }
 
 /**
- * One Gmail account's cycle: resume from the stored history id when there is one, otherwise read
- * the profile and walk the whole INBOX. An expired history id is warned about by name and answered
- * with the same list walk, bounded by the stored cycle start.
+ * One Gmail account's raw fetch: resume from the stored history id when there is one, otherwise
+ * read the profile and walk the whole INBOX. An expired history id is warned about by name and
+ * answered with the same list walk, bounded by the stored cycle start. Never writes state — the
+ * returned history id is the caller's to commit.
  */
-async function fetchGmailAccount(
+async function fetchGmailAccountRaw(
   account: IncrementalAccount,
   state: IncrementalAccountState,
-  seams: GmailCycleSeams,
-): Promise<GmailCycleResult> {
+  seams: GmailFetchSeams,
+): Promise<GmailRawFetch> {
   const { logPort, gmail } = seams;
   const accountId = account.accountId;
-  if (state.lastHistoryId === undefined) return fetchGmailListPath(account, state, seams);
+  if (state.lastHistoryId === undefined) return fetchGmailListRaw(account, state, seams);
   let outcome: GmailHistoryOutcome;
   try {
     outcome = await gmail.history.fetchHistory({
@@ -189,7 +253,7 @@ async function fetchGmailAccount(
     });
   } catch (error) {
     logPort.error(errorLine(error), { accountId });
-    return { fetched: 0, failures: 1 };
+    return { failed: true, messages: [] };
   }
   if (outcome.kind === "expired") {
     // Warn by name, then fall back rather than skipping the account or crashing the cycle.
@@ -197,11 +261,11 @@ async function fetchGmailAccount(
       `Gmail's history for account "${accountId}" has expired — falling back to an INBOX walk since the last recorded cycle.`,
       { accountId },
     );
-    return fetchGmailListPath(account, state, seams);
+    return fetchGmailListRaw(account, state, seams);
   }
   const messages = outcome.messages;
   // A purged message's 404 part is a per-message answer, not the account's failure (EC1): warn
-  // naming the id, keep the cycle successful, and let the recorded history id move past it.
+  // naming the id, keep the cycle successful, and let the returned history id move past it.
   for (const id of outcome.skippedIds) {
     logPort.warn(
       `Gmail's history for account "${accountId}" named message "${id}", but Gmail has since purged it — the message is skipped.`,
@@ -209,19 +273,66 @@ async function fetchGmailAccount(
     );
   }
   logPort.info(`Fetched ${messages.length} messages.`, { accountId });
-  const recorded = await recordGmailState(accountId, outcome.historyId, seams);
-  return { fetched: messages.length, failures: recorded ? 0 : 1 };
+  return { failed: false, messages, historyId: outcome.historyId };
 }
 
 /**
- * Fetches only what is new per account: M365 through the stored `lastRunTimestamp` (Story 5.2),
- * Gmail through the stored `lastHistoryId` — a history walk when one is stored, the profile plus a
- * full INBOX walk on a first run, and a warned INBOX fallback whenever Gmail reports the history
- * expired (Story 5.4). Each account's cycle start is captured before its fetch, and the state only
- * advances after that account's fetch succeeded, so a failed cycle leaves its state untouched.
- * Accounts are processed sequentially and isolated: a state, profile, history, batch or fetch
- * failure is logged with its `accountId` and never aborts the others. Returns the total fetched and
- * the count of failed accounts so the caller can set an exit code.
+ * One account's incremental fetch as egress (Story 8.3's seam): M365 through the stored
+ * `lastRunTimestamp` (Story 5.2), Gmail through the stored `lastHistoryId` — a history walk when
+ * one is stored, the profile plus a full INBOX walk on a first run, and a warned INBOX fallback
+ * whenever Gmail reports the history expired (Story 5.4). The cycle start is captured before the
+ * state read, the fetch hands back its `MessageDTO`s plus the pending state, and nothing is
+ * committed here: the caller commits only when the account finished clean, so a failed account's
+ * cursor is held by construction. A state, profile, history, batch or fetch failure is logged with
+ * its `accountId` and answers `failed: true`.
+ */
+export async function fetchIncrementalAccount(options: FetchIncrementalAccountOptions): Promise<IncrementalAccountEgress> {
+  const { account, mailPort, logPort, readAccountState, source = "m365" } = options;
+  const gmail = options.gmail;
+  // A wiring bug, not a per-account failure: without the seam the Gmail branch could not run, and
+  // falling through to the m365 list path would mis-stamp every DTO.
+  if (source === "gmail" && gmail === undefined) {
+    throw new Error('A Gmail run needs the Gmail incremental seam (history calls + "writeLastHistoryId").');
+  }
+  const cycleStart = (options.now ?? (() => new Date()))();
+  const accountId = account.accountId;
+  let state: IncrementalAccountState;
+  try {
+    state = await readAccountState(accountId);
+  } catch (error) {
+    logPort.error(errorLine(error), { accountId });
+    return { accountId, messages: [], failed: true };
+  }
+  if (source === "gmail" && gmail !== undefined) {
+    const fetched = await fetchGmailAccountRaw(account, state, { mailPort, logPort, gmail });
+    if (fetched.failed) return { accountId, messages: fetched.messages, failed: true };
+    return {
+      accountId,
+      messages: fetched.messages,
+      failed: false,
+      pending: { cycleStart, historyId: fetched.historyId },
+    };
+  }
+  const walked = await walkAccount(toPlan(account, state.lastRunTimestamp), mailPort, logPort, source);
+  return {
+    accountId,
+    messages: walked.messages,
+    failed: walked.failed,
+    ...(walked.failed ? {} : { pending: { cycleStart } }),
+  };
+}
+
+/**
+ * Fetches only what is new per account and commits the state itself: M365 through the stored
+ * `lastRunTimestamp` (Story 5.2), Gmail through the stored `lastHistoryId` — a history walk when
+ * one is stored, the profile plus a full INBOX walk on a first run, and a warned INBOX fallback
+ * whenever Gmail reports the history expired (Story 5.4). Each account's cycle start is captured
+ * before its fetch, and the state only advances after that account's fetch succeeded — Gmail's
+ * history id first, then the cycle start — so a failed cycle leaves its state untouched. Accounts
+ * are processed sequentially and isolated: a state, profile, history, batch or fetch failure is
+ * logged with its `accountId` and never aborts the others. Returns the total fetched and the count
+ * of failed accounts so the caller can set an exit code. The one-cycle caller that needs the
+ * fetched `MessageDTO`s (the cron cycle) uses `fetchIncrementalAccount` and commits itself.
  */
 export async function fetchIncremental(options: FetchIncrementalOptions): Promise<FetchIncrementalResult> {
   const {
@@ -244,43 +355,34 @@ export async function fetchIncremental(options: FetchIncrementalOptions): Promis
   let failures = 0;
   let accountsFetched = 0;
   for (const account of accounts) {
-    const cycleStart = now();
-    let state: IncrementalAccountState;
-    try {
-      state = await readAccountState(account.accountId);
-    } catch (error) {
-      failures += 1;
-      logPort.error(errorLine(error), { accountId: account.accountId });
-      continue;
-    }
-    if (source === "gmail" && gmail !== undefined) {
-      const result = await fetchGmailAccount(account, state, {
-        mailPort,
-        logPort,
-        gmail,
-        writeLastRunTimestamp,
-        cycleStart,
-      });
-      fetched += result.fetched;
-      failures += result.failures;
-      if (result.failures === 0 || result.fetched > 0) accountsFetched += 1;
-      continue;
-    }
-    const plan = toPlan(account, state.lastRunTimestamp);
-    const result = await fetchAllMessages({ accounts: [plan], mailPort, logPort, source });
-    fetched += result.fetched;
+    const egress = await fetchIncrementalAccount({
+      account,
+      mailPort,
+      logPort,
+      readAccountState,
+      source,
+      ...(gmail === undefined ? {} : { gmail }),
+      now,
+    });
+    fetched += egress.messages.length;
     // An account counts as fetched when it returned messages or completed cleanly; a partly-failed
     // account still contributed messages, so it stays in the count while also counting as a failure.
-    if (result.failures === 0 || result.fetched > 0) accountsFetched += 1;
-    if (result.failures > 0) {
+    if (!egress.failed || egress.messages.length > 0) accountsFetched += 1;
+    if (egress.failed || egress.pending === undefined) {
       // The fetch failed, so this account's stored state must not advance.
-      failures += result.failures;
+      if (egress.failed) failures += 1;
       continue;
     }
     try {
-      await writeLastRunTimestamp(account.accountId, cycleStart);
+      // Gmail's history id first (empty ids never reach the writer: the state-file writer rejects
+      // them), then the cycle start — a write failure means the next run repeats the work, so it
+      // is logged and counted rather than swallowed.
+      if (source === "gmail" && gmail !== undefined && egress.pending.historyId !== undefined) {
+        await gmail.writeLastHistoryId(account.accountId, egress.pending.historyId);
+      }
+      await writeLastRunTimestamp(account.accountId, egress.pending.cycleStart);
     } catch (error) {
-      // The messages came back, but the timestamp did not advance; the next run repeats the work.
+      // The messages came back, but the cursor did not advance; the next run repeats the work.
       failures += 1;
       logPort.error(errorLine(error), { accountId: account.accountId });
     }

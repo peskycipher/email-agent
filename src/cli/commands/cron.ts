@@ -14,12 +14,21 @@ import { M365Adapter } from "../../adapters/m365/M365Adapter.js";
 import { M365AuthAdapter, type FetchLike } from "../../adapters/m365/M365AuthAdapter.js";
 import { readAccountState, writeLastHistoryId, writeLastRunTimestamp, type StateFileOptions } from "../../adapters/config/stateFile.js";
 import { acquireRunLock, releaseRunLock, type RunLockOptions } from "../../adapters/lock/runLock.js";
+import { IdempotencyStore } from "../../adapters/idempotency/sqliteIdempotencyStore.js";
+import { createModelAdapter, defaultModelClientFactories, DEFAULT_MODEL_CONFIG } from "../../adapters/model/modelAdapterFactory.js";
+import { loadTaxonomy } from "../../adapters/config/taxonomy.js";
+import { createScheduler } from "../../adapters/scheduler/scheduler.js";
 import { KeychainTokenStore } from "../../adapters/token/KeychainTokenStore.js";
+import type { ModelConfig } from "../../core/dto/ModelConfig.js";
+import type { Taxonomy } from "../../core/dto/Taxonomy.js";
 import type { LogPort } from "../../core/ports/LogPort.js";
+import type { ModelPort } from "../../core/ports/ModelPort.js";
+import type { SchedulerPort } from "../../core/ports/SchedulerPort.js";
 import type { TokenPort } from "../../core/ports/TokenPort.js";
+import { runCronCycle, type CategoryEnsureTarget, type CronCycleProvider, type CronCycleResult } from "../../orch/cron-cycle.js";
+import { type LabelWriteTarget } from "../../orch/classification-run.js";
 import { type MessageFetchTarget } from "../../orch/fetch.js";
 import {
-  fetchIncremental,
   type GmailIncrementalSeam,
   type IncrementalAccount,
 } from "../../orch/incremental.js";
@@ -27,10 +36,12 @@ import { createPassphrasePrompt, errorLine } from "./auth.js";
 import { createConsoleLogPort } from "./sync-categories.js";
 
 export interface CronCommandOptions {
-  /** The provider to fetch from; dispatch rejects everything but "m365" and "gmail". */
-  source: "m365" | "gmail";
-  /** A per-account settings name, or "all" for every enabled account of that provider. */
+  /** The providers to run per cycle: one, or "all" composing both in the one loop (Story 8.3). */
+  source: "m365" | "gmail" | "all";
+  /** A per-account settings name, or "all" for every enabled account of the selected provider(s). */
   account: string;
+  /** Minutes between cycles; dispatch validates 1–1440 and applies the default 15. */
+  intervalMinutes: number;
 }
 
 /** Test seam mirroring `runBackfill`'s: mocked network, in-memory tokens, temp config, recording logger. */
@@ -39,9 +50,18 @@ export interface CronRuntime {
   tokenStore?: TokenPort;
   /** Root of `~/.config/email-classify`; injectable so tests never touch the real home. */
   configDir?: string;
+  taxonomyPath?: string | URL;
   logPort?: LogPort;
-  /** Clock seam; injectable so the persisted cycle start is deterministic in tests. */
+  /** Clock seam; injectable so the cycle line's timestamps are deterministic in tests. */
   now?: () => Date;
+  /** The model config a run classifies with; defaults to the ratified `DEFAULT_MODEL_CONFIG` (Epic 11 owns real settings). */
+  modelConfig?: ModelConfig;
+  /** Model adapter seam; injectable so a test never reaches a provider SDK or the network. */
+  model?: ModelPort;
+  /** The scheduler that runs the first cycle and then the loop; injectable so tests never start a real interval. */
+  scheduler?: SchedulerPort;
+  /** The 30s backoff seam, threaded into the cycle; injectable so tests never really sleep. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** The part of a per-account listing this command reads; both providers return one. */
@@ -58,21 +78,21 @@ interface EnabledAccountsListing {
 }
 
 /**
- * One provider's half of the loop: its listing, its fetch port and, for Gmail, its history seam
- * (`users.history.list`/getProfile plus the `lastHistoryId` write); absent for m365.
+ * One provider's half of the loop: its listing, its fetch+write port and, for Gmail, its history
+ * seam (`users.history.list`/getProfile plus the `lastHistoryId` write); absent for m365.
  */
-interface IncrementalProviderPlan {
+interface CronProviderPlan {
   provider: "m365" | "gmail";
   accountsDirDisplayPath(): string;
   listEnabledAccounts(): Promise<EnabledAccountsListing>;
   planFor(entry: EnabledAccountSettings): IncrementalAccount;
-  port: MessageFetchTarget;
+  port: MessageFetchTarget & LabelWriteTarget & CategoryEnsureTarget;
   /** Story 5.4's Gmail half; the orchestrator throws when a gmail run arrives without it. */
   gmail?: GmailIncrementalSeam;
 }
 
 /** Provider-specific setup hint, for when the selection has no account to fetch. */
-function noAccountsHint(plan: IncrementalProviderPlan, account: string): string {
+function noAccountsHint(plan: CronProviderPlan, account: string): string {
   const file = account === "all" ? "<name>.yaml" : `${account}.yaml`;
   return account === "all"
     ? `No enabled ${plan.provider} accounts found — add ${plan.accountsDirDisplayPath()}/${file} with "enabled: true".`
@@ -93,21 +113,52 @@ function releaseLock(options: RunLockOptions): void {
 }
 
 /**
- * Temporary `--cron --source <m365|gmail> --account <name|all>` command (human scope decision,
- * 2026-10-09): lists the enabled accounts for the requested provider and fetches only what is new
- * per account through `fetchIncremental` (m365 from the stored `lastRunTimestamp`, Gmail from the
- * stored `lastHistoryId` with its expiry fallback), with per-account isolation, a per-account count
- * and a counted failure line, and the failure count mapped to the exit code. Nothing is classified
- * or written back. Holds the same process lock `--backfill` takes, so a concurrent run of either
- * exits 1 before anything is fetched (Story 8.2). Looped by Story 8.3; replaced by Epic 11's DI
- * container and `main.ts`.
+ * The recurring `--cron` mode (Story 8.3): `--cron --source <m365|gmail|all> --account <name|all>
+ * [--interval <minutes>]` lists the enabled accounts once, then loops — the first cycle inline, the
+ * rest at the interval through the scheduler, default 15 minutes. Each cycle takes the 8.2 run
+ * lock around itself (never for the whole loop, so `--backfill` may interleave between cycles),
+ * then runs `runCronCycle` over the selected accounts: fetch what is new per account, classify it,
+ * write the labels back through the 8.1/8.2 stages, and commit each account's cursor only when its
+ * cycle finished clean — with per-account isolation, a 30s backoff and one retry for fetch or write
+ * failures, and the re-queue being the held cursor. `--source all` runs both providers' accounts in
+ * every cycle, each through its own namespaced cursor file.
+ *
+ * The first cycle runs inline so a lock held by another invocation exits 1 with the 8.2 line before
+ * anything is fetched and before any interval starts. A later cycle that finds the lock held (a
+ * backfill started in a gap) logs the same line, skips its tick and loops on. Because the loop never
+ * ends on its own, an account that failed a cycle is named in that cycle's lines and the loop
+ * continues — only the lock failure has a terminal exit code. Replaced by Epic 11's DI container.
  */
 export async function runCron(options: CronCommandOptions, runtime: CronRuntime = {}): Promise<number> {
   const configDir = runtime.configDir === undefined ? {} : { configDir: runtime.configDir };
+  const modelConfig = runtime.modelConfig ?? DEFAULT_MODEL_CONFIG;
+
+  let taxonomy: Taxonomy;
+  try {
+    taxonomy = await loadTaxonomy({
+      ...(runtime.taxonomyPath === undefined ? {} : { taxonomyPath: runtime.taxonomyPath }),
+      ...configDir,
+    });
+  } catch (error) {
+    process.stderr.write(`${errorLine(error)}\n`);
+    return 1;
+  }
+
   const fetchFn = runtime.fetchFn ?? (globalThis as unknown as { fetch: FetchLike }).fetch;
   const tokenStore =
     runtime.tokenStore ?? new KeychainTokenStore({ promptPassphrase: createPassphrasePrompt(), ...configDir });
   const logPort = runtime.logPort ?? createConsoleLogPort();
+  let model: ModelPort;
+  try {
+    model = runtime.model ?? createModelAdapter(modelConfig, {
+      log: logPort,
+      ...defaultModelClientFactories,
+    });
+  } catch (error) {
+    process.stderr.write(`${errorLine(error)}\n`);
+    return 1;
+  }
+
   const m365Auth = new M365AuthAdapter({
     fetchFn,
     tokenStore,
@@ -123,7 +174,7 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
     getAccessToken: gmailAuth.getAccessToken.bind(gmailAuth),
     logPort,
   });
-  const plans: Record<CronCommandOptions["source"], IncrementalProviderPlan> = {
+  const plans: Record<"m365" | "gmail", CronProviderPlan> = {
     m365: {
       provider: "m365",
       accountsDirDisplayPath: m365AccountsDirDisplayPath,
@@ -158,69 +209,128 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
       },
     },
   };
-  const plan = plans[options.source];
-  // Per-provider state files (Story 5.4 decision 2-A): each provider only reads and writes its own
-  // `state/<provider>-<name>.json`, so same-named accounts never share a cursor.
-  const stateOptions: StateFileOptions = { ...configDir, provider: plan.provider };
 
-  let listing: EnabledAccountsListing;
-  try {
-    listing = await plan.listEnabledAccounts();
-  } catch (error) {
-    process.stderr.write(`${plan.provider}: ${errorLine(error)}\n`);
-    return 1;
-  }
-
+  // The selection is resolved once, before the loop: the settings files the accounts come from
+  // are read at startup, and every cycle then runs the same accounts.
   const account = options.account;
-  const selected = account === "all" ? listing.accounts : listing.accounts.filter((entry) => entry.name === account);
-  const relevantErrors = account === "all" ? listing.errors : listing.errors.filter((e) => e.accountName === account);
-  for (const error of relevantErrors) {
-    process.stderr.write(`${plan.provider} ${error.accountName}: ${error.message}\n`);
+  const providers: CronCycleProvider[] = [];
+  for (const providerId of options.source === "all" ? (["m365", "gmail"] as const) : [options.source]) {
+    const plan = plans[providerId];
+    let listing: EnabledAccountsListing;
+    try {
+      listing = await plan.listEnabledAccounts();
+    } catch (error) {
+      // One provider's listing failure costs that provider, not the whole run; the hint below
+      // still points at the provider that listed cleanly but had nothing selected.
+      process.stderr.write(`${plan.provider}: ${errorLine(error)}\n`);
+      continue;
+    }
+    const selected = account === "all" ? listing.accounts : listing.accounts.filter((entry) => entry.name === account);
+    const relevantErrors = account === "all" ? listing.errors : listing.errors.filter((e) => e.accountName === account);
+    for (const error of relevantErrors) {
+      process.stderr.write(`${plan.provider} ${error.accountName}: ${error.message}\n`);
+    }
+    if (selected.length === 0) {
+      // Reported as it is discovered: under `--source all` a provider with nothing selected says
+      // so while the other provider's cycle still runs (its hint must not wait for the loop to end).
+      if (relevantErrors.length === 0) process.stderr.write(`${noAccountsHint(plan, account)}\n`);
+      continue;
+    }
+    // Per-provider state files (Story 5.4 decision 2-A): each provider only reads and writes its
+    // own `state/<provider>-<name>.json`, so same-named accounts never share a cursor.
+    const stateOptions: StateFileOptions = { ...configDir, provider: plan.provider };
+    providers.push({
+      source: plan.provider,
+      accounts: selected.map((entry) => plan.planFor(entry)),
+      mailPort: plan.port,
+      readAccountState: (accountName) => readAccountState(accountName, stateOptions),
+      writeLastRunTimestamp: (accountName, date) => writeLastRunTimestamp(accountName, date, stateOptions),
+      ...(plan.gmail === undefined ? {} : { gmail: plan.gmail }),
+    });
   }
 
-  if (selected.length === 0) {
-    process.stderr.write(
-      relevantErrors.length > 0
-        ? `${relevantErrors.length} ${plan.provider} account(s) have invalid settings — fix or remove them, then re-run.\n`
-        : `${noAccountsHint(plan, account)}\n`,
-    );
+  if (providers.length === 0) {
+    // A rejected selection reports its own hints rather than a busy lock (Story 8.2); nothing has
+    // been locked, fetched or classified yet.
     return 1;
   }
 
-  // The lock is taken only once this invocation is known to have accounts to run, so a rejected
-  // selection reports its own hint rather than a busy lock (Story 8.2).
-  const lock: RunLockOptions = { ...configDir, pid: process.pid };
+  let store: IdempotencyStore;
   try {
-    acquireRunLock(lock);
+    // Opened only once the selection is known, so a typo'd account name never leaves an empty
+    // `idempotency.db` behind (Story 8.2); the per-cycle lock below serialises every write
+    // through it, so the handle may stay open across the whole loop.
+    store = new IdempotencyStore(configDir);
   } catch (error) {
     process.stderr.write(`${errorLine(error)}\n`);
     return 1;
   }
-  const accounts = selected.map((entry) => plan.planFor(entry));
-  let outcome: Awaited<ReturnType<typeof fetchIncremental>>;
-  try {
-    outcome = await fetchIncremental({
-      accounts,
-      mailPort: plan.port,
-      logPort,
-      source: plan.provider,
-      readAccountState: (accountName) => readAccountState(accountName, stateOptions),
-      writeLastRunTimestamp: (accountName, date) => writeLastRunTimestamp(accountName, date, stateOptions),
-      ...(plan.gmail === undefined ? {} : { gmail: plan.gmail }),
-      ...(runtime.now === undefined ? {} : { now: runtime.now }),
-    });
-  } finally {
-    // The lock covers the per-account state files this cycle writes; every exit path releases it.
-    releaseLock(lock);
+
+  const lock: RunLockOptions = { ...configDir, pid: process.pid };
+  const scheduler = runtime.scheduler ?? createScheduler();
+  const now = runtime.now ?? (() => new Date());
+  const intervalMs = options.intervalMinutes * 60_000;
+  const totalAccounts = providers.reduce((total, provider) => total + provider.accounts.length, 0);
+  // Whether the cycle just run was blocked by another invocation's lock; only the first cycle's
+  // value is read, to decide whether the loop may start at all.
+  let blockedByLock = false;
+
+  /**
+   * One cycle: take the 8.2 lock, run `runCronCycle` over the selection, release the lock on every
+   * path, then write the AC's one line — the cycle's start, its counters, its duration and the next
+   * cycle's time. A cycle that cannot take the lock (a backfill in a gap) logs the 8.2 line, skips
+   * its tick and lets the loop carry on; the account failures are named in their own line.
+   */
+  const runCycle = async (): Promise<void> => {
+    try {
+      acquireRunLock(lock);
+    } catch (error) {
+      blockedByLock = true;
+      process.stderr.write(`${errorLine(error)}\n`);
+      return;
+    }
+    blockedByLock = false;
+    let report: CronCycleResult;
+    try {
+      report = await runCronCycle({
+        providers,
+        store,
+        taxonomy,
+        model,
+        config: modelConfig,
+        logPort,
+        ...(runtime.now === undefined ? {} : { now: runtime.now }),
+        ...(runtime.sleep === undefined ? {} : { sleep: runtime.sleep }),
+      });
+    } finally {
+      // The lock covers the store and the per-account state files this cycle writes; every exit
+      // path releases it, so the gap before the next cycle stays free for `--backfill`.
+      releaseLock(lock);
+    }
+    const nextAt = new Date(now().getTime() + intervalMs);
+    process.stdout.write(
+      `Cron cycle started ${report.startedAt.toISOString()}: ${report.fetched} fetched, ${report.labeled} labeled, ` +
+        `${report.skipped} skipped, ${report.alreadyDone} already done, ${report.errors} error(s), ` +
+        `took ${report.durationMs}ms — next cycle at ${nextAt.toISOString()}.\n`,
+    );
+    if (report.failures > 0) {
+      process.stderr.write(
+        `${report.failures} of ${totalAccounts} account(s) failed this cycle: ${report.failedAccounts.join(", ")}.\n`,
+      );
+    }
+  };
+
+  // The first cycle runs inline through `runOnce`, so a lock held by another invocation exits 1
+  // with the 8.2 line and fetches nothing, before any interval exists.
+  await scheduler.runOnce(runCycle);
+  if (blockedByLock) {
+    store.close();
+    return 1;
   }
-  const { fetched, failures, accountsFetched } = outcome;
-  const total = selected.length + relevantErrors.length;
-  const totalFailures = failures + relevantErrors.length;
-  if (totalFailures > 0) {
-    process.stderr.write(`${totalFailures} of ${total} ${plan.provider} account(s) failed.\n`);
-  }
-  // The count of accounts that actually produced messages, not the number selected: a failed
-  // account is already reported on stderr, and claiming it here would read as if it had fetched.
-  process.stdout.write(`Fetched ${fetched} message(s) from ${accountsFetched} account(s).\n`);
-  return totalFailures > 0 ? 1 : 0;
+  // The loop: the interval keeps the process alive; Ctrl+C kills it with no handler (Story 9.2
+  // owns graceful shutdown), and the per-cycle state stays consistent by construction. Awaiting the
+  // scheduler's promise is free in production (the adapter resolves immediately, the interval then
+  // runs on its own) and lets an injected scheduler finish its ticks before the command returns.
+  await scheduler.runInterval(runCycle, intervalMs);
+  return 0;
 }

@@ -129,3 +129,12 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-6-3-model-abstraction-layer-modelport.md`
   summary: `defaultModelClientFactories` (the only place the real `@typesafe-ai/sdk`/`openai` SDKs are constructed) is untested, and its double `as unknown as` casts hide a seam/SDK surface mismatch from `tsc` and every test.
   evidence: Pre-verified correct *today* against the installed typings (`node_modules/@typesafe-ai/sdk/dist/index.d.mts` — `SystemOneRequest`/`NoulQuestion`/`SystemOneResult` all match the `JevClient` seam; `node_modules/openai@6.49.0` — `max_tokens` present (deprecated in favor of `max_completion_tokens` in 7.x) and `json_schema` response format present). Production wiring lands in 6.4/Epic-11; when a real consumer spreads `defaultModelClientFactories` into `createModelAdapter`, add a narrow runtime probe (or typed narrowing) so a future SDK major cannot silently break the seam. Found by the verification-gap layer (2026-10-09).
+- source_spec: `spec-8-3-cron-mode-loop-multi-account.md`
+  summary: The committing incremental orchestrator `fetchIncremental` is production-dead now that the cron cycle commits through cron-cycle.ts, leaving two duplicated commit paths.
+  evidence: Verified this story (2026-10-11) — no production caller remains (`tests/orch/incremental.test.ts` is its only consumer), so the Gmail history-id-first + cycle-start commit logic exists twice. The fix is deleting the Story-5.2/5.4 module and converting its 814-line suite to the egress API — best done with Epic 11's DI rewrite or the epic-8 retrospective.
+- source_spec: `spec-8-3-cron-mode-loop-multi-account.md`
+  summary: A later cron tick whose cycle rejects is settled silently, and a rejection escaping `runCronCycle` would leave the loop alive with no output.
+  evidence: Unverifiable this story (2026-10-11, maybe-false) — no shipped seam can throw there; Epic 11's DI rewrite supplying a wired seam that throws would settle it. Remedy then: one catch around the cycle call inside the CLI's runCycle.
+- source_spec: `spec-8-3-cron-mode-loop-multi-account.md`
+  summary: Interval drift — after a cycle slower than the interval, the next cycle starts sooner than the promised gap.
+  evidence: Real (2026-10-11): setInterval fires on schedule and skips a still-running cycle, so the between-cycle sleep is not honoured after a slow cycle. The scheduler adapter deliberately scopes drift correction (catch-up/jitter) to Epic 9/10; own it there.

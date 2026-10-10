@@ -105,7 +105,12 @@ test("--backfill combined with --sync-categories is rejected", () => {
 });
 
 test("--cron without --source defaults to m365 and --account to all", () => {
-  expect(resolveCliCommand({ cron: true })).toEqual({ kind: "cron", source: "m365", account: "all" });
+  expect(resolveCliCommand({ cron: true })).toEqual({
+    kind: "cron",
+    source: "m365",
+    account: "all",
+    intervalMinutes: 15,
+  });
 });
 
 test("--cron --source m365 --account work targets that one account", () => {
@@ -113,6 +118,7 @@ test("--cron --source m365 --account work targets that one account", () => {
     kind: "cron",
     source: "m365",
     account: "work",
+    intervalMinutes: 15,
   });
 });
 
@@ -121,6 +127,7 @@ test("--cron --source gmail selects the Gmail path, defaulting --account to all 
     kind: "cron",
     source: "gmail",
     account: "all",
+    intervalMinutes: 15,
   });
 });
 
@@ -129,14 +136,42 @@ test("--cron --source gmail --account personal targets that one account", () => 
     kind: "cron",
     source: "gmail",
     account: "personal",
+    intervalMinutes: 15,
   });
 });
 
-test("--cron --source all is rejected, since a cron cycle names one provider (SOURCE_ALL)", () => {
-  const command = resolveCliCommand({ cron: true, source: "all" });
+test("--cron --source all runs both providers in the one loop (SOURCE_ALL)", () => {
+  expect(resolveCliCommand({ cron: true, source: "all" })).toEqual({
+    kind: "cron",
+    source: "all",
+    account: "all",
+    intervalMinutes: 15,
+  });
+});
 
+test("--interval defaults --cron to 15 minutes and parses a whole number in bounds (INTERVAL)", () => {
+  const command = resolveCliCommand({ cron: true, source: "m365", interval: "1" });
+  expect(command.kind === "cron" ? command.intervalMinutes : undefined).toBe(1);
+  const max = resolveCliCommand({ cron: true, source: "gmail", interval: "1440" });
+  expect(max.kind === "cron" ? max.intervalMinutes : undefined).toBe(1440);
+});
+
+test("--interval 0, 1441 and abc are rejected with one line naming the flag and its bounds (INTERVAL_BOUNDS)", () => {
+  for (const raw of ["0", "1441", "abc"]) {
+    const command = resolveCliCommand({ cron: true, source: "m365", interval: raw });
+    expect(command.kind).toBe("error");
+    expect(command.kind === "error" ? command.message : "").toContain(`--interval "${raw}"`);
+    expect(command.kind === "error" ? command.message : "").toContain("between 1 and 1440");
+  }
+});
+
+test("--interval without --cron is rejected, never silently ignored", () => {
+  const command = resolveCliCommand({ interval: "15" });
   expect(command.kind).toBe("error");
-  expect(command.kind === "error" ? command.message : "").toContain("--source all is not supported");
+  expect(command.kind === "error" ? command.message : "").toContain("--interval requires --cron");
+  const onBackfill = resolveCliCommand({ backfill: true, interval: "15" });
+  expect(onBackfill.kind).toBe("error");
+  expect(onBackfill.kind === "error" ? onBackfill.message : "").toContain("--interval requires --cron");
 });
 
 test("--cron --source outlook is rejected as an unknown source", () => {
