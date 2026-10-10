@@ -81,7 +81,7 @@ function errorLine(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function logProgress(progress: AccountProgress, accountId: string, logPort: LogPort): void {
+export function logProgress(progress: AccountProgress, accountId: string, logPort: LogPort): void {
   logPort.info(
     `Processed ${progress.processed} message(s): ${progress.labeled} labeled, ${progress.skipped} skipped, ` +
       `${progress.alreadyDone} already done, ${progress.errors} error(s).`,
@@ -89,14 +89,109 @@ function logProgress(progress: AccountProgress, accountId: string, logPort: LogP
   );
 }
 
+/** The seams of `classifyMessages`: everything the per-message flow needs beyond the messages. */
+export interface ClassifyMessagesOptions {
+  /** The account the messages belong to; names every log line and keys every store record. */
+  accountId: string;
+  /** The already-fetched messages to resolve; this flow never fetches (the caller owns the fetch). */
+  messages: MessageDTO[];
+  /** The label write seam: the one `MailPort` method this flow needs (AD-8, AD-10). */
+  mailPort: LabelWriteTarget;
+  store: ClassificationRecordStore;
+  taxonomy: Taxonomy;
+  model: ModelPort;
+  config: ModelConfig;
+  logPort: LogPort;
+}
+
+export interface ClassifyMessagesResult {
+  progress: AccountProgress;
+  /**
+   * Whether any `writeLabels` call rejected. The backfill treats it as one message error; the cron
+   * cycle (Story 8.3) reads it as its single 30s-backoff-and-retry-once trigger.
+   */
+  writeFailed: boolean;
+}
+
 /**
- * One account's fetch, then per-message lookup → classify → write → record. The fetch walks the
- * account's folders with the same `DEFAULT_FOLDERS`/`DEFAULT_BATCH_SIZE` defaults the fetch loop
- * uses, and — like that loop — one folder's failure does not stop the account's other folders.
- * Every fetched message is then resolved individually: one already recorded in the store is
- * skipped before any classify call, and a single message's lookup, classification, write or
- * record failure is logged with that message's id and never stops the account's remaining
- * messages.
+ * The per-message classify→write→record unit (Stories 8.1/8.2) over an already-fetched list:
+ * the flow `runAccount` runs after its fetch, exported so the cron cycle reuses it verbatim
+ * against the incremental egress. One already-recorded message is skipped before any classify
+ * call; a single message's lookup, classification, write or record failure is logged with its
+ * message's id and never stops the remaining messages.
+ */
+export async function classifyMessages(options: ClassifyMessagesOptions): Promise<ClassifyMessagesResult> {
+  const { accountId, messages, mailPort, store, taxonomy, model, config, logPort } = options;
+  const progress: AccountProgress = { processed: 0, labeled: 0, skipped: 0, alreadyDone: 0, errors: 0 };
+  let writeFailed = false;
+  const context = { accountId };
+  for (const message of messages) {
+    // An empty identity can never key a record: every such message would collapse onto the one
+    // `(accountId, "")` pair. It is therefore never looked up and never recorded — the message is
+    // simply classified again on the next run, which is the safe half of that trade.
+    const identity = message.internetMessageId;
+    if (identity.length > 0) {
+      let recorded: string[] | undefined;
+      try {
+        recorded = await store.labelsFor(accountId, identity);
+      } catch (error) {
+        // A read failure is this message's error; the account's remaining messages still run.
+        progress.errors += 1;
+        logPort.error(errorLine(error), { accountId, messageId: message.id });
+        continue;
+      }
+      if (recorded !== undefined) {
+        // Already recorded: no classify call, no write — the pre-classify skip the AC names.
+        progress.alreadyDone += 1;
+        continue;
+      }
+    }
+    let labels: LabelSet;
+    try {
+      labels = await classify({ message, taxonomy, model, config, logPort, context });
+    } catch (error) {
+      progress.errors += 1;
+      logPort.error(errorLine(error), { accountId, messageId: message.id });
+      continue;
+    }
+    if (labels.labels.length > 0) {
+      try {
+        await mailPort.writeLabels(accountId, message.id, labels.labels);
+      } catch (error) {
+        progress.errors += 1;
+        writeFailed = true;
+        logPort.error(errorLine(error), { accountId, messageId: message.id });
+        continue;
+      }
+    }
+    // The outcome — labels or the empty set — is recorded only once the write it describes landed.
+    // A failure here records nothing, so the next run retries the message; its add-only write is
+    // safe to repeat.
+    try {
+      if (identity.length > 0) await store.record(accountId, identity, labels.labels);
+    } catch (error) {
+      progress.errors += 1;
+      logPort.error(errorLine(error), { accountId, messageId: message.id });
+      continue;
+    }
+    // An empty set is a valid classification — no write was attempted; both outcomes count as
+    // processed, so the counters partition as processed = labeled + skipped.
+    if (labels.labels.length === 0) progress.skipped += 1;
+    else progress.labeled += 1;
+    progress.processed += 1;
+    if (progress.processed % PROGRESS_INTERVAL === 0) logProgress(progress, accountId, logPort);
+  }
+  return { progress, writeFailed };
+}
+
+/**
+ * One account's fetch, then the per-message lookup → classify → write → record flow
+ * (`classifyMessages`). The fetch walks the account's folders with the same
+ * `DEFAULT_FOLDERS`/`DEFAULT_BATCH_SIZE` defaults the fetch loop uses, and — like that loop — one
+ * folder's failure does not stop the account's other folders. Every fetched message is then
+ * resolved individually: one already recorded in the store is skipped before any classify call,
+ * and a single message's lookup, classification, write or record failure is logged with that
+ * message's id and never stops the account's remaining messages.
  */
 async function runAccount(
   account: BackfillAccount,
@@ -134,63 +229,8 @@ async function runAccount(
   // partial fetch must never be reported as a clean one.
   if (accountFailed) return { progress, fetched: messages.length, failed: true };
 
-  const context = { accountId };
-  for (const message of messages) {
-    // An empty identity can never key a record: every such message would collapse onto the one
-    // `(accountId, "")` pair. It is therefore never looked up and never recorded — the message is
-    // simply classified again on the next run, which is the safe half of that trade.
-    const identity = message.internetMessageId;
-    if (identity.length > 0) {
-      let recorded: string[] | undefined;
-      try {
-        recorded = await store.labelsFor(accountId, identity);
-      } catch (error) {
-        // A read failure is this message's error; the account's remaining messages still run.
-        progress.errors += 1;
-        logPort.error(errorLine(error), { accountId, messageId: message.id });
-        continue;
-      }
-      if (recorded !== undefined) {
-        // Already recorded: no classify call, no write — the pre-classify skip the AC names.
-        progress.alreadyDone += 1;
-        continue;
-      }
-    }
-    let labels: LabelSet;
-    try {
-      labels = await classify({ message, taxonomy, model, config, logPort, context });
-    } catch (error) {
-      progress.errors += 1;
-      logPort.error(errorLine(error), { accountId, messageId: message.id });
-      continue;
-    }
-    if (labels.labels.length > 0) {
-      try {
-        await mailPort.writeLabels(accountId, message.id, labels.labels);
-      } catch (error) {
-        progress.errors += 1;
-        logPort.error(errorLine(error), { accountId, messageId: message.id });
-        continue;
-      }
-    }
-    // The outcome — labels or the empty set — is recorded only once the write it describes landed.
-    // A failure here records nothing, so the next run retries the message; its add-only write is
-    // safe to repeat.
-    try {
-      if (identity.length > 0) await store.record(accountId, identity, labels.labels);
-    } catch (error) {
-      progress.errors += 1;
-      logPort.error(errorLine(error), { accountId, messageId: message.id });
-      continue;
-    }
-    // An empty set is a valid classification — no write was attempted; both outcomes count as
-    // processed, so the counters partition as processed = labeled + skipped.
-    if (labels.labels.length === 0) progress.skipped += 1;
-    else progress.labeled += 1;
-    progress.processed += 1;
-    if (progress.processed % PROGRESS_INTERVAL === 0) logProgress(progress, accountId, logPort);
-  }
-  return { progress, fetched: messages.length, failed: false };
+  const flow = await classifyMessages({ accountId, messages, mailPort, store, taxonomy, model, config, logPort });
+  return { progress: flow.progress, fetched: messages.length, failed: false };
 }
 
 /**

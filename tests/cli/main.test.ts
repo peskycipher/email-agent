@@ -60,7 +60,7 @@ test("defaultHandlers wires the real command functions, not lookalikes", () => {
   expect(defaultHandlers.runCron).toBe(runCron);
 });
 
-/** The exact `Examples:` block this entry point shipped before the refactor; every line is contract. */
+/** The exact `Examples:` block this entry point ships; every line is contract. */
 const EXAMPLES_BLOCK = [
   "Examples:",
   "  $ email-classify --auth m365 --account work",
@@ -76,9 +76,11 @@ const EXAMPLES_BLOCK = [
   "  $ email-classify --cron --source m365 --account all",
   "  $ email-classify --cron --source gmail --account work",
   "  $ email-classify --cron --source gmail --account all",
+  "  $ email-classify --cron --source all --account all",
+  "  $ email-classify --cron --source m365 --account work --interval 5",
 ].join("\n");
 
-test("createProgram pins the program name, every flag description and all thirteen examples", () => {
+test("createProgram pins the program name, every flag description and all sixteen examples", () => {
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   const { handlers } = recordingHandlers();
   const program = createProgram(handlers);
@@ -100,17 +102,18 @@ test("createProgram pins the program name, every flag description and all thirte
     ],
     [
       "--cron",
-      "fetch only what is new per selected account (m365 or gmail incremental; the gmail window is the account's INBOX only; nothing is written back)",
+      "recurring mode: every --interval minutes fetch what is new per selected account, classify it and write the labels back (gmail window: INBOX only; loops until stopped)",
     ],
     [
       "--source",
-      'message source for --backfill/--cron; "m365" or "gmail" (defaults to "m365"; "all" is not a provider)',
+      'message source for --backfill/--cron; "m365" or "gmail", and "all" runs both providers in one --cron loop (defaults to "m365")',
     ],
     ["--since", "--backfill only: fetch messages received on or after this date (default: all time)"],
     [
       "--batch-size",
       "--backfill only: per-account fetch batch, clamped to the provider's maximum (default: 50)",
     ],
+    ["--interval", "--cron only: minutes between cycles, 1-1440 (default: 15)"],
   ]);
 
   program.outputHelp();
@@ -150,13 +153,39 @@ test("--backfill --account all defaults --source to m365 and calls runBackfill (
   expect(calls).toEqual([{ handler: "runBackfill", options: { source: "m365", account: "all" } }]);
 });
 
-test("--cron --source gmail --account work passes both through to runCron (CRON)", async () => {
+test("--cron --source gmail --account work passes both and the interval through to runCron (CRON)", async () => {
   const { handlers, calls } = recordingHandlers();
 
   const code = await runCli(argv("--cron", "--source", "gmail", "--account", "work"), handlers);
 
   expect(code).toBe(0);
-  expect(calls).toEqual([{ handler: "runCron", options: { source: "gmail", account: "work" } }]);
+  expect(calls).toEqual([
+    { handler: "runCron", options: { source: "gmail", account: "work", intervalMinutes: 15 } },
+  ]);
+});
+
+test("--cron --interval 5 reaches runCron as the cycle interval (INTERVAL)", async () => {
+  const { handlers, calls } = recordingHandlers();
+
+  const code = await runCli(argv("--cron", "--source", "all", "--interval", "5"), handlers);
+
+  expect(code).toBe(0);
+  expect(calls).toEqual([
+    { handler: "runCron", options: { source: "all", account: "all", intervalMinutes: 5 } },
+  ]);
+});
+
+test("--cron --source all routes to runCron instead of a routing error (SOURCE_ALL)", async () => {
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const { handlers, calls } = recordingHandlers();
+
+  const code = await runCli(argv("--cron", "--source", "all"), handlers);
+
+  expect(code).toBe(0);
+  expect(calls).toEqual([
+    { handler: "runCron", options: { source: "all", account: "all", intervalMinutes: 15 } },
+  ]);
+  expect(stderr).not.toHaveBeenCalled();
 });
 
 test("a handler's non-zero code becomes the CLI exit code (NON-ZERO handler)", async () => {

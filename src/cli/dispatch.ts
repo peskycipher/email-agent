@@ -10,6 +10,8 @@ export interface CliOptions {
   since?: string;
   /** `--backfill` per-account fetch batch; validated here, clamped by the adapter. */
   batchSize?: string;
+  /** `--cron` minutes between cycles; validated here (1–1440), defaulted to 15. */
+  interval?: string;
 }
 
 /**
@@ -21,7 +23,7 @@ export type CliCommand =
   | { kind: "auth"; provider: string; account: string }
   | { kind: "sync"; account: string }
   | { kind: "backfill"; source: "m365" | "gmail"; account: string; since?: Date; batchSize?: number }
-  | { kind: "cron"; source: "m365" | "gmail"; account: string }
+  | { kind: "cron"; source: "m365" | "gmail" | "all"; account: string; intervalMinutes: number }
   | { kind: "error"; message: string };
 
 const AUTH_FLAGS_REQUIRED =
@@ -82,8 +84,22 @@ function parseBatchSize(raw: string | undefined): number | undefined | null {
 }
 
 /**
- * Both providers have an incremental path (Story 5.4 lifted Gmail's); `all` is not a provider, and
- * the multi-provider loop is Story 8.3's.
+ * `undefined` when unset (the caller applies the 15-minute default); `null` when set but not a
+ * whole number of minutes within the AC's bounds. The bounds are the validator's, not the
+ * adapter's: a sleep of zero or of more than a day is a user typo, not a provider ceiling.
+ */
+function parseInterval(raw: string | undefined): number | undefined | null {
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw.trim())) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 1 && value <= 1440 ? value : null;
+}
+
+/**
+ * The cron loop's recurring mode (Story 8.3): `--cron` always loops, sleeping `--interval` minutes
+ * (default 15, bounds 1–1440) between cycles. Both providers have an incremental path (Story 5.4
+ * lifted Gmail's), and `--source all` composes both in the one loop — the 8.1 decision's deferred
+ * cross-provider case.
  */
 function resolveCron(options: CliOptions): CliCommand {
   if (options.auth !== undefined || options.syncCategories === true || options.backfill === true) {
@@ -95,20 +111,30 @@ function resolveCron(options: CliOptions): CliCommand {
     };
   }
   const source = options.source ?? "m365";
-  if (source === "all") {
-    // Human decision (2026-10-09): a cron cycle names one provider; Story 8.3 owns the `all` loop.
-    return { kind: "error", message: `--source all is not supported — choose "m365" or "gmail".` };
+  if (source !== "m365" && source !== "gmail" && source !== "all") {
+    return {
+      kind: "error",
+      message: `Unknown --source "${source}" — supported sources are "m365", "gmail" and "all".`,
+    };
   }
-  if (source !== "m365" && source !== "gmail") {
-    return { kind: "error", message: `Unknown --source "${source}" — supported sources are "m365" and "gmail".` };
+  const interval = parseInterval(options.interval);
+  if (interval === null) {
+    return {
+      kind: "error",
+      message: `--interval "${options.interval}" is not a whole number of minutes between 1 and 1440 (e.g. --interval 15).`,
+    };
   }
   // `--account` defaults to "all": the cron cycle is meant to run for every enabled account.
-  return { kind: "cron", source, account: options.account ?? "all" };
+  return { kind: "cron", source, account: options.account ?? "all", intervalMinutes: interval ?? 15 };
 }
 
 export function resolveCliCommand(options: CliOptions): CliCommand {
   if (options.backfill !== true && (options.since !== undefined || options.batchSize !== undefined)) {
     return { kind: "error", message: "--since/--batch-size require --backfill." };
+  }
+
+  if (options.cron !== true && options.interval !== undefined) {
+    return { kind: "error", message: "--interval requires --cron." };
   }
 
   if (options.backfill === true) return resolveBackfill(options);
