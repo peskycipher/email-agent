@@ -74,10 +74,10 @@ development_status:
   7-2-gmail-label-write-multi-account: done
   epic-7-retrospective: done
 
-  epic-8: in-progress
+  epic-8: done
   8-1-backfill-mode-execution-multi-account: done
   8-2-idempotency-resume-multi-account: done
-  8-3-cron-mode-loop-multi-account: review
+  8-3-cron-mode-loop-multi-account: done
   epic-8-retrospective: optional
 
   epic-9: backlog
