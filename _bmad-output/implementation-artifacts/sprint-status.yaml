@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-08-2026 10:25
-last_updated: 10-11-2026 02:14
+last_updated: 10-11-2026 02:15
 project: email-agent
 project_key: NOKEY
 tracking_system: file-system
@@ -321,5 +321,19 @@ action_items:
       backfill still requires a prior --sync-categories and a fresh Gmail backfill
       pays full model cost writing nothing"
     owner: "Epic 11 or later story"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"
+  - id: "epic-8-retro-item-32-stamp-a-schema-version-on-the-idempotenc"
+    epic: 8
+    action: "Stamp a schema version on the idempotency store: PRAGMA user_version
+      on create + check on open closes the schema-never-changes bet"
+    owner: "Epic 11"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"
+  - id: "epic-8-retro-item-33-reproduce-the-comma-key-collision-in-a-t"
+    epic: 8
+    action: "Reproduce the comma-key collision in a test: it is reasoned and never
+      reproduced; a reproduction sizes the real risk before the frozen AC is renegotiated"
+    owner: "Loki"
     status: open
     ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"
