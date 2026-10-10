@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-08-2026 10:25
-last_updated: 10-11-2026 10:05
+last_updated: 10-11-2026 10:56
 project: email-agent
 project_key: NOKEY
 tracking_system: file-system
@@ -83,7 +83,7 @@ development_status:
   epic-9: in-progress
   9-1-rate-limit-handling-multi-account: done
   9-2-graceful-shutdown-multi-account: review
-  epic-9-retrospective: optional
+  epic-9-retrospective: done
 
   epic-10: backlog
   10-1-structured-json-logging-pino: backlog
@@ -337,3 +337,47 @@ action_items:
     owner: "Loki"
     status: open
     ref: "_bmad-output/implementation-artifacts/epic-8-retro-2026-10-11.md"
+  - id: "epic-9-retro-item-34-merge-feat-9-2-graceful-shutdown-and-fea"
+    epic: 9
+    action: "Merge feat/9-2-graceful-shutdown and feat/9-1-rate-limit-handling so
+      epic 9 can close, then re-run the retro verdict"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-9-retro-2026-10-11.md"
+  - id: "epic-9-retro-item-35-reconcile-epics-md-622-658-to-as-built-t"
+    epic: 9
+    action: "Reconcile epics.md:622-658 to as-built: the per-part 429 path, the Retry-After
+      floor, --sync-categories inheriting the ladder, and the deadline-after-drain
+      rule"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-9-retro-2026-10-11.md"
+  - id: "epic-9-retro-item-36-confirm-the-abortablesleep-uncancelled-t"
+    epic: 9
+    action: "Confirm the abortableSleep uncancelled-timer behaviour on a real process
+      (Ctrl-C during a backoff) before relying on the 5s bound"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-9-retro-2026-10-11.md"
+  - id: "epic-9-retro-item-37-land-epic-8-item-30-the-orch-to-adapters"
+    epic: 9
+    action: "Land epic-8 item 30 (the orch to adapters AD-10 guard) now that orch
+      has grown again"
+    owner: "Loki"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-9-retro-2026-10-11.md"
+  - id: "epic-9-retro-item-38-process-lesson-weight-a-cancellation-sea"
+    epic: 9
+    action: "Process lesson: weight a cancellation-seam story review against the other
+      mechanism it can interrupt; the epic two worst defects were each invisible to
+      the story that introduced one half"
+    owner: "BMad workflow author"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-9-retro-2026-10-11.md"
+  - id: "epic-9-retro-item-39-process-lesson-a-stalled-implementation"
+    epic: 9
+    action: "Process lesson: a stalled implementation dispatch leaves a partial tree;
+      diff against baseline_commit instead of trusting the return message"
+    owner: "BMad workflow author"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-9-retro-2026-10-11.md"
