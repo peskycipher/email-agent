@@ -104,15 +104,22 @@ Loop 1 (2026-10-11) — layers: blind-hunter, edge-case-hunter, verification-gap
   what makes `Retry-After` readable; the test doubles widen with it.
 - **Sleep threading.** The CLI threads one `sleep` option into the provider adapters (backfill and
   cron both, when injected; the default is a real `setTimeout` sleep). The model's `completeWithRetry`
-  is untouched, and the cron loop's flat 30s retry now handles non-429 failures only (FLAT_KEEP pins
-  the separation).
+  is untouched, and the cron loop's flat 30s retry stays flat — it also retires a batch whose ladder
+  gave up (`RATE_LIMIT_GAVE_UP`), which FLAT_KEEP pins, so the two mechanisms compose rather than
+  collide. **Corrected 2026-10-11** (this line previously said the flat retry now handles non-429
+  failures only — the story's own GIVE_UP test showed a given-up 429 does route through it).
 - **Kill/recovery history.** The implementation subagent was killed at the harness's 15-minute cap
   for the third time — its last message says it was fixing the two lint warnings its new files
   introduced (the other four are pre-existing baseline; oxlint's exit gate is green on warnings).
   The implementation was already green when it died (600 tests / lint 0 / build 0) — the lint fixes
-  never landed and are not gated; the warnings stand as a repo style class.
-- **Verification (2026-10-11).** 40 files / 600 tests green; lint exit 0 (six warnings, all
-  pre-existing classes); build exit 0. Every I/O-matrix row has a test — seven tagged
+  never landed and are not gated; the warnings stand as a repo style class. **Corrected
+  2026-10-11**: the final count is six warnings across `tests/cli/cron.test.ts` and
+  `tests/orch/cron-cycle.test.ts`, all in those two files — the original "two new + four
+  pre-existing" split was the dead subagent's account and was not reconciled against the actual
+  lint output at the time.
+- **Verification (2026-10-11).** 40 files / 600 tests green; lint exit 0 (six warnings, in
+  `tests/cli/cron.test.ts` and `tests/orch/cron-cycle.test.ts`); build exit 0. Every I/O-matrix row
+  has a test — seven tagged
   (`THROTTLED_WITH_HEADER` ×2, `THROTTLED_LADDER` ×3, `HEADER_OVERRIDES_LADDER` ×2, `GIVE_UP` ×2,
   `RATE_LIMIT_BODY` ×1, `FLAT_KEEP` ×2) and `HAPPY_RUN` pinned by the pre-existing suites asserting
   today's behaviour everywhere.

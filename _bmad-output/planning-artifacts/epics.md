@@ -633,11 +633,11 @@ So that **backfill completes without manual intervention across all accounts**.
 
 **Given** an HTTP 429 or `rateLimitExceeded` response for an account
 **When** the fetch or write occurs
-**Then** it extracts the `Retry-After` header or defaults to exponential backoff (2s, 4s, 8s, 16s, 32s, max 60s)
-**And** it retries up to 5 times per batch per account
+**Then** it extracts the `Retry-After` header or defaults to exponential backoff (2s, 4s, 8s, 16s, 32s, max 60s) — as-built 2026-10-11: a header that is not a positive integer (`"0"`, empty, whitespace, a date or junk) also falls back to the ladder, so no wait is ever zero
+**And** it retries up to 5 times per batch per account — as-built: the ladder is call-level on both providers, and on Gmail it also re-issues the whole batch when a part inside a 200 envelope is throttled (Graph names throttling by status only)
 **And** each backoff event is logged with wait time and account name
-**And** one account in backoff does not pause the others
-**And** backfill completes 8000+ messages per account without manual intervention under typical Graph/Gmail limits
+**And** one account in backoff does not pause the others — as-built: accounts run sequentially in plan order, so a wait does delay the accounts after it in the plan; what is guaranteed is isolation — one account's backoff or give-up never aborts, skips, or mis-accounts another
+**And** backfill completes 8000+ messages per account without manual intervention under typical Graph/Gmail limits — as-built: pinned by a proxy (the ladder walked across scripted batches), not metric-validated against a live provider
 
 ### Story 9.2: Graceful Shutdown (Multi-Account)
 
@@ -649,10 +649,10 @@ So that **state is consistent on restart for all accounts**.
 
 **Given** the process receives SIGINT or SIGTERM
 **When** the signal is handled
-**Then** it finishes the current message for the current account
-**And** flushes logs
-**And** saves state (`lastRunTimestamp`, `lastHistoryId`) for every account that was being processed
-**And** exits with code 0 within 5 seconds
+**Then** it finishes the current message for the current account — as-built 2026-10-11: best-effort, since the message may over-run 5s; the 5s budget governs the shutdown step itself and never cuts a write
+**And** flushes logs — as-built: the optional `LogPort.flush()`, awaited on every exit path; the console adapter is a no-op until Epic 10's file logger
+**And** saves state (`lastRunTimestamp`, `lastHistoryId`) for every account that was being processed — as-built: an account that finished before the signal keeps its committed cursor, and an account caught mid-flight commits **none**, so its window re-fetches (nothing is invented for partial work)
+**And** exits with code 0 within 5 seconds — as-built: always 0 for a handled shutdown, one forced by a second signal or the deadline included; the deadline starts only once the in-flight work has drained
 **And** on restart, state files are consistent for all accounts
 
 ---
