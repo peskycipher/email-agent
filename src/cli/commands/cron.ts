@@ -177,8 +177,13 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
     });
   } catch (error) {
     process.stderr.write(`${errorLine(error)}\n`);
-    // The model adapter logs through `logPort`, so a construction fault still drains the buffer.
-    await logPort.flush?.();
+    // The model adapter logs through `logPort`, so a construction fault still drains the buffer;
+    // a logger that will not flush must not fail the command (the guard `finish` applies).
+    try {
+      await logPort.flush?.();
+    } catch {
+      // Ignore: the command's own exit code still stands.
+    }
     return 1;
   }
 
@@ -290,7 +295,11 @@ export async function runCron(options: CronCommandOptions, runtime: CronRuntime 
   if (providers.length === 0) {
     // A rejected selection reports its own hints rather than a busy lock (Story 8.2); nothing has
     // been locked, fetched or classified yet — but the model adapter may already have logged.
-    await logPort.flush?.();
+    try {
+      await logPort.flush?.();
+    } catch {
+      // Ignore: the command's own exit code still stands.
+    }
     return 1;
   }
 

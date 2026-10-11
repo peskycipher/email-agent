@@ -11,7 +11,7 @@ import type { FetchOpts } from "../../src/core/dto/FetchOpts.js";
 import type { MessageDTO } from "../../src/core/dto/MessageDTO.js";
 import type { LogContext, LogPort } from "../../src/core/ports/LogPort.js";
 import type { MessageFetchTarget } from "../../src/orch/fetch.js";
-import { fetchIncremental, type GmailHistoryOutcome, type GmailIncrementalSeam, type IncrementalAccountState } from "../../src/orch/incremental.js";
+import { fetchIncremental, fetchIncrementalAccount, type GmailHistoryOutcome, type GmailIncrementalSeam, type IncrementalAccountState } from "../../src/orch/incremental.js";
 
 interface LogEntry {
   level: string;
@@ -811,4 +811,32 @@ test("a failed gmail list-path walk counts the account and records no state (FET
       context: { accountId: "personal", folder: "INBOX" },
     },
   ]);
+});
+
+test("a provider wait cut short by a signal rethrows instead of logging a per-folder error (SIGINT_IN_BACKOFF)", async () => {
+  const controller = new AbortController();
+  const log = recordingLogPort();
+  const state = memoryState({ work: { lastRunTimestamp: "2026-10-08T08:00:00.000Z" } });
+  const mailPort: MessageFetchTarget = {
+    fetchMessages: async (): Promise<MessageDTO[]> => {
+      // A 9.1 ladder rung that never resolves: the signal lands while the provider is waiting.
+      controller.abort();
+      throw new Error("The run was interrupted by a shutdown signal.");
+    },
+  };
+
+  await expect(
+    fetchIncrementalAccount({
+      account: { accountId: "work" },
+      mailPort,
+      logPort: log.logPort,
+      readAccountState: state.readAccountState,
+      now: () => new Date("2026-10-09T08:00:00.000Z"),
+      signal: controller.signal,
+    }),
+  ).rejects.toThrow(/shutdown signal/);
+
+  // Nothing was logged for the abandoned account — it was never at fault — and no cursor moved.
+  expect(log.entries.filter((entry) => entry.level === "error")).toEqual([]);
+  expect(state.writes).toEqual([]);
 });

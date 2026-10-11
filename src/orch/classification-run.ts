@@ -146,6 +146,8 @@ export async function classifyMessages(options: ClassifyMessagesOptions): Promis
       try {
         recorded = await store.labelsFor(accountId, identity);
       } catch (error) {
+        // An interrupt is not this message's error: stop the loop, log nothing, count nothing.
+        if (options.signal?.aborted) break;
         // A read failure is this message's error; the account's remaining messages still run.
         progress.errors += 1;
         logPort.error(errorLine(error), { accountId, messageId: message.id });
@@ -161,6 +163,7 @@ export async function classifyMessages(options: ClassifyMessagesOptions): Promis
     try {
       labels = await classify({ message, taxonomy, model, config, logPort, context });
     } catch (error) {
+      if (options.signal?.aborted) break;
       progress.errors += 1;
       logPort.error(errorLine(error), { accountId, messageId: message.id });
       continue;
@@ -169,6 +172,8 @@ export async function classifyMessages(options: ClassifyMessagesOptions): Promis
       try {
         await mailPort.writeLabels(accountId, message.id, labels.labels);
       } catch (error) {
+        // An interrupt inside a throttled write is not this message's error (Story 9.2).
+        if (options.signal?.aborted) break;
         progress.errors += 1;
         writeFailed = true;
         logPort.error(errorLine(error), { accountId, messageId: message.id });
@@ -181,6 +186,7 @@ export async function classifyMessages(options: ClassifyMessagesOptions): Promis
     try {
       if (identity.length > 0) await store.record(accountId, identity, labels.labels);
     } catch (error) {
+      if (options.signal?.aborted) break;
       progress.errors += 1;
       logPort.error(errorLine(error), { accountId, messageId: message.id });
       continue;
